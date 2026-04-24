@@ -64,3 +64,10 @@ export interface BrapiRequestOptions {
 export type SearchResponse<T> =
   | { kind: 'sync'; envelope: BrapiEnvelope<T> }
   | { kind: 'async'; searchResultsDbId: string };
+
+/** Raw bytes returned from a binary fetch (e.g. image content). */
+export interface BinaryResponse {
+  bytes: Uint8Array;
+  /** `Content-Type` header as reported by the server; falls back to octet-stream. */
+  contentType: string;
+}

@@ -23,7 +23,13 @@ import {
 import type { FetchWithTimeoutOptions, RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
-import type { BrapiEnvelope, BrapiRequestOptions, ResolvedAuth, SearchResponse } from './types.js';
+import type {
+  BinaryResponse,
+  BrapiEnvelope,
+  BrapiRequestOptions,
+  ResolvedAuth,
+  SearchResponse,
+} from './types.js';
 
 /**
  * The framework's `Context` and `RequestContext` are structurally compatible
@@ -80,6 +86,60 @@ export class BrapiClient {
         signal: ctx.signal,
       },
     );
+  }
+
+  /**
+   * GET /{path} returning raw bytes — used for image content and other binary
+   * payloads. Honors the same retry policy as `get()`. The `accept` option
+   * overrides the default `image/*`.
+   */
+  getBinary(
+    baseUrl: string,
+    path: string,
+    ctx: Context,
+    options: BrapiRequestOptions & { accept?: string } = {},
+  ): Promise<BinaryResponse> {
+    return withRetry(
+      async () => {
+        const headers = this.buildHeaders(options.auth);
+        headers.Accept = options.accept ?? 'image/*';
+        const response = await this.doFetch(
+          this.buildUrl(baseUrl, path, options.params),
+          ctx,
+          { method: 'GET', headers },
+          options.timeoutMs,
+        );
+        const buffer = await response.arrayBuffer();
+        const contentType = response.headers.get('Content-Type') ?? 'application/octet-stream';
+        return { bytes: new Uint8Array(buffer), contentType };
+      },
+      {
+        operation: `brapi.getBinary ${path}`,
+        context: asRequestContext(ctx),
+        maxRetries: this.serverConfig.retryMaxAttempts,
+        baseDelayMs: this.serverConfig.retryBaseDelayMs,
+        signal: ctx.signal,
+      },
+    );
+  }
+
+  /**
+   * Fetch binary bytes from an arbitrary URL — used as a fallback when a
+   * BrAPI server doesn't expose `/images/{id}/imagecontent` but the image's
+   * metadata carries an `imageURL` (CDN, S3, etc.). No auth is attached; the
+   * assumption is that these URLs are publicly reachable. Still honors the
+   * private-IP guard and request timeout.
+   */
+  async fetchBinaryUrl(url: string, ctx: Context, accept = 'image/*'): Promise<BinaryResponse> {
+    const response = await this.doFetch(
+      url,
+      ctx,
+      { method: 'GET', headers: { Accept: accept } },
+      this.serverConfig.requestTimeoutMs,
+    );
+    const buffer = await response.arrayBuffer();
+    const contentType = response.headers.get('Content-Type') ?? 'application/octet-stream';
+    return { bytes: new Uint8Array(buffer), contentType };
   }
 
   /**

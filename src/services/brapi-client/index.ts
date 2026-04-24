@@ -12,6 +12,7 @@ export {
   resetBrapiClient,
 } from './brapi-client.js';
 export type {
+  BinaryResponse,
   BrapiAuth,
   BrapiEnvelope,
   BrapiMetadata,
