@@ -1,7 +1,7 @@
 {
   "name": "brapi-mcp-server",
   "mcpName": "io.github.cyanheads/brapi-mcp-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "BrAPI v2.1 MCP server — studies, germplasm, observations, genotypes, images, and pedigrees.",
   "author": "Casey Hand @cyanheads (https://github.com/cyanheads/brapi-mcp-server#readme)",
   "type": "module",
