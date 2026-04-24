@@ -16,13 +16,17 @@ import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
+  asString,
+  asStringArray,
+  buildRefinementHint,
   computeDistribution,
+  DatasetHandleSchema,
   ExtraFiltersInput,
   LoadLimitInput,
   loadInitialPage,
+  maybeSpill,
   mergeFilters,
   renderDistributions,
-  spillToDataset,
 } from '../shared/find-helpers.js';
 
 const StudyRowSchema = z
@@ -46,15 +50,6 @@ const StudyRowSchema = z
     studyPUI: z.string().optional(),
   })
   .passthrough();
-
-const DatasetHandleSchema = z.object({
-  datasetId: z.string().describe('Use with brapi_manage_dataset to page or export.'),
-  rowCount: z.number().int().nonnegative(),
-  sizeBytes: z.number().int().nonnegative(),
-  columns: z.array(z.string()),
-  createdAt: z.string(),
-  expiresAt: z.string(),
-});
 
 const OutputSchema = z.object({
   alias: z.string(),
@@ -159,36 +154,17 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       ctx,
     );
 
-    let fullRows: Record<string, unknown>[] = firstPage.rows;
-    let datasetMeta: z.infer<typeof DatasetHandleSchema> | undefined;
-
-    if (
-      firstPage.hasMore &&
-      firstPage.totalCount !== undefined &&
-      firstPage.totalCount > loadLimit
-    ) {
-      const spill = await spillToDataset({
-        store: datasetStore,
-        client,
-        connection,
-        path: '/studies',
-        filters,
-        source: 'find_studies',
-        loadLimit,
-        ctx,
-        firstPage: firstPage.rows,
-        totalCount: firstPage.totalCount,
-      });
-      fullRows = spill.fullRows;
-      datasetMeta = {
-        datasetId: spill.dataset.datasetId,
-        rowCount: spill.dataset.rowCount,
-        sizeBytes: spill.dataset.sizeBytes,
-        columns: spill.dataset.columns,
-        createdAt: spill.dataset.createdAt,
-        expiresAt: spill.dataset.expiresAt,
-      };
-    }
+    const { fullRows, dataset: datasetMeta } = await maybeSpill({
+      firstPage,
+      client,
+      connection,
+      path: '/studies',
+      filters,
+      source: 'find_studies',
+      loadLimit,
+      ctx,
+      store: datasetStore,
+    });
 
     const distributions = {
       programName: computeDistribution(fullRows, (r) => asString(r.programName)),
@@ -286,36 +262,3 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
-
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function asStringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return;
-  return value.filter((v): v is string => typeof v === 'string' && v.length > 0);
-}
-
-function buildRefinementHint(
-  totalCount: number,
-  loadLimit: number,
-  distributions: Record<string, Record<string, number>>,
-): string | undefined {
-  if (totalCount <= loadLimit) return;
-  // Pick the highest-cardinality non-empty distribution to suggest as a narrower.
-  let best: { field: string; topValue: string; count: number; cardinality: number } | undefined;
-  for (const [field, counts] of Object.entries(distributions)) {
-    const entries = Object.entries(counts);
-    if (entries.length < 2) continue;
-    const top = entries[0];
-    if (!top) continue;
-    const [topValue, count] = top;
-    if (!best || entries.length > best.cardinality) {
-      best = { field, topValue, count, cardinality: entries.length };
-    }
-  }
-  if (!best) {
-    return `${totalCount} rows exceed loadLimit=${loadLimit}. Add more specific filters or raise loadLimit.`;
-  }
-  return `${totalCount} rows exceed loadLimit=${loadLimit}. The ${best.field} distribution spans ${best.cardinality} values — narrowing to \`${best.topValue}\` would cut to ~${best.count} rows.`;
-}

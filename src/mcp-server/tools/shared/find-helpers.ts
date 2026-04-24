@@ -209,6 +209,87 @@ export interface SpillResult<T> {
 }
 
 /**
+ * Shape of the dataset handle returned inline by `find_*` tools. Drops the
+ * provenance fields (source/baseUrl/query) since those are internal and
+ * available via `brapi_manage_dataset summary`.
+ */
+export const DatasetHandleSchema = z.object({
+  datasetId: z.string().describe('Use with brapi_manage_dataset to page or export.'),
+  rowCount: z.number().int().nonnegative(),
+  sizeBytes: z.number().int().nonnegative(),
+  columns: z.array(z.string()),
+  createdAt: z.string(),
+  expiresAt: z.string(),
+});
+
+export type DatasetHandle = z.infer<typeof DatasetHandleSchema>;
+
+/** Project a `DatasetMetadata` to the in-context handle shape. */
+export function toDatasetHandle(metadata: DatasetMetadata): DatasetHandle {
+  return {
+    datasetId: metadata.datasetId,
+    rowCount: metadata.rowCount,
+    sizeBytes: metadata.sizeBytes,
+    columns: metadata.columns,
+    createdAt: metadata.createdAt,
+    expiresAt: metadata.expiresAt,
+  };
+}
+
+export interface MaybeSpillInput<T> {
+  client: BrapiClient;
+  connection: RegisteredServer;
+  ctx: Context;
+  filters: Record<string, unknown>;
+  firstPage: LoadedRows<T>;
+  loadLimit: number;
+  path: string;
+  source: string;
+  store: DatasetStore;
+}
+
+export interface MaybeSpillResult<T> {
+  dataset?: DatasetHandle;
+  /** Full row set if a spillover happened, otherwise the first-page rows. */
+  fullRows: T[];
+}
+
+/**
+ * Wrap `spillToDataset` with the "only spill when hasMore and totalCount >
+ * loadLimit" guard that every `find_*` tool replicates. When no spillover is
+ * needed, returns the first-page rows untouched. When it is, persists the
+ * union to DatasetStore and returns both the full set and the handle.
+ */
+export async function maybeSpill<T extends Record<string, unknown>>(
+  input: MaybeSpillInput<T>,
+): Promise<MaybeSpillResult<T>> {
+  const { firstPage } = input;
+  if (
+    !firstPage.hasMore ||
+    firstPage.totalCount === undefined ||
+    firstPage.totalCount <= input.loadLimit
+  ) {
+    return { fullRows: firstPage.rows };
+  }
+  const spill = await spillToDataset({
+    store: input.store,
+    client: input.client,
+    connection: input.connection,
+    path: input.path,
+    filters: input.filters,
+    source: input.source,
+    loadLimit: input.loadLimit,
+    ctx: input.ctx,
+    firstPage: firstPage.rows,
+    totalCount: firstPage.totalCount,
+  });
+  return {
+    fullRows: spill.fullRows,
+    dataset: toDatasetHandle(spill.dataset),
+  };
+}
+
+/**
  * Pull every remaining page up to MAX_SPILLOVER_* caps, then persist the
  * union to DatasetStore. Returns the dataset metadata plus the full row set
  * (so callers can compute honest distributions from the whole result).
@@ -267,6 +348,45 @@ export function extractRows<T>(result: BrapiListResult<T> | T[]): T[] {
   if (Array.isArray(result)) return result;
   if (result && Array.isArray(result.data)) return result.data;
   return [];
+}
+
+/** Return the input as a non-empty string, or undefined. Used in distribution accessors. */
+export function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** Return the input as a non-empty string array, or undefined. */
+export function asStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return;
+  return value.filter((v): v is string => typeof v === 'string' && v.length > 0);
+}
+
+/**
+ * Compose a refinement hint for a too-large result set. Picks the highest-
+ * cardinality non-empty distribution to suggest as a narrower. Returns
+ * undefined when the result set fits under `loadLimit`.
+ */
+export function buildRefinementHint(
+  totalCount: number,
+  loadLimit: number,
+  distributions: Record<string, Record<string, number>>,
+): string | undefined {
+  if (totalCount <= loadLimit) return;
+  let best: { field: string; topValue: string; count: number; cardinality: number } | undefined;
+  for (const [field, counts] of Object.entries(distributions)) {
+    const entries = Object.entries(counts);
+    if (entries.length < 2) continue;
+    const top = entries[0];
+    if (!top) continue;
+    const [topValue, count] = top;
+    if (!best || entries.length > best.cardinality) {
+      best = { field, topValue, count, cardinality: entries.length };
+    }
+  }
+  if (!best) {
+    return `${totalCount} rows exceed loadLimit=${loadLimit}. Add more specific filters or raise loadLimit.`;
+  }
+  return `${totalCount} rows exceed loadLimit=${loadLimit}. The ${best.field} distribution spans ${best.cardinality} values — narrowing to \`${best.topValue}\` would cut to ~${best.count} rows.`;
 }
 
 export type { BrapiEnvelope, BrapiPagination, ResolvedAuth, ServerConfig };
