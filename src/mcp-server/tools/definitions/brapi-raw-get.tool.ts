@@ -29,14 +29,17 @@ const PaginationSchema = z
   .optional();
 
 const OutputSchema = z.object({
-  alias: z.string(),
-  url: z.string(),
-  path: z.string(),
+  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  url: z.string().describe('Fully resolved URL that was fetched (baseUrl + path + query string).'),
+  path: z
+    .string()
+    .describe('Normalized path (leading `/` preserved) that was appended to the baseUrl.'),
   metadata: z
     .object({
       pagination: PaginationSchema,
     })
-    .passthrough(),
+    .passthrough()
+    .describe('BrAPI envelope metadata (pagination and any additional upstream fields).'),
   result: z.unknown().describe('Raw BrAPI `result` value — whatever shape the endpoint returns.'),
   suggestion: z
     .string()

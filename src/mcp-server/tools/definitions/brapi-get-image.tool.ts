@@ -53,7 +53,7 @@ const ImageErrorSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  alias: z.string(),
+  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
   images: z.array(ImagePayloadSchema).describe('Successfully loaded images.'),
   errors: z.array(ImageErrorSchema).describe('Images that could not be loaded, one entry per id.'),
 });

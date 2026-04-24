@@ -52,7 +52,7 @@ const StudyRowSchema = z
   .passthrough();
 
 const OutputSchema = z.object({
-  alias: z.string(),
+  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
   results: z.array(StudyRowSchema).describe('Rows returned in-context (up to loadLimit).'),
   returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
   totalCount: z.number().int().nonnegative().describe('Total rows reported by the server.'),

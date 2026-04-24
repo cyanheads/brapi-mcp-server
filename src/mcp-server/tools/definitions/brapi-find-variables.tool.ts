@@ -79,25 +79,40 @@ const CandidateSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  alias: z.string(),
-  results: z.array(VariableRowSchema),
-  returnedCount: z.number().int().nonnegative(),
-  totalCount: z.number().int().nonnegative(),
-  hasMore: z.boolean(),
-  distributions: z.object({
-    ontologyDbId: z.record(z.string(), z.number()),
-    traitClass: z.record(z.string(), z.number()),
-    scaleName: z.record(z.string(), z.number()),
-  }),
+  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  results: z
+    .array(VariableRowSchema)
+    .describe(
+      'Observation variable rows returned in-context (up to loadLimit). Rows matching `text` are promoted to the top when the free-text query produces candidates.',
+    ),
+  returnedCount: z.number().int().nonnegative().describe('Length of `results[]`.'),
+  totalCount: z.number().int().nonnegative().describe('Total rows reported by the server.'),
+  hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
+  distributions: z
+    .object({
+      ontologyDbId: z.record(z.string(), z.number()),
+      traitClass: z.record(z.string(), z.number()),
+      scaleName: z.record(z.string(), z.number()),
+    })
+    .describe('Value frequency per field across the full result set.'),
   ontologyCandidates: z
     .array(CandidateSchema)
     .describe(
       'Top ranked candidates from the free-text query (if any). Empty when `text` was not supplied.',
     ),
-  refinementHint: z.string().optional(),
-  dataset: DatasetHandleSchema.optional(),
-  warnings: z.array(z.string()),
-  appliedFilters: z.record(z.string(), z.unknown()),
+  refinementHint: z
+    .string()
+    .optional()
+    .describe('Suggested next-step query refinement when the result set is large.'),
+  dataset: DatasetHandleSchema.optional().describe(
+    'Dataset handle when the full result set was persisted to DatasetStore.',
+  ),
+  warnings: z
+    .array(z.string())
+    .describe('Advisory messages (filter overrides, partial data, capability gaps, etc.).'),
+  appliedFilters: z
+    .record(z.string(), z.unknown())
+    .describe('The final filter map sent to the server (named + extraFilters).'),
 });
 
 type Output = z.infer<typeof OutputSchema>;

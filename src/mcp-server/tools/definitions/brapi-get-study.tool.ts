@@ -77,11 +77,17 @@ const LocationSchema = z
   .passthrough();
 
 const OutputSchema = z.object({
-  alias: z.string(),
-  study: StudySchema,
-  program: ProgramSchema.optional(),
-  trial: TrialSchema.optional(),
-  location: LocationSchema.optional(),
+  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  study: StudySchema.describe('Canonical study record as returned by `/studies/{id}`.'),
+  program: ProgramSchema.optional().describe(
+    'Resolved program record (when the study has a programDbId and the FK lookup succeeded).',
+  ),
+  trial: TrialSchema.optional().describe(
+    'Resolved trial record (when the study has a trialDbId and the FK lookup succeeded).',
+  ),
+  location: LocationSchema.optional().describe(
+    'Resolved location record (when the study has a locationDbId and the FK lookup succeeded).',
+  ),
   observationCount: z
     .number()
     .int()

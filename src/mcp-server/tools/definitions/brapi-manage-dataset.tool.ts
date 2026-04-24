@@ -53,12 +53,16 @@ const DeleteResultSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  result: z.discriminatedUnion('mode', [
-    ListResultSchema,
-    SummaryResultSchema,
-    LoadResultSchema,
-    DeleteResultSchema,
-  ]),
+  result: z
+    .discriminatedUnion('mode', [
+      ListResultSchema,
+      SummaryResultSchema,
+      LoadResultSchema,
+      DeleteResultSchema,
+    ])
+    .describe(
+      'Mode-specific result — discriminated by `mode`: list (dataset enumeration), summary (metadata+provenance), load (paged rows), delete (drop confirmation).',
+    ),
 });
 
 type Result = z.infer<typeof OutputSchema>['result'];

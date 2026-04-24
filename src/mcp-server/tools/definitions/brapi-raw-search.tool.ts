@@ -28,8 +28,8 @@ const PaginationSchema = z
   .optional();
 
 const OutputSchema = z.object({
-  alias: z.string(),
-  noun: z.string(),
+  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  noun: z.string().describe('The `/search/{noun}` segment the body was posted to.'),
   kind: z
     .enum(['sync', 'async'])
     .describe('Whether the server returned inline results or we polled an async search.'),
@@ -41,7 +41,8 @@ const OutputSchema = z.object({
     .object({
       pagination: PaginationSchema,
     })
-    .passthrough(),
+    .passthrough()
+    .describe('BrAPI envelope metadata (pagination and any additional upstream fields).'),
   result: z.unknown().describe('Raw BrAPI `result` value — whatever shape the endpoint returns.'),
   suggestion: z
     .string()

@@ -75,7 +75,7 @@ export class ServerRegistry {
   }
 
   /** Non-throwing variant of `get`. */
-  async getOptional(ctx: Context, alias: string = DEFAULT_ALIAS): Promise<RegisteredServer | null> {
+  getOptional(ctx: Context, alias: string = DEFAULT_ALIAS): Promise<RegisteredServer | null> {
     return ctx.state.get<RegisteredServer>(connKey(alias));
   }
 
@@ -114,7 +114,7 @@ export class ServerRegistry {
           headerValue: auth.apiKey,
         };
       case 'sgn':
-        return this.exchangeSgnToken(auth, baseUrl, ctx);
+        return await this.exchangeSgnToken(auth, baseUrl, ctx);
       case 'oauth2':
         throw validationError(
           'OAuth2 auth is not yet implemented. Use mode="bearer" with a pre-obtained access token for now.',

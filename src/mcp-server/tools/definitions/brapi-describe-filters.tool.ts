@@ -45,7 +45,7 @@ export const brapiDescribeFilters = tool('brapi_describe_filters', {
       .describe('Every endpoint this tool can describe — useful for discovery.'),
   }),
 
-  async handler(input, _ctx) {
+  handler(input, _ctx) {
     const catalog = getFilterCatalog(input.endpoint);
     if (!catalog) {
       throw notFound(

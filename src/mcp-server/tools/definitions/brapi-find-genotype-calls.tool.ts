@@ -48,11 +48,17 @@ const CallRowSchema = z
   .passthrough();
 
 const OutputSchema = z.object({
-  alias: z.string(),
+  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
   results: z.array(CallRowSchema).describe('Call rows returned in-context (up to loadLimit).'),
-  returnedCount: z.number().int().nonnegative(),
-  totalCount: z.number().int().nonnegative(),
-  hasMore: z.boolean(),
+  returnedCount: z.number().int().nonnegative().describe('Length of `results[]`.'),
+  totalCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe('Total calls collected across all pages (may be capped by `maxCalls`).'),
+  hasMore: z
+    .boolean()
+    .describe('True when the collection was truncated (equivalent to `truncated`).'),
   callFormatting: z
     .object({
       expandHomozygotes: z.boolean().optional(),
@@ -61,16 +67,22 @@ const OutputSchema = z.object({
       sepUnphased: z.string().optional(),
     })
     .describe('Genotype-encoding hints echoed by the server.'),
-  distributions: z.object({
-    callSetName: z.record(z.string(), z.number()),
-    variantName: z.record(z.string(), z.number()),
-    variantSetDbId: z.record(z.string(), z.number()),
-  }),
-  dataset: DatasetHandleSchema.optional(),
+  distributions: z
+    .object({
+      callSetName: z.record(z.string(), z.number()),
+      variantName: z.record(z.string(), z.number()),
+      variantSetDbId: z.record(z.string(), z.number()),
+    })
+    .describe('Value frequency per field across the full collected call set.'),
+  dataset: DatasetHandleSchema.optional().describe(
+    'Dataset handle when the full collected calls exceed loadLimit and were spilled to DatasetStore.',
+  ),
   truncated: z
     .boolean()
     .describe('True when `maxCalls` was reached and more calls exist upstream.'),
-  warnings: z.array(z.string()),
+  warnings: z
+    .array(z.string())
+    .describe('Advisory messages (truncation, capability gaps, partial pulls).'),
   searchBody: z.record(z.string(), z.unknown()).describe('The body sent to /search/calls.'),
 });
 

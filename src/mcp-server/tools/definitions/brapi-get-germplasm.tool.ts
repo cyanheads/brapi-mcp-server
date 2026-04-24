@@ -58,8 +58,10 @@ const AttributeSchema = z
   .passthrough();
 
 const OutputSchema = z.object({
-  alias: z.string(),
-  germplasm: GermplasmSchema,
+  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  germplasm: GermplasmSchema.describe(
+    'Canonical germplasm record as returned by `/germplasm/{id}`.',
+  ),
   parents: z.array(ParentSchema).describe('Direct parents from /germplasm/{id}/pedigree.'),
   attributes: z
     .array(AttributeSchema)
@@ -77,7 +79,9 @@ const OutputSchema = z.object({
     .nonnegative()
     .optional()
     .describe('Count of direct descendants from /germplasm/{id}/progeny.'),
-  warnings: z.array(z.string()),
+  warnings: z
+    .array(z.string())
+    .describe('Advisory messages — failed sub-endpoint lookups, missing counts.'),
 });
 
 type Output = z.infer<typeof OutputSchema>;
@@ -87,7 +91,7 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     'Fetch a single germplasm by DbId with attributes and direct parents. Response companions report study count, direct parent count, and direct descendant count — signals for pedigree depth and observation coverage.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
-    germplasmDbId: z.string().min(1),
+    germplasmDbId: z.string().min(1).describe('Germplasm identifier.'),
     alias: AliasInput,
   }),
   output: OutputSchema,

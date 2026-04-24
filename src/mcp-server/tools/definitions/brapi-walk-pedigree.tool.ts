@@ -43,15 +43,43 @@ const EdgeSchema = z.object({
 });
 
 const OutputSchema = z.object({
-  alias: z.string(),
-  direction: z.enum(['ancestors', 'descendants', 'both']),
-  maxDepth: z.number().int().positive(),
-  nodes: z.array(NodeSchema),
-  edges: z.array(EdgeSchema),
-  depthReached: z.number().int().nonnegative(),
-  rootCount: z.number().int().nonnegative(),
-  leafCount: z.number().int().nonnegative(),
-  cycleCount: z.number().int().nonnegative(),
+  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  direction: z
+    .enum(['ancestors', 'descendants', 'both'])
+    .describe('The direction the walk expanded (echoed from the input).'),
+  maxDepth: z
+    .number()
+    .int()
+    .positive()
+    .describe('The maximum depth the walk was allowed to reach (echoed from the input).'),
+  nodes: z
+    .array(NodeSchema)
+    .describe(
+      'Deduplicated node list — every germplasm reached by the walk, sorted by depth then DbId.',
+    ),
+  edges: z
+    .array(EdgeSchema)
+    .describe(
+      'Deduplicated edge list. `relationship: "parent"` means `from` is a parent of `to`; `relationship: "child"` means `from` is a descendant of `to`.',
+    ),
+  depthReached: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe(
+      'Deepest BFS level that produced at least one new edge (0 if only roots were walked).',
+    ),
+  rootCount: z.number().int().nonnegative().describe('Number of starting germplasm roots.'),
+  leafCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe('Nodes that have no outgoing edges in the walked direction — terminal in the DAG.'),
+  cycleCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe('Number of times the walk revisited an already-registered node (cycles broken).'),
   deadEndCount: z
     .number()
     .int()
@@ -60,7 +88,9 @@ const OutputSchema = z.object({
   truncated: z
     .boolean()
     .describe(`True when the walk hit the ${MAX_NODES}-node safety cap before exhausting depth.`),
-  warnings: z.array(z.string()),
+  warnings: z
+    .array(z.string())
+    .describe('Advisory messages (capability gaps, per-node expansion failures).'),
 });
 
 type Output = z.infer<typeof OutputSchema>;

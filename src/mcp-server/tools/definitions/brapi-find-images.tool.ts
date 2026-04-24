@@ -50,21 +50,34 @@ const ImageRowSchema = z
   .passthrough();
 
 const OutputSchema = z.object({
-  alias: z.string(),
-  results: z.array(ImageRowSchema),
-  returnedCount: z.number().int().nonnegative(),
-  totalCount: z.number().int().nonnegative(),
-  hasMore: z.boolean(),
-  distributions: z.object({
-    mimeType: z.record(z.string(), z.number()),
-    studyName: z.record(z.string(), z.number()),
-    observationUnitName: z.record(z.string(), z.number()),
-    descriptiveOntologyTerms: z.record(z.string(), z.number()),
-  }),
-  refinementHint: z.string().optional(),
-  dataset: DatasetHandleSchema.optional(),
-  warnings: z.array(z.string()),
-  appliedFilters: z.record(z.string(), z.unknown()),
+  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  results: z
+    .array(ImageRowSchema)
+    .describe('Image metadata rows returned in-context (up to loadLimit).'),
+  returnedCount: z.number().int().nonnegative().describe('Length of `results[]`.'),
+  totalCount: z.number().int().nonnegative().describe('Total rows reported by the server.'),
+  hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
+  distributions: z
+    .object({
+      mimeType: z.record(z.string(), z.number()),
+      studyName: z.record(z.string(), z.number()),
+      observationUnitName: z.record(z.string(), z.number()),
+      descriptiveOntologyTerms: z.record(z.string(), z.number()),
+    })
+    .describe('Value frequency per field across the full result set.'),
+  refinementHint: z
+    .string()
+    .optional()
+    .describe('Suggested next-step query refinement when the result set is large.'),
+  dataset: DatasetHandleSchema.optional().describe(
+    'Dataset handle when the full result set was persisted to DatasetStore.',
+  ),
+  warnings: z
+    .array(z.string())
+    .describe('Advisory messages (filter overrides, partial data, capability gaps, etc.).'),
+  appliedFilters: z
+    .record(z.string(), z.unknown())
+    .describe('The final filter map sent to the server (named + extraFilters).'),
 });
 
 type Output = z.infer<typeof OutputSchema>;
