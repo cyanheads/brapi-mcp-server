@@ -10,12 +10,19 @@
 import { createApp } from '@cyanheads/mcp-ts-core';
 import { getServerConfig } from '@/config/server-config.js';
 import { initBrapiClient } from '@/services/brapi-client/index.js';
+import { initCapabilityRegistry } from '@/services/capability-registry/index.js';
+import { initDatasetStore } from '@/services/dataset-store/index.js';
+import { initReferenceDataCache } from '@/services/reference-data-cache/index.js';
 
 await createApp({
   tools: [],
   resources: [],
   prompts: [],
   setup() {
-    initBrapiClient(getServerConfig());
+    const serverConfig = getServerConfig();
+    initBrapiClient(serverConfig);
+    initCapabilityRegistry(serverConfig);
+    initReferenceDataCache(serverConfig);
+    initDatasetStore(serverConfig);
   },
 });
