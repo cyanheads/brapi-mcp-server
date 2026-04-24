@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-04-23
+
+Read-side surface expansion — 11 new tools (variables, observations, images, genotype calls, locations, variants, pedigree walks, dataset lifecycle, raw passthrough) plus OntologyResolver and binary image fetch.
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-04-23
 
 Docs and metadata polish for publish — full README, LICENSE, project tree; BrAPI-specific CLAUDE.md; richer package.json keywords/engines, server.json env vars, and Dockerfile OCI labels.

@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.1.2
+**Version:** 0.2.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -196,30 +196,43 @@ Plain `Error` is fine for most cases. Use factories when the error code matters.
 
 ```text
 src/
-  index.ts                                # createApp() entry point — registers 7 tools, inits 6 services
+  index.ts                                # createApp() entry point — registers 18 tools, inits 7 services
   config/
     server-config.ts                      # BRAPI_* env vars (Zod schema, lazy-parsed)
   services/
-    brapi-client/                         # HTTP client — retry, concurrency cap, async-search poll, private-IP guard
+    brapi-client/                         # HTTP client — retry, concurrency cap, async-search poll, private-IP guard, binary fetch
     brapi-filters/                        # Static v2.1 filter catalog
     capability-registry/                  # Per-connection /serverinfo cache + call guard
     dataset-store/                        # Tenant-scoped handles for spilled find_* results
+    ontology-resolver/                    # Free-text → ontology-term matcher for variables
     reference-data-cache/                 # Programs / trials / locations / crops lookup cache
     server-registry/                      # Alias → live connection map with auth resolution
   mcp-server/
     tools/
       definitions/
-        brapi-connect.tool.ts
-        brapi-server-info.tool.ts
-        brapi-describe-filters.tool.ts
-        brapi-find-studies.tool.ts
-        brapi-get-study.tool.ts
-        brapi-find-germplasm.tool.ts
-        brapi-get-germplasm.tool.ts
+        brapi-connect.tool.ts             # Session bootstrap — auth, capability load, orientation envelope
+        brapi-server-info.tool.ts         # Orientation envelope on demand
+        brapi-describe-filters.tool.ts    # Static BrAPI v2.1 filter catalog lookup
+        brapi-find-studies.tool.ts        # find_* — studies, distributions + spillover
+        brapi-get-study.tool.ts           # get_* — study + FK resolution + companion counts
+        brapi-find-germplasm.tool.ts      # find_* — germplasm
+        brapi-get-germplasm.tool.ts       # get_* — germplasm + attributes + parents + companion counts
+        brapi-walk-pedigree.tool.ts       # BFS DAG walk (ancestors / descendants / both) with cycle detection
+        brapi-find-variables.tool.ts      # find_* — observation variables, free-text ranking via OntologyResolver
+        brapi-find-observations.tool.ts   # find_* — observation records
+        brapi-find-images.tool.ts         # find_* — image metadata
+        brapi-get-image.tool.ts           # Fetch image bytes inline (imagecontent → imageURL fallback)
+        brapi-find-locations.tool.ts      # find_* — locations, optional client-side bbox filter
+        brapi-find-variants.tool.ts       # find_* — variants, 1-based inclusive/exclusive genomic region
+        brapi-find-genotype-calls.tool.ts # Async-search genotype calls with maxCalls cap + spillover
+        brapi-manage-dataset.tool.ts      # Dataset lifecycle — list / summary / load / delete
+        brapi-raw-get.tool.ts             # Last-resort GET passthrough with routing nudge
+        brapi-raw-search.tool.ts          # Last-resort POST /search passthrough with async polling
       shared/
         connect-auth-schema.ts            # Tagged-union auth input
         orientation-envelope.ts           # Shared envelope builder + formatter
-        find-helpers.ts                   # Alias / loadLimit / extraFilters fragments, mergeFilters, spillToDataset
+        find-helpers.ts                   # Alias / loadLimit / extraFilters fragments, mergeFilters, maybeSpill, DatasetHandleSchema
+        raw-routing-hints.ts              # Routing nudges emitted by raw_get / raw_search when a curated tool exists
 ```
 
 No resources or prompts yet — `find_*` tools expose the dataset surface via handles.

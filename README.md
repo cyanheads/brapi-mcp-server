@@ -1,13 +1,13 @@
 <div align="center">
   <h1>brapi-mcp-server</h1>
   <p><b>MCP server for BrAPI v2.1 plant-breeding databases — connect, orient against the capability profile, and drive study / germplasm workflows across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server.</b>
-  <div>7 Tools • 0 Resources • 0 Prompts</div>
+  <div>18 Tools • 0 Resources • 0 Prompts</div>
   </p>
 </div>
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
@@ -17,17 +17,45 @@
 
 ## Tools
 
-Seven tools grouped by shape — connection tools bootstrap a session and discover what the server supports, `find_*` tools return a summarized page plus distributions and spill overflow rows into the DatasetStore, and `get_*` tools fetch a single record with companion counts so the agent knows where to drill next.
+Eighteen tools grouped by shape — connection tools bootstrap a session, `find_*` tools return a summarized page plus distributions and spill overflow rows into the DatasetStore, `get_*` tools fetch a single record with companion counts, plus pedigree walking, dataset lifecycle, and raw passthrough escape hatches.
+
+### Orient
 
 | Tool Name | Description |
 |:----------|:------------|
 | `brapi_connect` | Connect to a BrAPI v2 server, authenticate, cache the capability profile, and return the full orientation envelope inline. |
 | `brapi_server_info` | Return the full orientation envelope for a registered BrAPI connection — identity, capabilities, content counts, notes. |
 | `brapi_describe_filters` | List valid filter names for a BrAPI endpoint — powers dynamic discovery for `extraFilters` on any `find_*` tool. |
+
+### Retrieve
+
+| Tool Name | Description |
+|:----------|:------------|
 | `brapi_find_studies` | Locate studies matching crop / trial type / season / location / program filters, with per-field distributions and dataset spillover. |
 | `brapi_get_study` | Fetch a single study with program / trial / location FKs resolved and companion counts for observations, units, and variables. |
 | `brapi_find_germplasm` | Find germplasm by name, synonym, accession, crop, or free-text query, with distributions and dataset spillover. |
 | `brapi_get_germplasm` | Fetch a single germplasm with attributes, direct parents, and companion counts (studies, parents, direct descendants). |
+| `brapi_walk_pedigree` | Walk germplasm ancestry or descendancy as a deduplicated DAG (BFS) with cycle detection, depth limits, and traversal stats. |
+| `brapi_find_variables` | Find observation variables (traits) by name, class, ontology, or free-text; ranked client-side via `OntologyResolver` when `text` is supplied. |
+| `brapi_find_observations` | Pull observation records filtered by study, germplasm, variable, season, or observation unit. Dataset spillover. |
+| `brapi_find_images` | Filter images by observation unit / study / ontology term / MIME type — metadata only, bytes via `brapi_get_image`. |
+| `brapi_get_image` | Fetch image bytes for up to 5 imageDbIds inline as `type: image` content blocks. Prefers `/images/{id}/imagecontent`, falls back to `imageURL`. |
+| `brapi_find_locations` | Find research stations / field sites by country / type / abbreviation, with optional client-side bounding-box filter. |
+| `brapi_find_variants` | Find variant records by variant set, reference, or genomic region (1-based inclusive / exclusive). |
+| `brapi_find_genotype_calls` | Pull genotype calls across a germplasm × variant set via async-search polling. Default 100k cap (hard cap 500k); rows beyond `loadLimit` spill to DatasetStore. |
+
+### Orchestrate
+
+| Tool Name | Description |
+|:----------|:------------|
+| `brapi_manage_dataset` | Lifecycle for `find_*` spillover datasets — list, summary, load (paged rows with column projection), delete. |
+
+### Escape hatches
+
+| Tool Name | Description |
+|:----------|:------------|
+| `brapi_raw_get` | Passthrough to any BrAPI `GET /{path}` the curated tools don't cover. Emits a routing nudge when a goal-shaped tool exists for the target. |
+| `brapi_raw_search` | Passthrough to any BrAPI `POST /search/{noun}` with async polling handled transparently. Same routing nudge pattern. |
 
 ---
 
@@ -101,6 +129,117 @@ Fetch a single germplasm with attributes, direct parents, and three companion co
 
 ---
 
+### `brapi_walk_pedigree`
+
+Walk germplasm ancestry or descendancy as a deduplicated DAG. BrAPI only exposes one generation per call, so this tool BFS-expands from each root, breaks cycles, and enforces a 1000-node safety cap.
+
+- `direction`: `ancestors` (parents), `descendants` (progeny), or `both`
+- Up to 20 roots per call, depth capped at 10 (default 3)
+- Returns nodes + edges plus traversal stats (`depthReached`, `leafCount`, `cycleCount`, `deadEndCount`, `truncated`)
+- Warnings when the server doesn't expose `/germplasm/{id}/pedigree` or `/progeny`
+
+---
+
+### `brapi_find_variables`
+
+Find observation variables (traits) by name, trait class, ontology term, or free-text. When `text` is supplied, results are re-ranked client-side via `OntologyResolver`; otherwise falls back to upstream order.
+
+- Distributions across `ontologyDbId`, `traitClass`, `scaleName`
+- Ontology candidates (top 10) surfaced separately when `text` is supplied, with source attribution (`puiMatch` / `nameMatch` / `synonymMatch` / `traitClassMatch`)
+- Dataset spillover and `extraFilters` passthrough identical to other `find_*` tools
+
+---
+
+### `brapi_find_observations`
+
+Pull observation records filtered by study, germplasm, variable, season, observation unit, observation level, or timestamp range.
+
+- Distributions across `observationVariableName`, `studyName`, `germplasmName`, `observationLevel`, `season`
+- Dataset spillover when the upstream total exceeds `loadLimit` — handle passes to `brapi_manage_dataset`
+
+---
+
+### `brapi_find_images`
+
+Filter images by observation unit, observation, study, descriptive ontology term, file name, or MIME type. Returns metadata only — use `brapi_get_image` for bytes.
+
+- Distributions across `mimeType`, `studyName`, `observationUnitName`, `descriptiveOntologyTerms`
+- Dataset spillover for large result sets
+
+---
+
+### `brapi_get_image`
+
+Fetch image bytes for up to 5 `imageDbIds` and return them inline as `type: image` content blocks. Hard cap of 20 MB per image.
+
+- Prefers BrAPI `/images/{id}/imagecontent`; falls back to the `imageURL` field when the server doesn't implement imagecontent
+- Relative `imageURL`s resolve against the registered base URL; absolute URLs pass through (no auth attached to the fallback)
+- Per-image error reporting — partial success is surfaced cleanly
+
+---
+
+### `brapi_find_locations`
+
+Find research stations / field sites by country, abbreviation, type, or location ID.
+
+- Optional client-side bounding-box filter (`bbox: {minLat, maxLat, minLon, maxLon}`) applied after the upstream fetch (BrAPI has no spec-level bbox filter)
+- Distributions across `countryCode` and `locationType`
+- All four corners required to activate `bbox`; mismatched values produce a warning and the filter is skipped
+
+---
+
+### `brapi_find_variants`
+
+Find variant records by variant set, reference sequence, or genomic region.
+
+- Genomic region uses 1-based inclusive `start` / exclusive `end` per the BrAPI spec
+- Distributions across `variantType`, `referenceName`, `variantSetDbId`
+- Warns when `start >= end`
+
+---
+
+### `brapi_find_genotype_calls`
+
+Pull genotype calls for a germplasm × variant set. Handles BrAPI's async-search pattern (`POST /search/calls` → `GET /search/calls/{id}`) transparently.
+
+- Requires at least one filter (`variantSetDbId`, `germplasmDbIds`, `callSetDbIds`, `variantDbIds`) — unfiltered pulls are rejected
+- Default cap of 100,000 calls per call (hard cap 500,000); `truncated: true` flags when the cap was hit
+- Rows beyond `loadLimit` (default 200) spill to `DatasetStore` for export via `brapi_manage_dataset`
+- Echoes server-reported genotype-encoding (`expandHomozygotes`, `unknownString`, `sepPhased`, `sepUnphased`) so the agent can interpret the values
+
+---
+
+### `brapi_manage_dataset`
+
+Consolidated lifecycle tool for datasets produced by `find_*` spillovers.
+
+- `mode: list` — enumerate datasets with source / query / rowCount / expiration
+- `mode: summary` — per-dataset metadata and provenance
+- `mode: load` — paged rows (up to 1000 per page) with optional column projection
+- `mode: delete` — drop metadata and payload
+- Export (CSV / Parquet) is deferred until the write surface lands
+
+---
+
+### `brapi_raw_get`
+
+Last-resort passthrough to any BrAPI `GET /{path}` the curated tools don't cover (e.g. `/samples`, `/methods`, `/scales`, `/crosses`). Returns the raw upstream envelope plus pagination metadata.
+
+- Rejects absolute URLs in `path` — cross-origin smuggling via the registered base URL is blocked
+- Emits a `suggestion` field when a goal-shaped tool covers the target endpoint (e.g. calling `raw_get /studies` nudges you to `brapi_find_studies`)
+- Does not enrich results, resolve foreign keys, or compute distributions — prefer curated tools when they apply
+
+---
+
+### `brapi_raw_search`
+
+Last-resort passthrough to any BrAPI `POST /search/{noun}`. Handles the 202 / async-poll pattern transparently.
+
+- Same routing-nudge behavior as `brapi_raw_get`
+- Returns `kind: sync | async` and the `searchResultsDbId` when the server took the async path
+
+---
+
 ## Features
 
 Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
@@ -116,9 +255,14 @@ BrAPI-specific:
 
 - **Multi-server session** — `ServerRegistry` maps aliases to live BrAPI connections, so one agent session can span Breedbase, T3, and Sweetpotatobase in parallel
 - **Capability-aware calls** — `CapabilityRegistry` caches the `/serverinfo` profile per connection and guards every tool call against unsupported endpoints before they hit the wire
-- **Dataset spillover** — `find_*` tools cap in-context rows at `loadLimit` and transparently persist larger unions (up to 50k rows / 50 pages) as handles in `DatasetStore`
+- **Dataset spillover** — `find_*` tools cap in-context rows at `loadLimit` and transparently persist larger unions (up to 50k rows / 50 pages) as handles in `DatasetStore`; `brapi_manage_dataset` pages / projects / deletes them
+- **Async-search transparency** — `brapi_find_genotype_calls` and `brapi_raw_search` handle the `POST /search/{noun}` → `GET /search/{noun}/{id}` 202-retry pattern without the agent needing to know
+- **Pedigree DAG walks** — `brapi_walk_pedigree` BFS-traverses ancestry or descendancy with cycle detection, depth limits, and traversal stats — BrAPI only exposes one generation per call
+- **Image content** — `brapi_get_image` fetches image bytes inline as MCP `type: image` blocks, preferring `/images/{id}/imagecontent` and falling back to the metadata `imageURL` field
+- **Free-text variable ranking** — `OntologyResolver` scores variable records against a query (PUI / name / synonym / trait-class) so `find_variables text:"..."` returns ranked candidates even when the server has no `/ontologies` endpoint
 - **Dynamic filter discovery** — static v2.1 filter catalog plus an `extraFilters` passthrough lets agents drive any server-specific filter without schema churn
 - **Auth variants in one schema** — tagged-union connection auth covers none / bearer / api-key / SGN session-token exchange in a single input shape
+- **Last-resort escape hatches** — `brapi_raw_get` and `brapi_raw_search` pass through to any endpoint with routing nudges pointing at the curated tool when one exists
 
 ---
 
@@ -293,13 +437,14 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 
 | Directory | Purpose |
 |:----------|:--------|
-| `src/index.ts` | `createApp()` entry point — registers tools and inits the six services. |
+| `src/index.ts` | `createApp()` entry point — registers the 18 tools and inits the seven services. |
 | `src/config` | Server-specific environment variable parsing with Zod. |
-| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`) and shared helpers (`orientation-envelope`, `find-helpers`, `connect-auth-schema`). |
-| `src/services/brapi-client` | HTTP client with retry, concurrency capping, async-search polling, and private-IP guard. |
+| `src/mcp-server/tools` | Tool definitions (`*.tool.ts`) and shared helpers (`orientation-envelope`, `find-helpers`, `connect-auth-schema`, `raw-routing-hints`). |
+| `src/services/brapi-client` | HTTP client with retry, concurrency capping, async-search polling, private-IP guard, and binary fetch. |
 | `src/services/brapi-filters` | Static BrAPI v2.1 filter catalog. |
 | `src/services/capability-registry` | Per-connection capability profile cache. |
 | `src/services/dataset-store` | Tenant-scoped dataset handles for spilled `find_*` results. |
+| `src/services/ontology-resolver` | Free-text → ontology-candidate matcher powering `brapi_find_variables` ranking. |
 | `src/services/reference-data-cache` | Cache for programs, trials, locations, crops. |
 | `src/services/server-registry` | Alias → live BrAPI connection map with auth resolution. |
 | `tests/` | Unit and integration tests mirroring `src/`. |
