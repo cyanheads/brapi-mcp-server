@@ -1,7 +1,9 @@
 {
   "name": "brapi-mcp-server",
+  "mcpName": "io.github.cyanheads/brapi-mcp-server",
   "version": "0.1.1",
-  "description": "MCP server exposing BrAPI v2.1 (plant breeding interop standard) as a goal-oriented workbench for LLMs — find/get studies, germplasm, observations, images, and genotypes across Breedbase, T3, Gigwa, and the BrAPI test server.",
+  "description": "MCP server for BrAPI v2.1 plant-breeding databases — connect, orient against the capability profile, and drive study / germplasm workflows across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server.",
+  "author": "Casey Hand @cyanheads (https://github.com/cyanheads/brapi-mcp-server#readme)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -33,7 +35,19 @@
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
   },
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "brapi",
+    "plant-breeding",
+    "bioinformatics",
+    "agriculture",
+    "phenotyping",
+    "genotyping",
+    "llm-tools",
+    "typescript"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cyanheads/brapi-mcp-server.git"
@@ -44,8 +58,10 @@
   },
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.0.0",
+    "bun": ">=1.2.0"
   },
+  "packageManager": "bun@1.3.11",
   "publishConfig": {
     "access": "public"
   },

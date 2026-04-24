@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/brapi-mcp-server",
-  "description": "BrAPI v2.1 plant-breeding workbench for LLMs — studies, germplasm, observations, images, genotypes.",
+  "description": "MCP server for BrAPI v2.1 plant-breeding databases — connect, orient against the capability profile, and drive study / germplasm workflows across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server.",
   "repository": {
     "url": "https://github.com/cyanheads/brapi-mcp-server",
     "source": "github"
@@ -15,16 +15,16 @@
       "runtimeHint": "node",
       "version": "0.1.1",
       "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
+        { "type": "positional", "value": "run" },
+        { "type": "positional", "value": "start:stdio" }
       ],
       "environmentVariables": [
+        {
+          "name": "BRAPI_DEFAULT_BASE_URL",
+          "description": "Default BrAPI v2 base URL. Optional — connections can be opened at runtime via the brapi_connect tool instead.",
+          "format": "string",
+          "isRequired": false
+        },
         {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
@@ -44,16 +44,16 @@
       "runtimeHint": "node",
       "version": "0.1.1",
       "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
+        { "type": "positional", "value": "run" },
+        { "type": "positional", "value": "start:http" }
       ],
       "environmentVariables": [
+        {
+          "name": "BRAPI_DEFAULT_BASE_URL",
+          "description": "Default BrAPI v2 base URL. Optional — connections can be opened at runtime via the brapi_connect tool instead.",
+          "format": "string",
+          "isRequired": false
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",

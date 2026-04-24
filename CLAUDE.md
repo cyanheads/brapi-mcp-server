@@ -39,74 +39,82 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ## Patterns
 
-### Tool
+### Tool — connection bootstrap
+
+`brapi_connect` is the session handshake. It registers the BrAPI server under a named alias, forces a capability refresh, and inlines the full orientation envelope so one call orients the agent. The same shape is available on-demand via `brapi_server_info`.
 
 ```ts
+// src/mcp-server/tools/definitions/brapi-connect.tool.ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
+import { getServerRegistry } from '@/services/server-registry/index.js';
+import { ConnectAuthSchema } from '../shared/connect-auth-schema.js';
+import {
+  buildOrientationEnvelope,
+  formatOrientationEnvelope,
+  OrientationEnvelopeSchema,
+} from '../shared/orientation-envelope.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const brapiConnect = tool('brapi_connect', {
+  description:
+    'Connect to a BrAPI v2 server, authenticate, cache the capability profile, and return the full orientation envelope inline. Must be called before any other BrAPI tool. Supports multiple concurrent connections via named aliases.',
+  annotations: { openWorldHint: true, readOnlyHint: false, idempotentHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    baseUrl: z.string().url().describe('BrAPI v2 base URL including any path prefix.'),
+    auth: ConnectAuthSchema.default({ mode: 'none' }),
+    alias: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]+$/)
+      .default('default')
+      .describe('Alias for this connection.'),
   }),
-  output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
-  }),
-  auth: ['inventory:read'],
-
+  output: OrientationEnvelopeSchema,
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const registry = getServerRegistry();
+    const capabilities = getCapabilityRegistry();
+    const client = getBrapiClient();
+    const connection = await registry.register(ctx, input);
+    await capabilities.invalidate(connection.baseUrl, ctx);
+    return buildOrientationEnvelope(ctx, connection, { registry: capabilities, client });
   },
-
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  format: (result) => [{ type: 'text', text: formatOrientationEnvelope(result) }],
 });
 ```
 
-### Resource
+### Tool — find with dataset spillover
+
+`find_*` tools share a pattern: pull one page capped at `loadLimit`, compute distributions across the returned rows, and if the upstream total exceeds `loadLimit` spill the full union into `DatasetStore` and return a handle.
 
 ```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw new Error(`Item ${params.itemId} not found`);
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
+// src/mcp-server/tools/definitions/brapi-find-germplasm.tool.ts (abbreviated)
+export const brapiFindGermplasm = tool('brapi_find_germplasm', {
+  description:
+    'Find germplasm by name, synonym, accession, PUI, crop, or free-text. Returns a dataset handle when the upstream total exceeds loadLimit.',
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  input: z.object({
+    alias: AliasInput,
+    names: z.array(z.string()).optional(),
+    crops: z.array(z.string()).optional(),
+    text: z.string().optional(),
+    loadLimit: LoadLimitInput,
+    extraFilters: ExtraFiltersInput,
   }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
+  output: OutputSchema,
+  async handler(input, ctx) {
+    const connection = await getServerRegistry().get(ctx, input.alias ?? DEFAULT_ALIAS);
+    await getCapabilityRegistry().ensure(connection.baseUrl, { service: 'germplasm', method: 'GET' }, ctx);
+
+    const filters = mergeFilters(/* named + extraFilters */, warnings);
+    const firstPage = await loadInitialPage(client, connection, '/germplasm', filters, loadLimit, ctx);
+
+    if (firstPage.hasMore && firstPage.totalCount > loadLimit) {
+      const spill = await spillToDataset({ /* persists union into DatasetStore */ });
+      // ... attach dataset handle to result
+    }
+    return { /* results + distributions + refinementHint + dataset? */ };
+  },
+  format: (result) => [{ type: 'text', text: renderFindResult(result) }],
 });
 ```
 
@@ -118,38 +126,46 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
+  defaultBaseUrl: z.string().url().optional(),
+  loadLimit: z.coerce.number().int().positive().default(200),
+  maxConcurrentRequests: z.coerce.number().int().positive().default(4),
+  retryMaxAttempts: z.coerce.number().int().min(0).default(3),
+  datasetTtlSeconds: z.coerce.number().int().positive().default(86_400),
+  referenceCacheTtlSeconds: z.coerce.number().int().positive().default(3_600),
+  // …see src/config/server-config.ts for the full schema
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
+    defaultBaseUrl: 'BRAPI_DEFAULT_BASE_URL',
+    loadLimit: 'BRAPI_LOAD_LIMIT',
+    maxConcurrentRequests: 'BRAPI_MAX_CONCURRENT_REQUESTS',
+    retryMaxAttempts: 'BRAPI_RETRY_MAX_ATTEMPTS',
+    datasetTtlSeconds: 'BRAPI_DATASET_TTL_SECONDS',
+    referenceCacheTtlSeconds: 'BRAPI_REFERENCE_CACHE_TTL_SECONDS',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so validation errors name the actual variable (`MY_API_KEY`) rather than the internal path (`apiKey`). It throws a `ConfigurationError` the framework catches and prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so validation errors name the actual variable (`BRAPI_LOAD_LIMIT`) rather than the internal path (`loadLimit`). It throws a `ConfigurationError` the framework catches and prints as a clean startup banner.
 
 ---
 
 ## Context
 
-Handlers receive a unified `ctx` object. Key properties:
+Handlers receive a unified `ctx` object. Currently used surface:
 
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.elicit` | Ask user for structured input. **Check for presence first:** `if (ctx.elicit) { ... }` |
-| `ctx.sample` | Request LLM completion from the client. **Check for presence first:** `if (ctx.sample) { ... }` |
-| `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
-| `ctx.requestId` | Unique request ID. |
-| `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio. |
+| `ctx.state` | Tenant-scoped KV — used by `ServerRegistry` (connection aliases), `DatasetStore` (spilled `find_*` results), and `CapabilityRegistry` (cached profiles). |
+| `ctx.signal` | `AbortSignal` — threaded into every BrAPI HTTP call so client-side cancellation aborts the upstream request. |
+| `ctx.requestId` | Unique request ID — auto-attached to every `ctx.log` entry. |
+| `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio — scopes all `ctx.state` reads/writes. |
+
+`ctx.elicit`, `ctx.sample`, and `ctx.progress` are not used yet — they'll show up when write tools (`brapi_submit_observations`) and long-running workflows (pedigree traversal, genotype-call pulls) land.
 
 ---
 
@@ -180,21 +196,33 @@ Plain `Error` is fine for most cases. Use factories when the error code matters.
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                                # createApp() entry point — registers 7 tools, inits 6 services
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                      # BRAPI_* env vars (Zod schema, lazy-parsed)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    brapi-client/                         # HTTP client — retry, concurrency cap, async-search poll, private-IP guard
+    brapi-filters/                        # Static v2.1 filter catalog
+    capability-registry/                  # Per-connection /serverinfo cache + call guard
+    dataset-store/                        # Tenant-scoped handles for spilled find_* results
+    reference-data-cache/                 # Programs / trials / locations / crops lookup cache
+    server-registry/                      # Alias → live connection map with auth resolution
   mcp-server/
-    tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+    tools/
+      definitions/
+        brapi-connect.tool.ts
+        brapi-server-info.tool.ts
+        brapi-describe-filters.tool.ts
+        brapi-find-studies.tool.ts
+        brapi-get-study.tool.ts
+        brapi-find-germplasm.tool.ts
+        brapi-get-germplasm.tool.ts
+      shared/
+        connect-auth-schema.ts            # Tagged-union auth input
+        orientation-envelope.ts           # Shared envelope builder + formatter
+        find-helpers.ts                   # Alias / loadLimit / extraFilters fragments, mergeFilters, spillToDataset
 ```
+
+No resources or prompts yet — `find_*` tools expose the dataset surface via handles.
 
 ---
 
@@ -249,23 +277,24 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Commands
 
-**Runtime:** Scripts use `tsx` — both `npm run <cmd>` and `bun run <cmd>` work. Use whichever package manager you have; `bun` is slightly faster for invoking scripts but not required.
+**Runtime:** Scripts use `tsx` — both `npm run <cmd>` and `bun run <cmd>` work. Prefer `bun` (declared in `packageManager`).
 
 | Command | Purpose |
 |:--------|:--------|
-| `npm run build` | Compile TypeScript |
-| `npm run rebuild` | Clean + build |
-| `npm run clean` | Remove build artifacts |
-| `npm run devcheck` | Lint + format + typecheck + security + changelog sync |
-| `npm run tree` | Generate directory structure doc |
-| `npm run format` | Auto-fix formatting |
-| `npm test` | Run tests |
-| `npm run dev:stdio` | Dev mode (stdio) |
-| `npm run dev:http` | Dev mode (HTTP) |
-| `npm run start:stdio` | Production mode (stdio) |
-| `npm run start:http` | Production mode (HTTP) |
-| `npm run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
-| `npm run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
+| `bun run build` | Compile TypeScript |
+| `bun run rebuild` | Clean + build |
+| `bun run clean` | Remove build artifacts |
+| `bun run devcheck` | Lint + format + typecheck + security + changelog sync |
+| `bun run tree` | Generate `docs/tree.md` |
+| `bun run format` | Auto-fix formatting via Biome |
+| `bun run lint:mcp` | Validate MCP tool / resource / prompt definitions against the spec |
+| `bun run test` | Vitest suite |
+| `bun run dev:stdio` | Dev mode (stdio, hot-reload) |
+| `bun run dev:http` | Dev mode (HTTP, hot-reload) |
+| `bun run start:stdio` | Production mode (stdio) |
+| `bun run start:http` | Production mode (HTTP) |
+| `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/<minor>.x/` |
+| `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 
 ---
 
@@ -307,12 +336,15 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] Zod schemas: all fields have `.describe()`, only JSON-Schema-serializable types (no `z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()`, `z.function()`, `z.nan()`)
 - [ ] Optional nested objects: handler guards for empty inner values from form-based clients (`if (input.obj?.field && ...)`, not just `if (input.obj)`)
 - [ ] JSDoc `@fileoverview` + `@module` on every file
-- [ ] `ctx.log` for logging, `ctx.state` for storage
+- [ ] `ctx.log` for logging, `ctx.state` for storage — no `console`, no direct persistence access
 - [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
 - [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data
-- [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
-- [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
-- [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
-- [ ] Registered in `createApp()` arrays (directly or via barrel exports)
+- [ ] BrAPI tool: resolves connection via `ServerRegistry.get(ctx, alias ?? DEFAULT_ALIAS)` before touching the client
+- [ ] BrAPI tool: gates the call with `CapabilityRegistry.ensure(...)` — never fires against an endpoint the server didn't advertise
+- [ ] BrAPI tool: raw / domain / output schemas reviewed against real upstream sparsity (most `/germplasm` and `/studies` fields are optional in the wild)
+- [ ] BrAPI tool: normalization and `format()` preserve uncertainty — never fabricate missing IDs, names, or counts
+- [ ] BrAPI tool with dataset spillover: rows beyond `loadLimit` persist via `DatasetStore`, handle surfaces in `result.dataset`, `hasMore` set correctly
+- [ ] Tests include at least one sparse upstream payload (fields omitted) alongside the happy path
+- [ ] Registered in the `tools` array of `createApp()` in `src/index.ts`
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
-- [ ] `npm run devcheck` passes
+- [ ] `bun run devcheck` passes
