@@ -31,21 +31,39 @@ const PAGE_SIZE = 10_000;
 
 const CallRowSchema = z
   .object({
-    callSetDbId: z.string().optional(),
-    callSetName: z.string().optional(),
-    variantDbId: z.string().optional(),
-    variantName: z.string().optional(),
-    variantSetDbId: z.string().optional(),
+    callSetDbId: z
+      .string()
+      .optional()
+      .describe('FK to the call set (one germplasm × one variant set = one call set).'),
+    callSetName: z.string().optional().describe('Display name of the call set.'),
+    variantDbId: z.string().optional().describe('FK to the variant being called.'),
+    variantName: z.string().optional().describe('Display name / alias of the variant.'),
+    variantSetDbId: z.string().optional().describe('FK to the variant set the call belongs to.'),
     genotype: z
       .object({
-        values: z.array(z.string()).optional(),
+        values: z
+          .array(z.string().describe('Per-allele value string.'))
+          .optional()
+          .describe('Encoded allele values — interpret using top-level `callFormatting`.'),
       })
       .passthrough()
-      .optional(),
-    genotypeValue: z.string().optional(),
-    phaseSet: z.string().optional(),
+      .optional()
+      .describe(
+        'Structured genotype payload (array of allele values plus server-specific fields).',
+      ),
+    genotypeValue: z
+      .string()
+      .optional()
+      .describe(
+        'Legacy flat string form of the call (provided by some servers instead of `genotype`).',
+      ),
+    phaseSet: z
+      .string()
+      .optional()
+      .describe('Phase-set identifier linking calls that share a haplotype phase.'),
   })
-  .passthrough();
+  .passthrough()
+  .describe('One genotype call row.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
@@ -61,17 +79,35 @@ const OutputSchema = z.object({
     .describe('True when the collection was truncated (equivalent to `truncated`).'),
   callFormatting: z
     .object({
-      expandHomozygotes: z.boolean().optional(),
-      unknownString: z.string().optional(),
-      sepPhased: z.string().optional(),
-      sepUnphased: z.string().optional(),
+      expandHomozygotes: z
+        .boolean()
+        .optional()
+        .describe('When true, homozygous calls are expanded to both alleles.'),
+      unknownString: z
+        .string()
+        .optional()
+        .describe('String used for unknown / missing calls (often "." or "N").'),
+      sepPhased: z
+        .string()
+        .optional()
+        .describe('Separator between phased allele values (typically "|").'),
+      sepUnphased: z
+        .string()
+        .optional()
+        .describe('Separator between unphased allele values (typically "/").'),
     })
     .describe('Genotype-encoding hints echoed by the server.'),
   distributions: z
     .object({
-      callSetName: z.record(z.string(), z.number()),
-      variantName: z.record(z.string(), z.number()),
-      variantSetDbId: z.record(z.string(), z.number()),
+      callSetName: z
+        .record(z.string(), z.number())
+        .describe('Call set name → count of calls from that set.'),
+      variantName: z
+        .record(z.string(), z.number())
+        .describe('Variant name → count of calls for that variant.'),
+      variantSetDbId: z
+        .record(z.string(), z.number())
+        .describe('Variant set ID → count of calls from that set.'),
     })
     .describe('Value frequency per field across the full collected call set.'),
   dataset: DatasetHandleSchema.optional().describe(

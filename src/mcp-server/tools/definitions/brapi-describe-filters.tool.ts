@@ -14,14 +14,16 @@ import { getFilterCatalog, listFilterEndpoints } from '@/services/brapi-filters/
 
 const ENDPOINT_VALUES = listFilterEndpoints();
 
-const FilterDescriptorSchema = z.object({
-  name: z.string().describe('Filter parameter name (as accepted by the BrAPI endpoint).'),
-  type: z
-    .enum(['string', 'integer', 'number', 'boolean', 'date', 'string[]', 'integer[]'])
-    .describe('Expected value type.'),
-  description: z.string().describe('Short description of what the filter does.'),
-  example: z.string().describe('Example value (stringified).'),
-});
+const FilterDescriptorSchema = z
+  .object({
+    name: z.string().describe('Filter parameter name (as accepted by the BrAPI endpoint).'),
+    type: z
+      .enum(['string', 'integer', 'number', 'boolean', 'date', 'string[]', 'integer[]'])
+      .describe('Expected value type.'),
+    description: z.string().describe('Short description of what the filter does.'),
+    example: z.string().describe('Example value (stringified).'),
+  })
+  .describe('One filter entry — name, type, description, and an example value.');
 
 export const brapiDescribeFilters = tool('brapi_describe_filters', {
   description:

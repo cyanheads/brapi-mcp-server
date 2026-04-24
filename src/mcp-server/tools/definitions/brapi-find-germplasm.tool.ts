@@ -29,29 +29,46 @@ import {
 
 const GermplasmRowSchema = z
   .object({
-    germplasmDbId: z.string(),
-    germplasmName: z.string().optional(),
-    germplasmPUI: z.string().optional(),
-    commonCropName: z.string().optional(),
-    accessionNumber: z.string().optional(),
-    genus: z.string().optional(),
-    species: z.string().optional(),
-    subtaxa: z.string().optional(),
-    defaultDisplayName: z.string().optional(),
-    pedigree: z.string().optional(),
-    biologicalStatusOfAccessionDescription: z.string().optional(),
-    germplasmOrigin: z.string().optional(),
-    countryOfOriginCode: z.string().optional(),
-    collection: z.string().optional(),
-    instituteCode: z.string().optional(),
-    instituteName: z.string().optional(),
+    germplasmDbId: z.string().describe('Server-side identifier for the germplasm.'),
+    germplasmName: z.string().optional().describe('Display name.'),
+    germplasmPUI: z.string().optional().describe('Persistent unique identifier (URI).'),
+    commonCropName: z.string().optional().describe('Common crop name (e.g. "Maize", "Wheat").'),
+    accessionNumber: z.string().optional().describe('Gene-bank catalog number.'),
+    genus: z.string().optional().describe('Botanical genus.'),
+    species: z.string().optional().describe('Botanical species.'),
+    subtaxa: z.string().optional().describe('Botanical subtaxa (subspecies, variety, etc.).'),
+    defaultDisplayName: z.string().optional().describe('Preferred display label.'),
+    pedigree: z.string().optional().describe('Pedigree as a free-text string (e.g. "A/B//C").'),
+    biologicalStatusOfAccessionDescription: z
+      .string()
+      .optional()
+      .describe('MCPD biological-status label (wild / landrace / breeding / cultivar, etc.).'),
+    germplasmOrigin: z
+      .string()
+      .optional()
+      .describe('Origin information — source collection, site, etc.'),
+    countryOfOriginCode: z.string().optional().describe('ISO 3166-1 alpha-3 country code.'),
+    collection: z.string().optional().describe('Collection name this accession belongs to.'),
+    instituteCode: z
+      .string()
+      .optional()
+      .describe('FAO WIEWS institute code of the holding institute.'),
+    instituteName: z.string().optional().describe('Display name of the holding institute.'),
     synonyms: z
       .array(
-        z.object({ synonym: z.string().optional(), type: z.string().optional() }).passthrough(),
+        z
+          .object({
+            synonym: z.string().optional().describe('Synonym value.'),
+            type: z.string().optional().describe('Synonym type (e.g. "COMMON", "SYNONYM").'),
+          })
+          .passthrough()
+          .describe('Registered synonym for this germplasm.'),
       )
-      .optional(),
+      .optional()
+      .describe('All registered synonyms (alternative names).'),
   })
-  .passthrough();
+  .passthrough()
+  .describe('One BrAPI germplasm record.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
@@ -63,11 +80,19 @@ const OutputSchema = z.object({
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
-      commonCropName: z.record(z.string(), z.number()),
-      genus: z.record(z.string(), z.number()),
-      species: z.record(z.string(), z.number()),
-      collection: z.record(z.string(), z.number()),
-      countryOfOriginCode: z.record(z.string(), z.number()),
+      commonCropName: z
+        .record(z.string(), z.number())
+        .describe('Common crop name → count of rows for that crop.'),
+      genus: z.record(z.string(), z.number()).describe('Genus → count of rows with that genus.'),
+      species: z
+        .record(z.string(), z.number())
+        .describe('Species → count of rows with that species.'),
+      collection: z
+        .record(z.string(), z.number())
+        .describe('Collection name → count of rows in that collection.'),
+      countryOfOriginCode: z
+        .record(z.string(), z.number())
+        .describe('ISO country code → count of rows from that country.'),
     })
     .describe('Value frequency per field across the full result set.'),
   refinementHint: z

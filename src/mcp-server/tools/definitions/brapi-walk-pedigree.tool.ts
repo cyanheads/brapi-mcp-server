@@ -19,28 +19,32 @@ import { AliasInput, buildRequestOptions } from '../shared/find-helpers.js';
 const DEFAULT_MAX_DEPTH = 3;
 const MAX_NODES = 1_000;
 
-const NodeSchema = z.object({
-  germplasmDbId: z.string(),
-  germplasmName: z.string().optional(),
-  depth: z
-    .number()
-    .int()
-    .nonnegative()
-    .describe('Min distance from any root germplasm (0 for roots).'),
-  isRoot: z.boolean(),
-});
+const NodeSchema = z
+  .object({
+    germplasmDbId: z.string().describe('Server-side identifier for the germplasm.'),
+    germplasmName: z.string().optional().describe('Display name of the germplasm.'),
+    depth: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe('Min distance from any root germplasm (0 for roots).'),
+    isRoot: z.boolean().describe('True when this node is one of the starting germplasm.'),
+  })
+  .describe('One germplasm reached during the walk.');
 
-const EdgeSchema = z.object({
-  from: z.string().describe('germplasmDbId of the source of the relationship.'),
-  to: z.string().describe('germplasmDbId of the target.'),
-  relationship: z
-    .enum(['parent', 'child'])
-    .describe('Direction: parent = from is a parent of to; child = from is a descendant of to.'),
-  parentType: z
-    .string()
-    .optional()
-    .describe('E.g. MALE, FEMALE, SELF, when the upstream response supplies it.'),
-});
+const EdgeSchema = z
+  .object({
+    from: z.string().describe('germplasmDbId of the source of the relationship.'),
+    to: z.string().describe('germplasmDbId of the target.'),
+    relationship: z
+      .enum(['parent', 'child'])
+      .describe('Direction: parent = from is a parent of to; child = from is a descendant of to.'),
+    parentType: z
+      .string()
+      .optional()
+      .describe('E.g. MALE, FEMALE, SELF, when the upstream response supplies it.'),
+  })
+  .describe('One deduplicated pedigree edge between two nodes.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),

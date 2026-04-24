@@ -17,62 +17,68 @@ import { AliasInput, buildRequestOptions } from '../shared/find-helpers.js';
 
 const StudySchema = z
   .object({
-    studyDbId: z.string(),
-    studyName: z.string().optional(),
-    studyType: z.string().optional(),
-    studyDescription: z.string().optional(),
-    programDbId: z.string().optional(),
-    programName: z.string().optional(),
-    trialDbId: z.string().optional(),
-    trialName: z.string().optional(),
-    locationDbId: z.string().optional(),
-    locationName: z.string().optional(),
-    commonCropName: z.string().optional(),
-    seasons: z.array(z.string()).optional(),
-    active: z.boolean().optional(),
-    startDate: z.string().optional(),
-    endDate: z.string().optional(),
-    studyCode: z.string().optional(),
-    studyPUI: z.string().optional(),
+    studyDbId: z.string().describe('Server-side identifier for the study.'),
+    studyName: z.string().optional().describe('Display name.'),
+    studyType: z.string().optional().describe('E.g. "Yield Trial", "Phenotyping".'),
+    studyDescription: z.string().optional().describe('Free-form description.'),
+    programDbId: z.string().optional().describe('FK to the owning program.'),
+    programName: z.string().optional().describe('Display name of the owning program.'),
+    trialDbId: z.string().optional().describe('FK to the owning trial.'),
+    trialName: z.string().optional().describe('Display name of the owning trial.'),
+    locationDbId: z.string().optional().describe('FK to the study site.'),
+    locationName: z.string().optional().describe('Display name of the study site.'),
+    commonCropName: z.string().optional().describe('Common crop name (e.g. "Maize", "Wheat").'),
+    seasons: z
+      .array(z.string().describe('Season identifier — typically a year like "2022".'))
+      .optional()
+      .describe('Season identifiers this study spans.'),
+    active: z.boolean().optional().describe('True while the study is open for data capture.'),
+    startDate: z.string().optional().describe('ISO 8601 start date.'),
+    endDate: z.string().optional().describe('ISO 8601 end date.'),
+    studyCode: z.string().optional().describe('Short code or alias for the study.'),
+    studyPUI: z.string().optional().describe('Persistent unique identifier (URI).'),
   })
   .passthrough();
 
 const ProgramSchema = z
   .object({
-    programDbId: z.string(),
-    programName: z.string().optional(),
-    commonCropName: z.string().optional(),
-    abbreviation: z.string().optional(),
-    leadPersonName: z.string().optional(),
-    documentationURL: z.string().optional(),
+    programDbId: z.string().describe('Server-side identifier for the program.'),
+    programName: z.string().optional().describe('Display name.'),
+    commonCropName: z.string().optional().describe('Common crop name this program targets.'),
+    abbreviation: z.string().optional().describe('Short abbreviation.'),
+    leadPersonName: z.string().optional().describe('Name of the program lead.'),
+    documentationURL: z.string().optional().describe('URL pointing at program documentation.'),
   })
   .passthrough();
 
 const TrialSchema = z
   .object({
-    trialDbId: z.string(),
-    trialName: z.string().optional(),
-    programDbId: z.string().optional(),
-    programName: z.string().optional(),
-    commonCropName: z.string().optional(),
-    startDate: z.string().optional(),
-    endDate: z.string().optional(),
-    active: z.boolean().optional(),
-    trialDescription: z.string().optional(),
+    trialDbId: z.string().describe('Server-side identifier for the trial.'),
+    trialName: z.string().optional().describe('Display name.'),
+    programDbId: z.string().optional().describe('FK to the owning program.'),
+    programName: z.string().optional().describe('Display name of the owning program.'),
+    commonCropName: z.string().optional().describe('Common crop name.'),
+    startDate: z.string().optional().describe('ISO 8601 start date.'),
+    endDate: z.string().optional().describe('ISO 8601 end date.'),
+    active: z.boolean().optional().describe('True while the trial is ongoing.'),
+    trialDescription: z.string().optional().describe('Free-form description.'),
   })
   .passthrough();
 
 const LocationSchema = z
   .object({
-    locationDbId: z.string(),
-    locationName: z.string().optional(),
-    abbreviation: z.string().optional(),
-    countryCode: z.string().optional(),
-    countryName: z.string().optional(),
-    locationType: z.string().optional(),
-    latitude: z.number().optional(),
-    longitude: z.number().optional(),
-    altitude: z.number().optional(),
+    locationDbId: z.string().describe('Server-side identifier for the location.'),
+    locationName: z.string().optional().describe('Display name.'),
+    abbreviation: z.string().optional().describe('Short abbreviation.'),
+    countryCode: z.string().optional().describe('ISO 3166-1 alpha-3 country code.'),
+    countryName: z.string().optional().describe('Display name of the country.'),
+    locationType: z
+      .string()
+      .optional()
+      .describe('Type of location (e.g. "Research Station", "Field").'),
+    latitude: z.number().optional().describe('WGS84 latitude in decimal degrees.'),
+    longitude: z.number().optional().describe('WGS84 longitude in decimal degrees.'),
+    altitude: z.number().optional().describe('Altitude in meters above sea level.'),
   })
   .passthrough();
 

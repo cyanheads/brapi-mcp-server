@@ -30,23 +30,39 @@ import {
 
 const ObservationRowSchema = z
   .object({
-    observationDbId: z.string().optional(),
-    observationUnitDbId: z.string().optional(),
-    observationUnitName: z.string().optional(),
-    observationVariableDbId: z.string().optional(),
-    observationVariableName: z.string().optional(),
-    studyDbId: z.string().optional(),
-    studyName: z.string().optional(),
-    germplasmDbId: z.string().optional(),
-    germplasmName: z.string().optional(),
-    observationLevel: z.string().optional(),
-    season: z.string().optional(),
-    value: z.string().optional(),
-    observationTimeStamp: z.string().optional(),
-    collector: z.string().optional(),
-    uploadedBy: z.string().optional(),
+    observationDbId: z.string().optional().describe('Server-side identifier for the observation.'),
+    observationUnitDbId: z
+      .string()
+      .optional()
+      .describe('FK to the observation unit (plot / plant / sample) that carries the measurement.'),
+    observationUnitName: z.string().optional().describe('Display name of the observation unit.'),
+    observationVariableDbId: z
+      .string()
+      .optional()
+      .describe('FK to the observation variable (trait) measured.'),
+    observationVariableName: z
+      .string()
+      .optional()
+      .describe('Display name of the observation variable.'),
+    studyDbId: z.string().optional().describe('FK to the study the observation belongs to.'),
+    studyName: z.string().optional().describe('Display name of the study.'),
+    germplasmDbId: z
+      .string()
+      .optional()
+      .describe('FK to the germplasm the observation was taken on.'),
+    germplasmName: z.string().optional().describe('Display name of the germplasm.'),
+    observationLevel: z.string().optional().describe('Unit level — e.g. "plot", "plant", "field".'),
+    season: z.string().optional().describe('Season identifier (e.g. "2022").'),
+    value: z
+      .string()
+      .optional()
+      .describe('Recorded measurement value (stringified per BrAPI spec).'),
+    observationTimeStamp: z.string().optional().describe('ISO 8601 timestamp of the observation.'),
+    collector: z.string().optional().describe('Name or ID of the person who collected the value.'),
+    uploadedBy: z.string().optional().describe('Name or ID of the user who uploaded the record.'),
   })
-  .passthrough();
+  .passthrough()
+  .describe('One BrAPI observation record.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
@@ -58,11 +74,21 @@ const OutputSchema = z.object({
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
-      observationVariableName: z.record(z.string(), z.number()),
-      studyName: z.record(z.string(), z.number()),
-      germplasmName: z.record(z.string(), z.number()),
-      observationLevel: z.record(z.string(), z.number()),
-      season: z.record(z.string(), z.number()),
+      observationVariableName: z
+        .record(z.string(), z.number())
+        .describe('Variable name → count of observations for that trait.'),
+      studyName: z
+        .record(z.string(), z.number())
+        .describe('Study name → count of observations in that study.'),
+      germplasmName: z
+        .record(z.string(), z.number())
+        .describe('Germplasm name → count of observations on that germplasm.'),
+      observationLevel: z
+        .record(z.string(), z.number())
+        .describe('Unit level (plot / plant / field) → count of observations at that level.'),
+      season: z
+        .record(z.string(), z.number())
+        .describe('Season identifier → count of observations in that season.'),
     })
     .describe('Value frequency per field across the full result set.'),
   refinementHint: z

@@ -30,20 +30,24 @@ import {
 
 const LocationRowSchema = z
   .object({
-    locationDbId: z.string(),
-    locationName: z.string().optional(),
-    abbreviation: z.string().optional(),
-    countryCode: z.string().optional(),
-    countryName: z.string().optional(),
-    locationType: z.string().optional(),
-    latitude: z.number().optional(),
-    longitude: z.number().optional(),
-    altitude: z.number().optional(),
-    instituteName: z.string().optional(),
-    instituteAddress: z.string().optional(),
-    documentationURL: z.string().optional(),
+    locationDbId: z.string().describe('Server-side identifier for the location.'),
+    locationName: z.string().optional().describe('Display name.'),
+    abbreviation: z.string().optional().describe('Short abbreviation.'),
+    countryCode: z.string().optional().describe('ISO 3166-1 alpha-3 country code.'),
+    countryName: z.string().optional().describe('Display name of the country.'),
+    locationType: z
+      .string()
+      .optional()
+      .describe('Type of location (e.g. "Research Station", "Field", "Greenhouse").'),
+    latitude: z.number().optional().describe('WGS84 latitude in decimal degrees.'),
+    longitude: z.number().optional().describe('WGS84 longitude in decimal degrees.'),
+    altitude: z.number().optional().describe('Altitude in meters above sea level.'),
+    instituteName: z.string().optional().describe('Owning institute display name.'),
+    instituteAddress: z.string().optional().describe('Postal address of the institute.'),
+    documentationURL: z.string().optional().describe('URL pointing at extra documentation.'),
   })
-  .passthrough();
+  .passthrough()
+  .describe('One BrAPI location record.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
@@ -67,8 +71,12 @@ const OutputSchema = z.object({
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
-      countryCode: z.record(z.string(), z.number()),
-      locationType: z.record(z.string(), z.number()),
+      countryCode: z
+        .record(z.string(), z.number())
+        .describe('ISO country code → count of locations in that country.'),
+      locationType: z
+        .record(z.string(), z.number())
+        .describe('Location type → count of locations of that type.'),
     })
     .describe('Value frequency per field across the full result set.'),
   refinementHint: z
@@ -104,10 +112,30 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     abbreviations: z.array(z.string()).optional().describe('Short location abbreviations.'),
     bbox: z
       .object({
-        minLat: z.number().min(-90).max(90).optional(),
-        maxLat: z.number().min(-90).max(90).optional(),
-        minLon: z.number().min(-180).max(180).optional(),
-        maxLon: z.number().min(-180).max(180).optional(),
+        minLat: z
+          .number()
+          .min(-90)
+          .max(90)
+          .optional()
+          .describe('Minimum latitude in WGS84 decimal degrees.'),
+        maxLat: z
+          .number()
+          .min(-90)
+          .max(90)
+          .optional()
+          .describe('Maximum latitude in WGS84 decimal degrees.'),
+        minLon: z
+          .number()
+          .min(-180)
+          .max(180)
+          .optional()
+          .describe('Minimum longitude in WGS84 decimal degrees.'),
+        maxLon: z
+          .number()
+          .min(-180)
+          .max(180)
+          .optional()
+          .describe('Maximum longitude in WGS84 decimal degrees.'),
       })
       .optional()
       .describe(

@@ -16,46 +16,58 @@ import { AliasInput, buildRequestOptions } from '../shared/find-helpers.js';
 
 const GermplasmSchema = z
   .object({
-    germplasmDbId: z.string(),
-    germplasmName: z.string().optional(),
-    germplasmPUI: z.string().optional(),
-    commonCropName: z.string().optional(),
-    accessionNumber: z.string().optional(),
-    genus: z.string().optional(),
-    species: z.string().optional(),
-    subtaxa: z.string().optional(),
-    defaultDisplayName: z.string().optional(),
-    pedigree: z.string().optional(),
-    biologicalStatusOfAccessionDescription: z.string().optional(),
-    germplasmOrigin: z.string().optional(),
-    countryOfOriginCode: z.string().optional(),
-    collection: z.string().optional(),
-    instituteCode: z.string().optional(),
-    instituteName: z.string().optional(),
+    germplasmDbId: z.string().describe('Server-side identifier for the germplasm.'),
+    germplasmName: z.string().optional().describe('Display name.'),
+    germplasmPUI: z.string().optional().describe('Persistent unique identifier (URI).'),
+    commonCropName: z.string().optional().describe('Common crop name.'),
+    accessionNumber: z.string().optional().describe('Gene-bank catalog number.'),
+    genus: z.string().optional().describe('Botanical genus.'),
+    species: z.string().optional().describe('Botanical species.'),
+    subtaxa: z.string().optional().describe('Botanical subtaxa.'),
+    defaultDisplayName: z.string().optional().describe('Preferred display label.'),
+    pedigree: z.string().optional().describe('Pedigree as a free-text string.'),
+    biologicalStatusOfAccessionDescription: z
+      .string()
+      .optional()
+      .describe('MCPD biological-status label.'),
+    germplasmOrigin: z.string().optional().describe('Origin information.'),
+    countryOfOriginCode: z.string().optional().describe('ISO 3166-1 alpha-3 country code.'),
+    collection: z.string().optional().describe('Collection name.'),
+    instituteCode: z.string().optional().describe('FAO WIEWS institute code.'),
+    instituteName: z.string().optional().describe('Display name of the holding institute.'),
     synonyms: z
       .array(
-        z.object({ synonym: z.string().optional(), type: z.string().optional() }).passthrough(),
+        z
+          .object({
+            synonym: z.string().optional().describe('Synonym value.'),
+            type: z.string().optional().describe('Synonym type (e.g. "COMMON", "SYNONYM").'),
+          })
+          .passthrough()
+          .describe('Registered synonym for this germplasm.'),
       )
-      .optional(),
+      .optional()
+      .describe('All registered synonyms.'),
   })
   .passthrough();
 
 const ParentSchema = z
   .object({
-    germplasmDbId: z.string().optional(),
-    germplasmName: z.string().optional(),
+    germplasmDbId: z.string().optional().describe('FK to the parent germplasm.'),
+    germplasmName: z.string().optional().describe('Display name of the parent germplasm.'),
     parentType: z.string().optional().describe('E.g. "MALE", "FEMALE", "SELF".'),
   })
-  .passthrough();
+  .passthrough()
+  .describe('One direct parent of the germplasm.');
 
 const AttributeSchema = z
   .object({
-    attributeDbId: z.string().optional(),
-    attributeName: z.string().optional(),
-    attributeValue: z.string().optional(),
-    determinedDate: z.string().optional(),
+    attributeDbId: z.string().optional().describe('Attribute identifier.'),
+    attributeName: z.string().optional().describe('Attribute display name.'),
+    attributeValue: z.string().optional().describe('Recorded value (stringified).'),
+    determinedDate: z.string().optional().describe('ISO 8601 date the attribute was determined.'),
   })
-  .passthrough();
+  .passthrough()
+  .describe('One germplasm attribute record.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),

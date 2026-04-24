@@ -21,36 +21,43 @@ const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB
 
 const ImageMetadataSchema = z
   .object({
-    imageDbId: z.string(),
-    imageName: z.string().optional(),
-    imageFileName: z.string().optional(),
-    imageHeight: z.number().optional(),
-    imageWidth: z.number().optional(),
-    mimeType: z.string().optional(),
-    imageURL: z.string().optional(),
-    observationUnitDbId: z.string().optional(),
-    observationUnitName: z.string().optional(),
-    studyDbId: z.string().optional(),
-    studyName: z.string().optional(),
-    imageTimeStamp: z.string().optional(),
-    copyright: z.string().optional(),
-    description: z.string().optional(),
+    imageDbId: z.string().describe('Server-side identifier for the image.'),
+    imageName: z.string().optional().describe('Display name.'),
+    imageFileName: z.string().optional().describe('Original uploaded filename.'),
+    imageHeight: z.number().optional().describe('Pixel height.'),
+    imageWidth: z.number().optional().describe('Pixel width.'),
+    mimeType: z.string().optional().describe('MIME type (e.g. "image/jpeg").'),
+    imageURL: z.string().optional().describe('URL where the bytes live.'),
+    observationUnitDbId: z
+      .string()
+      .optional()
+      .describe('FK to the observation unit this image depicts.'),
+    observationUnitName: z.string().optional().describe('Display name of the observation unit.'),
+    studyDbId: z.string().optional().describe('FK to the study the image belongs to.'),
+    studyName: z.string().optional().describe('Display name of the study.'),
+    imageTimeStamp: z.string().optional().describe('ISO 8601 capture timestamp.'),
+    copyright: z.string().optional().describe('Copyright or rights notice.'),
+    description: z.string().optional().describe('Free-text description.'),
   })
   .passthrough();
 
-const ImagePayloadSchema = z.object({
-  imageDbId: z.string(),
-  mimeType: z.string().describe('Actual MIME type of the returned bytes.'),
-  sizeBytes: z.number().int().nonnegative(),
-  source: z.enum(['imagecontent', 'imageURL']).describe('How the bytes were fetched.'),
-  data: z.string().describe('Base64-encoded image bytes.'),
-  metadata: ImageMetadataSchema,
-});
+const ImagePayloadSchema = z
+  .object({
+    imageDbId: z.string().describe('Server-side identifier for the image.'),
+    mimeType: z.string().describe('Actual MIME type of the returned bytes.'),
+    sizeBytes: z.number().int().nonnegative().describe('Size of the returned byte payload.'),
+    source: z.enum(['imagecontent', 'imageURL']).describe('How the bytes were fetched.'),
+    data: z.string().describe('Base64-encoded image bytes.'),
+    metadata: ImageMetadataSchema.describe('Upstream metadata for this image.'),
+  })
+  .describe('Successfully loaded image payload.');
 
-const ImageErrorSchema = z.object({
-  imageDbId: z.string(),
-  error: z.string().describe('Reason the image could not be loaded.'),
-});
+const ImageErrorSchema = z
+  .object({
+    imageDbId: z.string().describe('Image identifier the error applies to.'),
+    error: z.string().describe('Reason the image could not be loaded.'),
+  })
+  .describe('Per-image error entry returned when a fetch fails.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),

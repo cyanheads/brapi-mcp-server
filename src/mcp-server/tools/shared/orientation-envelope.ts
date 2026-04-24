@@ -66,34 +66,59 @@ export const OrientationCapabilitiesSchema = z
       .int()
       .nonnegative()
       .describe('Total distinct services the server advertises in /calls.'),
-    supported: z.array(z.string()).describe('Sorted list of supported service names.'),
-    notableGaps: z.array(z.string()).describe('Common-floor services this server does NOT expose.'),
+    supported: z
+      .array(z.string().describe('BrAPI service name (e.g. "studies", "search/germplasm").'))
+      .describe('Sorted list of supported service names.'),
+    notableGaps: z
+      .array(z.string().describe('Common-floor service the server does not expose.'))
+      .describe('Common-floor services this server does NOT expose.'),
   })
   .describe('Capability profile summary. Downstream tools pre-flight against `supported`.');
 
 export const OrientationContentSchema = z
   .object({
-    crops: z.array(z.string()).describe('Crops the server declares via /commoncropnames.'),
+    crops: z
+      .array(z.string().describe('Common crop name as returned by /commoncropnames.'))
+      .describe('Crops the server declares via /commoncropnames.'),
     studyCount: z
       .number()
       .int()
       .nonnegative()
       .optional()
       .describe('Total studies hosted, when the server exposes a cheap count.'),
-    germplasmCount: z.number().int().nonnegative().optional(),
-    programCount: z.number().int().nonnegative().optional(),
-    locationCount: z.number().int().nonnegative().optional(),
+    germplasmCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Total germplasm hosted, when the server exposes a cheap count.'),
+    programCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Total programs hosted, when the server exposes a cheap count.'),
+    locationCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Total locations hosted, when the server exposes a cheap count.'),
   })
   .describe('Content summary. Counts are populated only when the server supports cheap totals.');
 
 export const OrientationEnvelopeSchema = z.object({
   alias: z.string().describe('Connection alias.'),
   baseUrl: z.string().describe('BrAPI v2 base URL for this connection.'),
-  server: ServerIdentitySchema,
-  auth: OrientationAuthSchema,
-  capabilities: OrientationCapabilitiesSchema,
-  content: OrientationContentSchema,
-  notes: z.array(z.string()).describe('Server-specific quirks or degradation notes.'),
+  server: ServerIdentitySchema.describe('Normalized server identity block.'),
+  auth: OrientationAuthSchema.describe('Auth summary for the active connection.'),
+  capabilities: OrientationCapabilitiesSchema.describe(
+    'Capability profile derived from /serverinfo.',
+  ),
+  content: OrientationContentSchema.describe('Content summary (crops + optional totals).'),
+  notes: z
+    .array(z.string().describe('Server-specific quirk or degradation note.'))
+    .describe('Server-specific quirks or degradation notes.'),
   fetchedAt: z.string().describe('ISO 8601 timestamp of when this envelope was composed.'),
 });
 

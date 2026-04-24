@@ -35,21 +35,25 @@ const StudyRowSchema = z
     studyName: z.string().optional().describe('Display name.'),
     studyType: z.string().optional().describe('E.g. "Yield Trial", "Phenotyping".'),
     studyDescription: z.string().optional().describe('Free-form description.'),
-    programDbId: z.string().optional(),
-    programName: z.string().optional(),
-    trialDbId: z.string().optional(),
-    trialName: z.string().optional(),
-    locationDbId: z.string().optional(),
-    locationName: z.string().optional(),
-    commonCropName: z.string().optional(),
-    seasons: z.array(z.string()).optional(),
-    active: z.boolean().optional(),
-    startDate: z.string().optional(),
-    endDate: z.string().optional(),
-    studyCode: z.string().optional(),
-    studyPUI: z.string().optional(),
+    programDbId: z.string().optional().describe('FK to program; resolve via `brapi_get_study`.'),
+    programName: z.string().optional().describe('Display name of the owning program.'),
+    trialDbId: z.string().optional().describe('FK to trial; resolve via `brapi_get_study`.'),
+    trialName: z.string().optional().describe('Display name of the owning trial.'),
+    locationDbId: z.string().optional().describe('FK to location; resolve via `brapi_get_study`.'),
+    locationName: z.string().optional().describe('Display name of the study site.'),
+    commonCropName: z.string().optional().describe('Common crop name (e.g. "Maize", "Wheat").'),
+    seasons: z
+      .array(z.string().describe('Season identifier — typically a year like "2022".'))
+      .optional()
+      .describe('Season identifiers this study spans.'),
+    active: z.boolean().optional().describe('True while the study is open for data capture.'),
+    startDate: z.string().optional().describe('ISO 8601 start date.'),
+    endDate: z.string().optional().describe('ISO 8601 end date.'),
+    studyCode: z.string().optional().describe('Short code or alias for the study.'),
+    studyPUI: z.string().optional().describe('Persistent unique identifier (URI).'),
   })
-  .passthrough();
+  .passthrough()
+  .describe('One BrAPI study record.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
@@ -59,11 +63,21 @@ const OutputSchema = z.object({
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
-      programName: z.record(z.string(), z.number()),
-      studyType: z.record(z.string(), z.number()),
-      seasons: z.record(z.string(), z.number()),
-      locationName: z.record(z.string(), z.number()),
-      commonCropName: z.record(z.string(), z.number()),
+      programName: z
+        .record(z.string(), z.number())
+        .describe('Program name → count of rows with that program.'),
+      studyType: z
+        .record(z.string(), z.number())
+        .describe('Study type → count of rows with that type.'),
+      seasons: z
+        .record(z.string(), z.number())
+        .describe('Season identifier → count of rows in that season.'),
+      locationName: z
+        .record(z.string(), z.number())
+        .describe('Location name → count of rows at that site.'),
+      commonCropName: z
+        .record(z.string(), z.number())
+        .describe('Common crop name → count of rows for that crop.'),
     })
     .describe('Value frequency per field across the full result set.'),
   refinementHint: z

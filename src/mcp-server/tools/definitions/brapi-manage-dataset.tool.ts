@@ -14,43 +14,61 @@ import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import { getDatasetStore } from '@/services/dataset-store/index.js';
 
 const DatasetMetadataSchema = z.object({
-  datasetId: z.string(),
+  datasetId: z.string().describe('Server-assigned dataset identifier.'),
   source: z.string().describe('Tool/operation that produced the dataset (e.g. "find_studies").'),
   baseUrl: z.string().describe('BrAPI base URL the dataset was pulled from.'),
   query: z.unknown().describe('Original filter map — provenance for reproducibility.'),
-  rowCount: z.number().int().nonnegative(),
-  columns: z.array(z.string()),
-  sizeBytes: z.number().int().nonnegative(),
-  createdAt: z.string(),
-  expiresAt: z.string(),
+  rowCount: z.number().int().nonnegative().describe('Number of rows persisted in the dataset.'),
+  columns: z
+    .array(z.string().describe('Column name from the persisted rows.'))
+    .describe('Full column list of the persisted rows.'),
+  sizeBytes: z.number().int().nonnegative().describe('Serialized size of the dataset in bytes.'),
+  createdAt: z.string().describe('ISO 8601 timestamp the dataset was created.'),
+  expiresAt: z.string().describe('ISO 8601 timestamp after which the dataset will be purged.'),
 });
 
-const ListResultSchema = z.object({
-  mode: z.literal('list'),
-  datasets: z.array(DatasetMetadataSchema),
-  cursor: z.string().optional().describe('Opaque cursor when more datasets exist.'),
-});
+const ListResultSchema = z
+  .object({
+    mode: z.literal('list').describe('Discriminator — `list` mode enumerates datasets.'),
+    datasets: z
+      .array(DatasetMetadataSchema.describe('Dataset metadata entry.'))
+      .describe('Datasets visible to this tenant, in creation order.'),
+    cursor: z.string().optional().describe('Opaque cursor when more datasets exist.'),
+  })
+  .describe('Enumeration of datasets visible to the current tenant.');
 
-const SummaryResultSchema = z.object({
-  mode: z.literal('summary'),
-  dataset: DatasetMetadataSchema,
-});
+const SummaryResultSchema = z
+  .object({
+    mode: z.literal('summary').describe('Discriminator — `summary` mode returns one dataset.'),
+    dataset: DatasetMetadataSchema.describe('Metadata and provenance for the requested dataset.'),
+  })
+  .describe('Metadata + provenance for a single dataset.');
 
-const LoadResultSchema = z.object({
-  mode: z.literal('load'),
-  datasetId: z.string(),
-  page: z.number().int().positive(),
-  pageSize: z.number().int().positive(),
-  totalRows: z.number().int().nonnegative(),
-  totalPages: z.number().int().positive(),
-  rows: z.array(z.record(z.string(), z.unknown())),
-});
+const LoadResultSchema = z
+  .object({
+    mode: z.literal('load').describe('Discriminator — `load` mode returns a page of rows.'),
+    datasetId: z.string().describe('Dataset the rows came from.'),
+    page: z.number().int().positive().describe('1-indexed page number that was served.'),
+    pageSize: z.number().int().positive().describe('Max rows per page (capped at 1000).'),
+    totalRows: z.number().int().nonnegative().describe('Total rows in the dataset.'),
+    totalPages: z.number().int().positive().describe('Total pages at the current pageSize.'),
+    rows: z
+      .array(
+        z
+          .record(z.string(), z.unknown())
+          .describe('One persisted row, with optional column projection applied.'),
+      )
+      .describe('Rows for this page.'),
+  })
+  .describe('Paged rows from a persisted dataset.');
 
-const DeleteResultSchema = z.object({
-  mode: z.literal('delete'),
-  datasetId: z.string(),
-  deleted: z.literal(true),
-});
+const DeleteResultSchema = z
+  .object({
+    mode: z.literal('delete').describe('Discriminator — `delete` mode confirms removal.'),
+    datasetId: z.string().describe('Dataset that was deleted.'),
+    deleted: z.literal(true).describe('Always `true` when the call succeeded.'),
+  })
+  .describe('Confirmation that a dataset was deleted.');
 
 const OutputSchema = z.object({
   result: z

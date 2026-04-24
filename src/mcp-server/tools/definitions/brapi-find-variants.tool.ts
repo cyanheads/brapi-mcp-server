@@ -29,20 +29,39 @@ import {
 
 const VariantRowSchema = z
   .object({
-    variantDbId: z.string(),
-    variantNames: z.array(z.string()).optional(),
-    variantSetDbId: z.string().optional(),
-    variantType: z.string().optional(),
-    referenceBases: z.string().optional(),
-    alternateBases: z.array(z.string()).optional(),
-    referenceName: z.string().optional(),
-    start: z.number().optional(),
-    end: z.number().optional(),
-    filtersPassed: z.boolean().optional(),
-    filtersApplied: z.boolean().optional(),
-    filtersFailed: z.array(z.string()).optional(),
+    variantDbId: z.string().describe('Server-side identifier for the variant.'),
+    variantNames: z
+      .array(z.string().describe('Variant name or alias.'))
+      .optional()
+      .describe('Known names / aliases for this variant.'),
+    variantSetDbId: z
+      .string()
+      .optional()
+      .describe('FK to the variant set this variant belongs to.'),
+    variantType: z.string().optional().describe('Variant type (e.g. "SNP", "INDEL", "DUP").'),
+    referenceBases: z
+      .string()
+      .optional()
+      .describe('Reference allele sequence at the variant position.'),
+    alternateBases: z
+      .array(z.string().describe('Alternate allele sequence.'))
+      .optional()
+      .describe('Alternate alleles observed at this position.'),
+    referenceName: z.string().optional().describe('Reference sequence name (e.g. "chr01").'),
+    start: z.number().optional().describe('1-based inclusive start position.'),
+    end: z.number().optional().describe('1-based exclusive end position.'),
+    filtersPassed: z.boolean().optional().describe('True when the variant passed all QC filters.'),
+    filtersApplied: z
+      .boolean()
+      .optional()
+      .describe('True when QC filters were evaluated on this variant.'),
+    filtersFailed: z
+      .array(z.string().describe('Filter ID that failed.'))
+      .optional()
+      .describe('IDs of QC filters this variant failed, when any.'),
   })
-  .passthrough();
+  .passthrough()
+  .describe('One BrAPI variant record.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
@@ -54,9 +73,15 @@ const OutputSchema = z.object({
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
-      variantType: z.record(z.string(), z.number()),
-      referenceName: z.record(z.string(), z.number()),
-      variantSetDbId: z.record(z.string(), z.number()),
+      variantType: z
+        .record(z.string(), z.number())
+        .describe('Variant type → count of variants of that type.'),
+      referenceName: z
+        .record(z.string(), z.number())
+        .describe('Reference sequence name → count of variants on that reference.'),
+      variantSetDbId: z
+        .record(z.string(), z.number())
+        .describe('Variant set ID → count of variants in that set.'),
     })
     .describe('Value frequency per field across the full result set.'),
   refinementHint: z

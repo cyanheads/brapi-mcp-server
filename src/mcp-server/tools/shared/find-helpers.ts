@@ -215,11 +215,13 @@ export interface SpillResult<T> {
  */
 export const DatasetHandleSchema = z.object({
   datasetId: z.string().describe('Use with brapi_manage_dataset to page or export.'),
-  rowCount: z.number().int().nonnegative(),
-  sizeBytes: z.number().int().nonnegative(),
-  columns: z.array(z.string()),
-  createdAt: z.string(),
-  expiresAt: z.string(),
+  rowCount: z.number().int().nonnegative().describe('Number of rows persisted in the dataset.'),
+  sizeBytes: z.number().int().nonnegative().describe('Serialized size of the dataset in bytes.'),
+  columns: z
+    .array(z.string().describe('Column name from the persisted rows.'))
+    .describe('Full column list of the persisted rows.'),
+  createdAt: z.string().describe('ISO 8601 timestamp the dataset was created.'),
+  expiresAt: z.string().describe('ISO 8601 timestamp after which the dataset will be purged.'),
 });
 
 export type DatasetHandle = z.infer<typeof DatasetHandleSchema>;

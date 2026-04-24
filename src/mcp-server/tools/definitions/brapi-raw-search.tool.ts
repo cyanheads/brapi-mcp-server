@@ -19,13 +19,14 @@ import { suggestForSearch } from '../shared/raw-routing-hints.js';
 
 const PaginationSchema = z
   .object({
-    currentPage: z.number(),
-    pageSize: z.number(),
-    totalCount: z.number(),
-    totalPages: z.number(),
+    currentPage: z.number().describe('0-indexed page number the server returned.'),
+    pageSize: z.number().describe('Rows per page.'),
+    totalCount: z.number().describe('Total rows matching the query across all pages.'),
+    totalPages: z.number().describe('Total pages at the current pageSize.'),
   })
   .passthrough()
-  .optional();
+  .optional()
+  .describe('BrAPI pagination block. Absent when the endpoint does not paginate.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),

@@ -29,25 +29,38 @@ import {
 
 const ImageRowSchema = z
   .object({
-    imageDbId: z.string(),
-    imageName: z.string().optional(),
-    imageFileName: z.string().optional(),
-    imageFileSize: z.number().optional(),
-    imageHeight: z.number().optional(),
-    imageWidth: z.number().optional(),
-    mimeType: z.string().optional(),
-    imageTimeStamp: z.string().optional(),
-    imageURL: z.string().optional(),
-    observationUnitDbId: z.string().optional(),
-    observationUnitName: z.string().optional(),
-    observationDbIds: z.array(z.string()).optional(),
-    studyDbId: z.string().optional(),
-    studyName: z.string().optional(),
-    descriptiveOntologyTerms: z.array(z.string()).optional(),
-    copyright: z.string().optional(),
-    description: z.string().optional(),
+    imageDbId: z.string().describe('Server-side identifier for the image.'),
+    imageName: z.string().optional().describe('Display name.'),
+    imageFileName: z.string().optional().describe('Original uploaded filename.'),
+    imageFileSize: z.number().optional().describe('File size in bytes.'),
+    imageHeight: z.number().optional().describe('Pixel height.'),
+    imageWidth: z.number().optional().describe('Pixel width.'),
+    mimeType: z.string().optional().describe('MIME type (e.g. "image/jpeg").'),
+    imageTimeStamp: z.string().optional().describe('ISO 8601 capture timestamp.'),
+    imageURL: z
+      .string()
+      .optional()
+      .describe('URL where the bytes live (may be relative to baseUrl or absolute).'),
+    observationUnitDbId: z
+      .string()
+      .optional()
+      .describe('FK to the observation unit this image depicts.'),
+    observationUnitName: z.string().optional().describe('Display name of the observation unit.'),
+    observationDbIds: z
+      .array(z.string().describe('Observation identifier.'))
+      .optional()
+      .describe('FKs to observations this image is evidence for.'),
+    studyDbId: z.string().optional().describe('FK to the study the image belongs to.'),
+    studyName: z.string().optional().describe('Display name of the study.'),
+    descriptiveOntologyTerms: z
+      .array(z.string().describe('Ontology term ID or label.'))
+      .optional()
+      .describe('Descriptive ontology tags (e.g. "CO_334:plot").'),
+    copyright: z.string().optional().describe('Copyright or rights notice.'),
+    description: z.string().optional().describe('Free-text description.'),
   })
-  .passthrough();
+  .passthrough()
+  .describe('One BrAPI image metadata record.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
@@ -59,10 +72,18 @@ const OutputSchema = z.object({
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
-      mimeType: z.record(z.string(), z.number()),
-      studyName: z.record(z.string(), z.number()),
-      observationUnitName: z.record(z.string(), z.number()),
-      descriptiveOntologyTerms: z.record(z.string(), z.number()),
+      mimeType: z
+        .record(z.string(), z.number())
+        .describe('MIME type → count of images with that type.'),
+      studyName: z
+        .record(z.string(), z.number())
+        .describe('Study name → count of images in that study.'),
+      observationUnitName: z
+        .record(z.string(), z.number())
+        .describe('Observation unit name → count of images tied to that unit.'),
+      descriptiveOntologyTerms: z
+        .record(z.string(), z.number())
+        .describe('Ontology term → count of images tagged with that term.'),
     })
     .describe('Value frequency per field across the full result set.'),
   refinementHint: z

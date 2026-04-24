@@ -35,48 +35,76 @@ import {
 
 const VariableRowSchema = z
   .object({
-    observationVariableDbId: z.string(),
-    observationVariableName: z.string().optional(),
-    observationVariablePUI: z.string().optional(),
-    ontologyDbId: z.string().optional(),
-    ontologyName: z.string().optional(),
-    commonCropName: z.string().optional(),
+    observationVariableDbId: z
+      .string()
+      .describe('Server-side identifier for the observation variable.'),
+    observationVariableName: z.string().optional().describe('Display name.'),
+    observationVariablePUI: z
+      .string()
+      .optional()
+      .describe('Persistent unique identifier — typically an ontology term URI.'),
+    ontologyDbId: z.string().optional().describe('FK to the owning ontology.'),
+    ontologyName: z.string().optional().describe('Display name of the owning ontology.'),
+    commonCropName: z.string().optional().describe('Common crop name this variable is scoped to.'),
     trait: z
       .object({
-        traitDbId: z.string().optional(),
-        traitName: z.string().optional(),
-        traitClass: z.string().optional(),
-        description: z.string().optional(),
-        synonyms: z.array(z.string()).optional(),
+        traitDbId: z.string().optional().describe('FK to the trait.'),
+        traitName: z.string().optional().describe('Display name of the trait.'),
+        traitClass: z
+          .string()
+          .optional()
+          .describe('High-level trait grouping (e.g. "agronomic", "morphological").'),
+        description: z.string().optional().describe('Free-text trait description.'),
+        synonyms: z
+          .array(z.string().describe('Trait synonym value.'))
+          .optional()
+          .describe('Registered trait synonyms.'),
       })
       .passthrough()
-      .optional(),
+      .optional()
+      .describe('The biological trait this variable measures.'),
     scale: z
       .object({
-        scaleDbId: z.string().optional(),
-        scaleName: z.string().optional(),
-        dataType: z.string().optional(),
+        scaleDbId: z.string().optional().describe('FK to the scale.'),
+        scaleName: z.string().optional().describe('Display name of the scale.'),
+        dataType: z
+          .string()
+          .optional()
+          .describe('Scale data type (e.g. "Numerical", "Categorical", "Date", "Text").'),
       })
       .passthrough()
-      .optional(),
+      .optional()
+      .describe('Scale used to record this variable (units / type / range).'),
     method: z
       .object({
-        methodDbId: z.string().optional(),
-        methodName: z.string().optional(),
+        methodDbId: z.string().optional().describe('FK to the method.'),
+        methodName: z.string().optional().describe('Display name of the method.'),
       })
       .passthrough()
-      .optional(),
+      .optional()
+      .describe('Measurement method or protocol used to collect this variable.'),
   })
-  .passthrough();
+  .passthrough()
+  .describe('One BrAPI observation variable record.');
 
-const CandidateSchema = z.object({
-  termId: z.string().optional(),
-  name: z.string().optional(),
-  description: z.string().optional(),
-  synonyms: z.array(z.string()).optional(),
-  ontologyDbId: z.string().optional(),
-  source: z.enum(['puiMatch', 'nameMatch', 'synonymMatch', 'traitClassMatch']),
-});
+const CandidateSchema = z
+  .object({
+    termId: z
+      .string()
+      .optional()
+      .describe('Ontology term ID / PUI when available (e.g. "CO_334:0000013").'),
+    name: z.string().optional().describe('Display name of the candidate.'),
+    description: z.string().optional().describe('Trait description, when available.'),
+    synonyms: z
+      .array(z.string().describe('Registered synonym.'))
+      .optional()
+      .describe('Combined variable + trait synonyms.'),
+    ontologyDbId: z.string().optional().describe('Owning ontology ID.'),
+    source: z
+      .enum(['puiMatch', 'nameMatch', 'synonymMatch', 'traitClassMatch'])
+      .describe('How the candidate was ranked — PUI exact / name / synonym / trait-class.'),
+  })
+  .describe('One ranked ontology candidate from a free-text query.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
@@ -90,9 +118,15 @@ const OutputSchema = z.object({
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
-      ontologyDbId: z.record(z.string(), z.number()),
-      traitClass: z.record(z.string(), z.number()),
-      scaleName: z.record(z.string(), z.number()),
+      ontologyDbId: z
+        .record(z.string(), z.number())
+        .describe('Ontology ID → count of variables in that ontology.'),
+      traitClass: z
+        .record(z.string(), z.number())
+        .describe('Trait class → count of variables in that class.'),
+      scaleName: z
+        .record(z.string(), z.number())
+        .describe('Scale name → count of variables using that scale.'),
     })
     .describe('Value frequency per field across the full result set.'),
   ontologyCandidates: z
