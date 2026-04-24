@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "brapi-mcp-server",
-  "description": "",
+  "name": "io.github.cyanheads/brapi-mcp-server",
+  "description": "BrAPI v2.1 plant-breeding workbench for LLMs — studies, germplasm, observations, images, genotypes.",
   "repository": {
-    "url": "",
+    "url": "https://github.com/cyanheads/brapi-mcp-server",
     "source": "github"
   },
   "version": "0.1.0",

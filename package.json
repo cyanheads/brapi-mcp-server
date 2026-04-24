@@ -1,7 +1,7 @@
 {
   "name": "brapi-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "MCP server exposing BrAPI v2.1 (plant breeding interop standard) as a goal-oriented workbench for LLMs — find/get studies, germplasm, observations, images, and genotypes across Breedbase, T3, Gigwa, and the BrAPI test server.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,7 +14,6 @@
     "README.md",
     "LICENSE",
     "CLAUDE.md",
-    "AGENTS.md",
     "Dockerfile",
     "server.json"
   ],
@@ -28,20 +27,20 @@
     "lint:mcp": "tsx scripts/lint-mcp.ts",
     "changelog:build": "tsx scripts/build-changelog.ts",
     "changelog:check": "tsx scripts/build-changelog.ts --check",
-    "test": "vitest run",
+    "test": "bunx --bun vitest run",
     "dev:stdio": "MCP_TRANSPORT_TYPE=stdio tsx --watch src/index.ts",
     "dev:http": "MCP_TRANSPORT_TYPE=http tsx --watch src/index.ts",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
   },
-  "keywords": [
-    "mcp",
-    "mcp-server",
-    "model-context-protocol"
-  ],
+  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "git+https://github.com/cyanheads/brapi-mcp-server.git"
+  },
+  "homepage": "https://github.com/cyanheads/brapi-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/cyanheads/brapi-mcp-server/issues"
   },
   "license": "Apache-2.0",
   "engines": {
@@ -57,6 +56,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.4.7",
     "@types/node": "^25.6.0",
+    "depcheck": "^1.4.7",
     "ignore": "^7.0.5",
     "tsc-alias": "^1.8.16",
     "tsx": "^4.19.0",

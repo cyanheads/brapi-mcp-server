@@ -8,16 +8,6 @@
 
 ---
 
-## First Session
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Read the framework API** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md`
-2. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-3. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what to do next, what's left, or needs direction, suggest relevant options based on the current project state:
