@@ -2,7 +2,7 @@
   "name": "brapi-mcp-server",
   "mcpName": "io.github.cyanheads/brapi-mcp-server",
   "version": "0.2.0",
-  "description": "MCP server for BrAPI v2.1 plant-breeding databases — connect, orient against the capability profile, and drive study / germplasm workflows across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server.",
+  "description": "BrAPI v2.1 MCP server — studies, germplasm, observations, genotypes, images, and pedigrees.",
   "author": "Casey Hand @cyanheads (https://github.com/cyanheads/brapi-mcp-server#readme)",
   "type": "module",
   "main": "dist/index.js",
