@@ -79,14 +79,11 @@ Prefix `brapi_` throughout. Organized by domain.
 | `brapi://server/info` | Current connection summary + capability profile | — |
 | `brapi://study/{studyDbId}` | Stable URI for a study (enriched form) | — |
 | `brapi://germplasm/{germplasmDbId}` | Stable URI for a germplasm | — |
-| `brapi://location/{locationDbId}` | Stable URI for a location | — |
-| `brapi://trial/{trialDbId}` | Stable URI for a trial | — |
-| `brapi://program/{programDbId}` | Stable URI for a program | — |
 | `brapi://dataset/{datasetId}` | Dataset metadata (not full payload) | — |
 | `brapi://calls` | Server capability profile | — |
 | `brapi://filters/{endpoint}` | Filter catalog for a BrAPI endpoint (name/type/description/example per filter) | — |
 
-Every resource has a tool path — study/germplasm/location/trial/program via the `get_*` tools, `brapi://dataset/{datasetId}` via `brapi_manage_dataset` (`mode: 'summary'`), `brapi://filters/{endpoint}` via `brapi_describe_filters`, `brapi://server/info` and `brapi://calls` via `brapi_server_info`. Tool-only clients lose nothing; resources are additive for clients that support them.
+Tool-only clients lose nothing. Primary entities (study, germplasm) have dedicated `get_*` tools; `brapi://dataset/{datasetId}` pairs with `brapi_manage_dataset` (`mode: 'summary'`); `brapi://filters/{endpoint}` pairs with `brapi_describe_filters`; `brapi://server/info` and `brapi://calls` pair with `brapi_server_info`. Reference data (locations) is reachable via `brapi_find_locations` with an ID filter; niche lookups (trials, programs, samples, methods, scales, crosses) route through `brapi_raw_get`. Resources are additive for clients that render them — no feature is resource-only.
 
 ### Prompts
 
@@ -201,7 +198,7 @@ Each step independently testable against BrAPI test server + Cassavabase + T3 wh
 | ObservationUnit | Phenotyping | list, get | Covered inside `brapi_get_study` + `brapi_find_observations` |
 | Image | Phenotyping | list, get bytes | `brapi_find_images`, `brapi_get_image` |
 | VariantSet / Variant / Call | Genotyping | list, get, search (POST, async) | `brapi_find_variants`, `brapi_find_genotype_calls` |
-| Location | Core | list, get | `brapi_find_locations` |
+| Location | Core | list (get via `find_locations` with ID filter) | `brapi_find_locations` |
 | Program / Trial / Season / Crop | Core | list (reference data) | Returned enriched inside `brapi_find_studies` |
 
 ## Workflow analysis
