@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-04-24 02:03:39
+Generated on: 2026-04-24 02:48:00
 
 ```text
 brapi-mcp-server/
@@ -103,15 +103,27 @@ brapi-mcp-server/
 │   │       ├── definitions/
 │   │       │   ├── brapi-connect.tool.ts
 │   │       │   ├── brapi-describe-filters.tool.ts
+│   │       │   ├── brapi-find-genotype-calls.tool.ts
 │   │       │   ├── brapi-find-germplasm.tool.ts
+│   │       │   ├── brapi-find-images.tool.ts
+│   │       │   ├── brapi-find-locations.tool.ts
+│   │       │   ├── brapi-find-observations.tool.ts
 │   │       │   ├── brapi-find-studies.tool.ts
+│   │       │   ├── brapi-find-variables.tool.ts
+│   │       │   ├── brapi-find-variants.tool.ts
 │   │       │   ├── brapi-get-germplasm.tool.ts
+│   │       │   ├── brapi-get-image.tool.ts
 │   │       │   ├── brapi-get-study.tool.ts
-│   │       │   └── brapi-server-info.tool.ts
+│   │       │   ├── brapi-manage-dataset.tool.ts
+│   │       │   ├── brapi-raw-get.tool.ts
+│   │       │   ├── brapi-raw-search.tool.ts
+│   │       │   ├── brapi-server-info.tool.ts
+│   │       │   └── brapi-walk-pedigree.tool.ts
 │   │       └── shared/
 │   │           ├── connect-auth-schema.ts
 │   │           ├── find-helpers.ts
-│   │           └── orientation-envelope.ts
+│   │           ├── orientation-envelope.ts
+│   │           └── raw-routing-hints.ts
 │   ├── services/
 │   │   ├── brapi-client/
 │   │   │   ├── brapi-client.ts
@@ -128,6 +140,10 @@ brapi-mcp-server/
 │   │   ├── dataset-store/
 │   │   │   ├── dataset-store.ts
 │   │   │   ├── index.ts
+│   │   │   └── types.ts
+│   │   ├── ontology-resolver/
+│   │   │   ├── index.ts
+│   │   │   ├── ontology-resolver.ts
 │   │   │   └── types.ts
 │   │   ├── reference-data-cache/
 │   │   │   ├── index.ts

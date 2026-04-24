@@ -1,0 +1,222 @@
+/**
+ * @fileoverview `brapi_find_variants` — find variant records by variant set,
+ * reference, or genomic region. Standard find_* pattern — distributions +
+ * dataset spillover. Note: the BrAPI filter catalog uses `start` / `end` as
+ * single scalars (1-based inclusive / exclusive) per the spec.
+ *
+ * @module mcp-server/tools/definitions/brapi-find-variants.tool
+ */
+
+import { tool, z } from '@cyanheads/mcp-ts-core';
+import { getServerConfig } from '@/config/server-config.js';
+import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
+import { getDatasetStore } from '@/services/dataset-store/index.js';
+import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
+import {
+  AliasInput,
+  asString,
+  buildRefinementHint,
+  computeDistribution,
+  DatasetHandleSchema,
+  ExtraFiltersInput,
+  LoadLimitInput,
+  loadInitialPage,
+  maybeSpill,
+  mergeFilters,
+  renderDistributions,
+} from '../shared/find-helpers.js';
+
+const VariantRowSchema = z
+  .object({
+    variantDbId: z.string(),
+    variantNames: z.array(z.string()).optional(),
+    variantSetDbId: z.string().optional(),
+    variantType: z.string().optional(),
+    referenceBases: z.string().optional(),
+    alternateBases: z.array(z.string()).optional(),
+    referenceName: z.string().optional(),
+    start: z.number().optional(),
+    end: z.number().optional(),
+    filtersPassed: z.boolean().optional(),
+    filtersApplied: z.boolean().optional(),
+    filtersFailed: z.array(z.string()).optional(),
+  })
+  .passthrough();
+
+const OutputSchema = z.object({
+  alias: z.string(),
+  results: z.array(VariantRowSchema),
+  returnedCount: z.number().int().nonnegative(),
+  totalCount: z.number().int().nonnegative(),
+  hasMore: z.boolean(),
+  distributions: z.object({
+    variantType: z.record(z.string(), z.number()),
+    referenceName: z.record(z.string(), z.number()),
+    variantSetDbId: z.record(z.string(), z.number()),
+  }),
+  refinementHint: z.string().optional(),
+  dataset: DatasetHandleSchema.optional(),
+  warnings: z.array(z.string()),
+  appliedFilters: z.record(z.string(), z.unknown()),
+});
+
+type Output = z.infer<typeof OutputSchema>;
+
+export const brapiFindVariants = tool('brapi_find_variants', {
+  description:
+    'Find variant records by variant set, reference sequence, or genomic region (start/end, 1-based inclusive / exclusive). Returns a dataset handle when the upstream total exceeds loadLimit.',
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  input: z.object({
+    alias: AliasInput,
+    variantSets: z.array(z.string()).optional().describe('Filter by variantSetDbIds.'),
+    variants: z.array(z.string()).optional().describe('Filter by variantDbIds.'),
+    references: z.array(z.string()).optional().describe('Filter by referenceDbIds.'),
+    referenceName: z.string().optional().describe('Reference display name (e.g. "chr01", "chr1").'),
+    start: z.number().int().nonnegative().optional().describe('Inclusive 1-based start.'),
+    end: z.number().int().positive().optional().describe('Exclusive 1-based end.'),
+    loadLimit: LoadLimitInput,
+    extraFilters: ExtraFiltersInput,
+  }),
+  output: OutputSchema,
+
+  async handler(input, ctx) {
+    const registry = getServerRegistry();
+    const capabilities = getCapabilityRegistry();
+    const client = getBrapiClient();
+    const datasetStore = getDatasetStore();
+    const config = getServerConfig();
+
+    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+
+    const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
+    if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
+    await capabilities.ensure(
+      connection.baseUrl,
+      { service: 'variants', method: 'GET' },
+      ctx,
+      capabilityLookup,
+    );
+
+    const warnings: string[] = [];
+    if (input.start !== undefined && input.end !== undefined && input.start >= input.end) {
+      warnings.push('start >= end; upstream will likely return an empty result set.');
+    }
+    const filters = mergeFilters(
+      {
+        variantSetDbIds: input.variantSets,
+        variantDbIds: input.variants,
+        referenceDbIds: input.references,
+        referenceName: input.referenceName,
+        start: input.start,
+        end: input.end,
+      },
+      input.extraFilters,
+      warnings,
+    );
+
+    const loadLimit = input.loadLimit ?? config.loadLimit;
+    const firstPage = await loadInitialPage<Record<string, unknown>>(
+      client,
+      connection,
+      '/variants',
+      filters,
+      loadLimit,
+      ctx,
+    );
+
+    const { fullRows, dataset: datasetMeta } = await maybeSpill({
+      firstPage,
+      client,
+      connection,
+      path: '/variants',
+      filters,
+      source: 'find_variants',
+      loadLimit,
+      ctx,
+      store: datasetStore,
+    });
+
+    const distributions = {
+      variantType: computeDistribution(fullRows, (r) => asString(r.variantType)),
+      referenceName: computeDistribution(fullRows, (r) => asString(r.referenceName)),
+      variantSetDbId: computeDistribution(fullRows, (r) => asString(r.variantSetDbId)),
+    };
+
+    const totalCount = firstPage.totalCount ?? firstPage.rows.length;
+    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions);
+
+    const result: Output = {
+      alias: connection.alias,
+      results: firstPage.rows as z.infer<typeof VariantRowSchema>[],
+      returnedCount: firstPage.rows.length,
+      totalCount,
+      hasMore: firstPage.hasMore,
+      distributions,
+      warnings,
+      appliedFilters: filters,
+    };
+    if (refinementHint) result.refinementHint = refinementHint;
+    if (datasetMeta) result.dataset = datasetMeta;
+    return result;
+  },
+
+  format: (result) => {
+    const lines: string[] = [];
+    lines.push(`# ${result.returnedCount} of ${result.totalCount} variants — \`${result.alias}\``);
+    lines.push('');
+    if (result.hasMore) {
+      lines.push(
+        `⚠ More rows exist beyond the returned set. ${result.dataset ? `Full set persisted as dataset \`${result.dataset.datasetId}\`.` : 'Narrow filters or raise loadLimit.'}`,
+      );
+      lines.push('');
+    }
+    if (result.refinementHint) {
+      lines.push(`**Refinement hint:** ${result.refinementHint}`);
+      lines.push('');
+    }
+    lines.push(`Applied filters: \`${JSON.stringify(result.appliedFilters)}\``);
+    lines.push('');
+    lines.push('## Distributions');
+    lines.push(renderDistributions(result.distributions) || '_No values to summarize._');
+    lines.push('');
+    lines.push('## Variants');
+    if (result.results.length === 0) {
+      lines.push('_No rows returned._');
+    } else {
+      for (const v of result.results) {
+        const label = v.variantNames?.[0] ?? v.variantDbId;
+        const parts: string[] = [`**${label}**`];
+        parts.push(`id=\`${v.variantDbId}\``);
+        if (v.variantType) parts.push(`type=${v.variantType}`);
+        if (v.variantSetDbId) parts.push(`set=${v.variantSetDbId}`);
+        if (v.referenceName) parts.push(`ref=${v.referenceName}`);
+        if (v.start !== undefined) parts.push(`start=${v.start}`);
+        if (v.end !== undefined) parts.push(`end=${v.end}`);
+        if (v.referenceBases) parts.push(`refBases=${v.referenceBases}`);
+        if (v.alternateBases?.length) parts.push(`altBases=${v.alternateBases.join(',')}`);
+        if (v.filtersApplied !== undefined) parts.push(`filtersApplied=${v.filtersApplied}`);
+        if (v.filtersPassed !== undefined) parts.push(`filtersPassed=${v.filtersPassed}`);
+        if (v.filtersFailed?.length) parts.push(`filtersFailed=${v.filtersFailed.join(',')}`);
+        if (v.variantNames?.length) parts.push(`names=${v.variantNames.join(',')}`);
+        lines.push(`- ${parts.join(' · ')}`);
+      }
+    }
+    if (result.dataset) {
+      lines.push('');
+      lines.push('## Dataset handle');
+      lines.push(`- datasetId: \`${result.dataset.datasetId}\``);
+      lines.push(`- rowCount: ${result.dataset.rowCount}`);
+      lines.push(`- sizeBytes: ${result.dataset.sizeBytes}`);
+      lines.push(`- columns: ${result.dataset.columns.join(', ')}`);
+      lines.push(`- createdAt: ${result.dataset.createdAt}`);
+      lines.push(`- expiresAt: ${result.dataset.expiresAt}`);
+    }
+    if (result.warnings.length > 0) {
+      lines.push('');
+      lines.push('## Warnings');
+      for (const w of result.warnings) lines.push(`- ${w}`);
+    }
+    return [{ type: 'text', text: lines.join('\n') }];
+  },
+});

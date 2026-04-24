@@ -12,15 +12,27 @@ import { getServerConfig } from '@/config/server-config.js';
 import { initBrapiClient } from '@/services/brapi-client/index.js';
 import { initCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { initDatasetStore } from '@/services/dataset-store/index.js';
+import { initOntologyResolver } from '@/services/ontology-resolver/index.js';
 import { initReferenceDataCache } from '@/services/reference-data-cache/index.js';
 import { initServerRegistry } from '@/services/server-registry/index.js';
 import { brapiConnect } from './mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiDescribeFilters } from './mcp-server/tools/definitions/brapi-describe-filters.tool.js';
+import { brapiFindGenotypeCalls } from './mcp-server/tools/definitions/brapi-find-genotype-calls.tool.js';
 import { brapiFindGermplasm } from './mcp-server/tools/definitions/brapi-find-germplasm.tool.js';
+import { brapiFindImages } from './mcp-server/tools/definitions/brapi-find-images.tool.js';
+import { brapiFindLocations } from './mcp-server/tools/definitions/brapi-find-locations.tool.js';
+import { brapiFindObservations } from './mcp-server/tools/definitions/brapi-find-observations.tool.js';
 import { brapiFindStudies } from './mcp-server/tools/definitions/brapi-find-studies.tool.js';
+import { brapiFindVariables } from './mcp-server/tools/definitions/brapi-find-variables.tool.js';
+import { brapiFindVariants } from './mcp-server/tools/definitions/brapi-find-variants.tool.js';
 import { brapiGetGermplasm } from './mcp-server/tools/definitions/brapi-get-germplasm.tool.js';
+import { brapiGetImage } from './mcp-server/tools/definitions/brapi-get-image.tool.js';
 import { brapiGetStudy } from './mcp-server/tools/definitions/brapi-get-study.tool.js';
+import { brapiManageDataset } from './mcp-server/tools/definitions/brapi-manage-dataset.tool.js';
+import { brapiRawGet } from './mcp-server/tools/definitions/brapi-raw-get.tool.js';
+import { brapiRawSearch } from './mcp-server/tools/definitions/brapi-raw-search.tool.js';
 import { brapiServerInfo } from './mcp-server/tools/definitions/brapi-server-info.tool.js';
+import { brapiWalkPedigree } from './mcp-server/tools/definitions/brapi-walk-pedigree.tool.js';
 
 await createApp({
   tools: [
@@ -31,6 +43,17 @@ await createApp({
     brapiGetStudy,
     brapiFindGermplasm,
     brapiGetGermplasm,
+    brapiWalkPedigree,
+    brapiFindVariables,
+    brapiFindObservations,
+    brapiFindImages,
+    brapiGetImage,
+    brapiFindLocations,
+    brapiFindVariants,
+    brapiFindGenotypeCalls,
+    brapiManageDataset,
+    brapiRawGet,
+    brapiRawSearch,
   ],
   resources: [],
   prompts: [],
@@ -41,5 +64,6 @@ await createApp({
     initReferenceDataCache(serverConfig);
     initDatasetStore(serverConfig);
     initServerRegistry(serverConfig);
+    initOntologyResolver();
   },
 });
