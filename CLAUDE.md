@@ -29,7 +29,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ## Core Rules
 
-- **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
+- **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. The framework catches, classifies, and formats. Default to typed contracts: declare `errors: [...]` and throw via `ctx.fail(reason, …)` so failures carry stable `data.reason` codes for agent-client routing. Fall back to error factories (`notFound()`, `validationError()`, etc.) only for services or when no contract entry fits.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
 - **Check `ctx.elicit` / `ctx.sample`** for presence before calling.
@@ -41,42 +41,39 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool — connection bootstrap
 
-`brapi_connect` is the session handshake. It registers the BrAPI server under a named alias, forces a capability refresh, and inlines the full orientation envelope so one call orients the agent. The same shape is available on-demand via `brapi_server_info`.
+`brapi_connect` is the session handshake. It registers the BrAPI server under a named alias, forces a capability refresh, and inlines the full orientation envelope so one call orients the agent. `baseUrl` and `auth` are both `optional()` — when omitted, `resolveConnectInput` fills them from `BRAPI_<ALIAS>_*` then `BRAPI_DEFAULT_*` env vars, so credentials never enter the LLM context. Same envelope is available on-demand via `brapi_server_info`.
 
 ```ts
-// src/mcp-server/tools/definitions/brapi-connect.tool.ts
+// src/mcp-server/tools/definitions/brapi-connect.tool.ts (abbreviated)
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { getBrapiClient } from '@/services/brapi-client/index.js';
-import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { getServerRegistry } from '@/services/server-registry/index.js';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { resolveConnectInput } from '@/config/alias-credentials.js';
 import { ConnectAuthSchema } from '../shared/connect-auth-schema.js';
-import {
-  buildOrientationEnvelope,
-  formatOrientationEnvelope,
-  OrientationEnvelopeSchema,
-} from '../shared/orientation-envelope.js';
 
 export const brapiConnect = tool('brapi_connect', {
-  description:
-    'Connect to a BrAPI v2 server, authenticate, cache the capability profile, and return the full orientation envelope inline. Must be called before any other BrAPI tool. Supports multiple concurrent connections via named aliases.',
+  description: 'Connect to a BrAPI v2 server… baseUrl + auth fall back to BRAPI_<ALIAS>_* / BRAPI_DEFAULT_* env vars when omitted.',
   annotations: { openWorldHint: true, readOnlyHint: false, idempotentHint: true },
+  errors: [
+    { reason: 'auth_token_exchange_failed', code: JsonRpcErrorCode.Forbidden,
+      when: 'SGN or OAuth token exchange against /token failed',
+      recovery: 'Verify the credentials and that the server exposes /token before retrying.' },
+    { reason: 'auth_no_access_token', code: JsonRpcErrorCode.Forbidden,
+      when: 'Token endpoint responded but did not return an access_token',
+      recovery: 'Confirm the credentials are valid and the IdP issues access tokens for this grant.' },
+  ] as const,
   input: z.object({
-    baseUrl: z.string().url().describe('BrAPI v2 base URL including any path prefix.'),
-    auth: ConnectAuthSchema.default({ mode: 'none' }),
-    alias: z
-      .string()
-      .regex(/^[a-zA-Z0-9_-]+$/)
-      .default('default')
-      .describe('Alias for this connection.'),
+    baseUrl: z.string().url().optional().describe('Falls back to BRAPI_<ALIAS>_BASE_URL → BRAPI_DEFAULT_BASE_URL.'),
+    auth: ConnectAuthSchema.optional().describe('Falls back to env-derived credentials.'),
+    alias: z.string().regex(/^[a-zA-Z0-9_-]+$/).default('default'),
   }),
   output: OrientationEnvelopeSchema,
   async handler(input, ctx) {
-    const registry = getServerRegistry();
-    const capabilities = getCapabilityRegistry();
-    const client = getBrapiClient();
-    const connection = await registry.register(ctx, input);
-    await capabilities.invalidate(connection.baseUrl, ctx);
-    return buildOrientationEnvelope(ctx, connection, { registry: capabilities, client });
+    const resolved = resolveConnectInput(input.alias, { baseUrl: input.baseUrl, auth: input.auth });
+    const connection = await getServerRegistry().register(ctx, {
+      alias: input.alias, baseUrl: resolved.baseUrl, auth: resolved.auth,
+    });
+    await getCapabilityRegistry().invalidate(connection.baseUrl, ctx);
+    return buildOrientationEnvelope(ctx, connection, { registry: getCapabilityRegistry(), client: getBrapiClient() });
   },
   format: (result) => [{ type: 'text', text: formatOrientationEnvelope(result) }],
 });
@@ -151,6 +148,8 @@ export function getServerConfig() {
 
 `parseEnvConfig` maps Zod schema paths → env var names so validation errors name the actual variable (`BRAPI_LOAD_LIMIT`) rather than the internal path (`loadLimit`). It throws a `ConfigurationError` the framework catches and prints as a clean startup banner.
 
+**Per-alias credentials** live in `src/config/alias-credentials.ts`. `readAliasCredentials(alias)` reads `BRAPI_<ALIAS>_*` (uppercased, hyphens → underscores), `deriveAuthFromCredentials(creds)` derives the auth mode from which fields are set (USERNAME+PASSWORD → `sgn`; BEARER_TOKEN → `bearer`; API_KEY → `api_key`; OAUTH_CLIENT_ID+SECRET → `oauth2`; mixing families raises `ValidationError`), and `resolveConnectInput(alias, agentInput)` layers agent input → alias env → default env → no-auth fallback.
+
 ---
 
 ## Context
@@ -165,7 +164,7 @@ Handlers receive a unified `ctx` object. Currently used surface:
 | `ctx.requestId` | Unique request ID — auto-attached to every `ctx.log` entry. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio — scopes all `ctx.state` reads/writes. |
 
-`ctx.elicit`, `ctx.sample`, and `ctx.progress` are not used yet — they'll show up when write tools (`brapi_submit_observations`) and long-running workflows (pedigree traversal, genotype-call pulls) land. `ctx.recoveryFor(reason)` (added in framework 0.8.5) is the typed resolver for declared `errors[]` contract recovery hints — currently a no-op since no tool declares contracts; opt in when adopting `ctx.fail`.
+`ctx.elicit` is used by `brapi_submit_observations` to gate apply-mode writes behind user confirmation (with explicit `force: true` as the bypass). `ctx.sample` and `ctx.progress` are not used yet — they'll show up when long-running workflows (pedigree traversal, genotype-call pulls) need progress reporting or LLM sampling. `ctx.fail(reason, …)` is the typed thrower keyed off declared `errors[]` contracts — used by 8 tools and 3 resources today. `ctx.recoveryFor(reason)` resolves the matching contract entry's recovery hint into `data.recovery.hint` so it surfaces on the wire.
 
 ---
 
@@ -173,7 +172,7 @@ Handlers receive a unified `ctx` object. Currently used surface:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Recommended for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated); to surface it on the wire, spread `...ctx.recoveryFor('reason')` into `data` or pass an explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. No BrAPI tool currently declares contracts — adopt as new tools land.
+**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated); to surface it on the wire, spread `...ctx.recoveryFor('reason')` into `data` or pass an explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Live across the BrAPI surface today: `brapi_connect`, `brapi_describe_filters`, `brapi_find_genotype_calls`, `brapi_get_germplasm`, `brapi_get_image`, `brapi_get_study`, `brapi_manage_dataset`, `brapi_raw_get`, `brapi_submit_observations`, plus the `brapi://study/{studyDbId}`, `brapi://germplasm/{germplasmDbId}`, and `brapi://filters/{endpoint}` resources.
 
 ```ts
 errors: [
@@ -214,11 +213,12 @@ Available factories include `notFound`, `validationError`, `forbidden`, `unautho
 
 ```text
 src/
-  index.ts                                # createApp() entry point — registers 18 tools, inits 7 services
+  index.ts                                # createApp() entry point — registers 19 tools, 6 resources, 2 prompts; inits 7 services
   config/
     server-config.ts                      # BRAPI_* env vars (Zod schema, lazy-parsed)
+    alias-credentials.ts                  # Per-alias env-var resolution (BRAPI_<ALIAS>_*) for brapi_connect
   services/
-    brapi-client/                         # HTTP client — retry, concurrency cap, async-search poll, private-IP guard, binary fetch
+    brapi-client/                         # HTTP client — retry, concurrency cap, async-search poll, private-IP guard, binary fetch, POST/PUT
     brapi-filters/                        # Static v2.1 filter catalog
     capability-registry/                  # Per-connection /serverinfo cache + call guard
     dataset-store/                        # Tenant-scoped handles for spilled find_* results
@@ -244,6 +244,7 @@ src/
         brapi-find-variants.tool.ts       # find_* — variants, 1-based inclusive/exclusive genomic region
         brapi-find-genotype-calls.tool.ts # Async-search genotype calls with maxCalls cap + spillover
         brapi-manage-dataset.tool.ts      # Dataset lifecycle — list / summary / load / delete
+        brapi-submit-observations.tool.ts # Two-phase observation write — preview / apply (POST + PUT) with elicit gate
         brapi-raw-get.tool.ts             # Last-resort GET passthrough with routing nudge
         brapi-raw-search.tool.ts          # Last-resort POST /search passthrough with async polling
       shared/
@@ -251,9 +252,19 @@ src/
         orientation-envelope.ts           # Shared envelope builder + formatter
         find-helpers.ts                   # Alias / loadLimit / extraFilters fragments, mergeFilters, maybeSpill, DatasetHandleSchema
         raw-routing-hints.ts              # Routing nudges emitted by raw_get / raw_search when a curated tool exists
+    resources/
+      definitions/
+        brapi-server-info.resource.ts     # brapi://server/info — orientation envelope (default connection)
+        brapi-calls.resource.ts           # brapi://calls — raw capability profile
+        brapi-study.resource.ts           # brapi://study/{studyDbId} — single study with FKs
+        brapi-germplasm.resource.ts       # brapi://germplasm/{germplasmDbId} — single germplasm with attributes + parents
+        brapi-dataset.resource.ts         # brapi://dataset/{datasetId} — dataset metadata + provenance
+        brapi-filters.resource.ts         # brapi://filters/{endpoint} — filter catalog
+    prompts/
+      definitions/
+        brapi-eda-study.prompt.ts         # EDA playbook for one study (orient → variables → coverage → outliers → report)
+        brapi-meta-analysis.prompt.ts     # Cross-study meta-analysis (resolve trait → discover studies → harmonize → summarize)
 ```
-
-No resources or prompts yet — `find_*` tools expose the dataset surface via handles.
 
 ---
 
