@@ -182,12 +182,19 @@ interface TokenResponse {
 }
 
 const defaultTokenFetcher: TokenFetcher = async (url, body, ctx, options) => {
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    if (value !== undefined && value !== null) form.set(key, String(value));
+  }
   let response: Response;
   try {
     response = await fetchWithTimeout(url, options.timeoutMs, ctx as unknown as RequestContext, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(body),
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+      },
+      body: form.toString(),
       signal: ctx.signal,
       rejectPrivateIPs: options.rejectPrivateIPs,
     });

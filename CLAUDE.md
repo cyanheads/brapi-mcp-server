@@ -302,10 +302,8 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting via Biome |
 | `bun run lint:mcp` | Validate MCP tool / resource / prompt definitions against the spec |
 | `bun run test` | Vitest suite |
-| `bun run dev:stdio` | Dev mode (stdio, hot-reload) |
-| `bun run dev:http` | Dev mode (HTTP, hot-reload) |
-| `bun run start:stdio` | Production mode (stdio) |
-| `bun run start:http` | Production mode (HTTP) |
+| `bun run start:stdio` | Production mode (stdio) — requires prior `bun run build` |
+| `bun run start:http` | Production mode (HTTP) — requires prior `bun run build` |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/<minor>.x/` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 

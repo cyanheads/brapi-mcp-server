@@ -57,12 +57,32 @@ describe('brapi_connect tool', () => {
     initBrapiClient(baseConfig, fetcher as unknown as Fetcher);
     initCapabilityRegistry(baseConfig);
     initServerRegistry(baseConfig);
+    // Bun auto-loads .env, which can leak BRAPI_* vars into tests. Clear the
+    // ones any test in this suite might unintentionally pick up.
+    for (const key of [
+      'BRAPI_DEFAULT_BASE_URL',
+      'BRAPI_DEFAULT_USERNAME',
+      'BRAPI_DEFAULT_PASSWORD',
+      'BRAPI_DEFAULT_API_KEY',
+      'BRAPI_DEFAULT_BEARER_TOKEN',
+      'BRAPI_CASSAVA_BASE_URL',
+      'BRAPI_CASSAVA_USERNAME',
+      'BRAPI_CASSAVA_PASSWORD',
+      'BRAPI_CGIAR_BASE_URL',
+      'BRAPI_CGIAR_BEARER_TOKEN',
+      'BRAPI_PROD_BASE_URL',
+      'BRAPI_PROD_API_KEY',
+      'BRAPI_PROD_API_KEY_HEADER',
+    ]) {
+      vi.stubEnv(key, '');
+    }
   });
 
   afterEach(() => {
     resetBrapiClient();
     resetCapabilityRegistry();
     resetServerRegistry();
+    vi.unstubAllEnvs();
   });
 
   it('registers the connection, loads the capability profile, and composes the orientation envelope', async () => {
@@ -161,6 +181,89 @@ describe('brapi_connect tool', () => {
         ctx,
       ),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+  });
+
+  it('falls back to BRAPI_DEFAULT_BASE_URL when agent omits baseUrl', async () => {
+    vi.stubEnv('BRAPI_DEFAULT_BASE_URL', 'https://env-default.example.org/brapi/v2');
+    fetcher.mockImplementation(async () =>
+      jsonResponse(envelope({ calls: [{ service: 'studies', methods: ['GET'] }] })),
+    );
+
+    const ctx = createMockContext({ tenantId: 't1' });
+    const result = await brapiConnect.handler(brapiConnect.input.parse({}), ctx);
+
+    expect(result.baseUrl).toBe('https://env-default.example.org/brapi/v2');
+    expect(result.auth.mode).toBe('none');
+  });
+
+  it('derives bearer auth from BRAPI_<ALIAS>_BEARER_TOKEN env var', async () => {
+    vi.stubEnv('BRAPI_CGIAR_BASE_URL', BASE_URL);
+    vi.stubEnv('BRAPI_CGIAR_BEARER_TOKEN', 'env-tok');
+    fetcher.mockImplementation(async () =>
+      jsonResponse(envelope({ calls: [{ service: 'studies', methods: ['GET'] }] })),
+    );
+
+    const ctx = createMockContext({ tenantId: 't1' });
+    const result = await brapiConnect.handler(brapiConnect.input.parse({ alias: 'cgiar' }), ctx);
+
+    expect(result.baseUrl).toBe(BASE_URL);
+    expect(result.auth.mode).toBe('bearer');
+    const serverInfoCall = fetcher.mock.calls.find((c) => String(c[0]).endsWith('/serverinfo'));
+    const headers = (serverInfoCall![3] as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBe('Bearer env-tok');
+  });
+
+  it('derives api_key auth from BRAPI_<ALIAS>_API_KEY env var with custom header', async () => {
+    vi.stubEnv('BRAPI_PROD_BASE_URL', BASE_URL);
+    vi.stubEnv('BRAPI_PROD_API_KEY', 'k123');
+    vi.stubEnv('BRAPI_PROD_API_KEY_HEADER', 'X-API-Key');
+    fetcher.mockImplementation(async () =>
+      jsonResponse(envelope({ calls: [{ service: 'studies', methods: ['GET'] }] })),
+    );
+
+    const ctx = createMockContext({ tenantId: 't1' });
+    const result = await brapiConnect.handler(brapiConnect.input.parse({ alias: 'prod' }), ctx);
+
+    expect(result.auth.mode).toBe('api_key');
+    const serverInfoCall = fetcher.mock.calls.find((c) => String(c[0]).endsWith('/serverinfo'));
+    const headers = (serverInfoCall![3] as { headers: Record<string, string> }).headers;
+    expect(headers['X-API-Key']).toBe('k123');
+  });
+
+  it('agent input overrides env vars', async () => {
+    vi.stubEnv('BRAPI_CASSAVA_BASE_URL', 'https://env.example/brapi/v2');
+    vi.stubEnv('BRAPI_CASSAVA_USERNAME', 'envuser');
+    vi.stubEnv('BRAPI_CASSAVA_PASSWORD', 'envpass');
+    fetcher.mockImplementation(async () =>
+      jsonResponse(envelope({ calls: [{ service: 'studies', methods: ['GET'] }] })),
+    );
+
+    const ctx = createMockContext({ tenantId: 't1' });
+    const result = await brapiConnect.handler(
+      brapiConnect.input.parse({
+        alias: 'cassava',
+        baseUrl: BASE_URL,
+        auth: { mode: 'bearer', token: 'agent-tok' },
+      }),
+      ctx,
+    );
+
+    expect(result.baseUrl).toBe(BASE_URL);
+    expect(result.auth.mode).toBe('bearer');
+    const serverInfoCall = fetcher.mock.calls.find((c) => String(c[0]).endsWith('/serverinfo'));
+    const headers = (serverInfoCall![3] as { headers: Record<string, string> }).headers;
+    expect(headers.Authorization).toBe('Bearer agent-tok');
+  });
+
+  it('throws ValidationError when no baseUrl is set anywhere', async () => {
+    // Bun auto-loads .env, so explicitly clear any baseUrl env var that may
+    // be present from the developer's local .env.
+    vi.stubEnv('BRAPI_DEFAULT_BASE_URL', '');
+    const ctx = createMockContext({ tenantId: 't1' });
+    await expect(brapiConnect.handler(brapiConnect.input.parse({}), ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringMatching(/No baseUrl provided/),
+    });
   });
 
   it('format() produces a readable markdown summary covering every surface', () => {

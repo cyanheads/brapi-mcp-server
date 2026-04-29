@@ -448,11 +448,11 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-- **Hot-reload dev mode:**
+- **Hot-reload dev mode** (run `tsx --watch` directly):
 
     ```sh
-    bun run dev:stdio
-    bun run dev:http
+    MCP_TRANSPORT_TYPE=stdio bunx tsx --watch src/index.ts
+    MCP_TRANSPORT_TYPE=http  bunx tsx --watch src/index.ts
     ```
 
 - **Build and run the production version:**

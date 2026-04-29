@@ -9,6 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { resolveConnectInput } from '@/config/alias-credentials.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getServerRegistry } from '@/services/server-registry/index.js';
@@ -21,7 +22,7 @@ import {
 
 export const brapiConnect = tool('brapi_connect', {
   description:
-    'Connect to a BrAPI v2 server, authenticate, cache the capability profile, and return the full orientation envelope inline. Must be called before any other BrAPI tool. Supports multiple concurrent connections via named aliases.',
+    'Connect to a BrAPI v2 server, authenticate, cache the capability profile, and return the full orientation envelope inline. Must be called before any other BrAPI tool. Supports multiple concurrent connections via named aliases. baseUrl + auth fall back to BRAPI_<ALIAS>_* then BRAPI_DEFAULT_* env vars when omitted, so credentials can stay out of the LLM context.',
   annotations: {
     openWorldHint: true,
     readOnlyHint: false,
@@ -31,16 +32,19 @@ export const brapiConnect = tool('brapi_connect', {
     baseUrl: z
       .string()
       .url()
+      .optional()
       .describe(
-        'BrAPI v2 base URL including any path prefix — e.g. https://test-server.brapi.org/brapi/v2',
+        'BrAPI v2 base URL including any path prefix — e.g. https://test-server.brapi.org/brapi/v2. Falls back to BRAPI_<ALIAS>_BASE_URL, then BRAPI_DEFAULT_BASE_URL.',
       ),
-    auth: ConnectAuthSchema.default({ mode: 'none' }),
+    auth: ConnectAuthSchema.optional().describe(
+      'Auth payload. When omitted, derived from BRAPI_<ALIAS>_* env vars (USERNAME+PASSWORD → sgn; BEARER_TOKEN → bearer; API_KEY → api_key; OAUTH_CLIENT_ID+OAUTH_CLIENT_SECRET → oauth2), then BRAPI_DEFAULT_*, then no auth.',
+    ),
     alias: z
       .string()
       .regex(/^[a-zA-Z0-9_-]+$/)
       .default('default')
       .describe(
-        'Alias for this connection. Use distinct aliases to register multiple BrAPI servers in one session.',
+        'Alias for this connection. Use distinct aliases to register multiple BrAPI servers in one session. Drives env-var lookup: alias `cassava` reads `BRAPI_CASSAVA_*`.',
       ),
   }),
   output: OrientationEnvelopeSchema,
@@ -50,16 +54,22 @@ export const brapiConnect = tool('brapi_connect', {
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
 
-    const connection = await registry.register(ctx, {
-      alias: input.alias,
+    const resolved = resolveConnectInput(input.alias, {
       baseUrl: input.baseUrl,
       auth: input.auth,
+    });
+
+    const connection = await registry.register(ctx, {
+      alias: input.alias,
+      baseUrl: resolved.baseUrl,
+      auth: resolved.auth,
     });
 
     ctx.log.info('BrAPI connection registered', {
       alias: connection.alias,
       baseUrl: connection.baseUrl,
       authMode: connection.authMode,
+      authSource: input.auth ? 'agent' : 'env',
     });
 
     // Force a fresh capability load on connect — the agent expects current state.

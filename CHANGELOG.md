@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-04-29
+
+Per-alias env-var fallback for brapi_connect — credentials live in BRAPI_<ALIAS>_* and never enter the LLM context. Plus a Breedbase /token form-encoding fix that unblocks SGN auth against Cassavabase et al.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-04-25
 
 Surface complete — adds brapi_submit_observations write tool, six brapi:// resources, two workflow prompts (eda_study, meta_analysis), POST/PUT methods on BrapiClient, and full test backfill (101 → 191 tests).
