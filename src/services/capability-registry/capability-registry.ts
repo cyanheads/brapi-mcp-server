@@ -31,7 +31,7 @@ export interface CapabilityLookupOptions extends Pick<BrapiRequestOptions, 'auth
   forceRefresh?: boolean;
 }
 
-const STATE_KEY_PREFIX = 'brapi:capability:';
+const STATE_KEY_PREFIX = 'brapi/capability/';
 
 export class CapabilityRegistry {
   constructor(

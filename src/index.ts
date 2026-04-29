@@ -15,6 +15,14 @@ import { initDatasetStore } from '@/services/dataset-store/index.js';
 import { initOntologyResolver } from '@/services/ontology-resolver/index.js';
 import { initReferenceDataCache } from '@/services/reference-data-cache/index.js';
 import { initServerRegistry } from '@/services/server-registry/index.js';
+import { brapiEdaStudy } from './mcp-server/prompts/definitions/brapi-eda-study.prompt.js';
+import { brapiMetaAnalysis } from './mcp-server/prompts/definitions/brapi-meta-analysis.prompt.js';
+import { brapiCallsResource } from './mcp-server/resources/definitions/brapi-calls.resource.js';
+import { brapiDatasetResource } from './mcp-server/resources/definitions/brapi-dataset.resource.js';
+import { brapiFiltersResource } from './mcp-server/resources/definitions/brapi-filters.resource.js';
+import { brapiGermplasmResource } from './mcp-server/resources/definitions/brapi-germplasm.resource.js';
+import { brapiServerInfoResource } from './mcp-server/resources/definitions/brapi-server-info.resource.js';
+import { brapiStudyResource } from './mcp-server/resources/definitions/brapi-study.resource.js';
 import { brapiConnect } from './mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiDescribeFilters } from './mcp-server/tools/definitions/brapi-describe-filters.tool.js';
 import { brapiFindGenotypeCalls } from './mcp-server/tools/definitions/brapi-find-genotype-calls.tool.js';
@@ -32,6 +40,7 @@ import { brapiManageDataset } from './mcp-server/tools/definitions/brapi-manage-
 import { brapiRawGet } from './mcp-server/tools/definitions/brapi-raw-get.tool.js';
 import { brapiRawSearch } from './mcp-server/tools/definitions/brapi-raw-search.tool.js';
 import { brapiServerInfo } from './mcp-server/tools/definitions/brapi-server-info.tool.js';
+import { brapiSubmitObservations } from './mcp-server/tools/definitions/brapi-submit-observations.tool.js';
 import { brapiWalkPedigree } from './mcp-server/tools/definitions/brapi-walk-pedigree.tool.js';
 
 await createApp({
@@ -52,11 +61,19 @@ await createApp({
     brapiFindVariants,
     brapiFindGenotypeCalls,
     brapiManageDataset,
+    brapiSubmitObservations,
     brapiRawGet,
     brapiRawSearch,
   ],
-  resources: [],
-  prompts: [],
+  resources: [
+    brapiServerInfoResource,
+    brapiCallsResource,
+    brapiStudyResource,
+    brapiGermplasmResource,
+    brapiDatasetResource,
+    brapiFiltersResource,
+  ],
+  prompts: [brapiEdaStudy, brapiMetaAnalysis],
   setup() {
     const serverConfig = getServerConfig();
     initBrapiClient(serverConfig);

@@ -187,6 +187,70 @@ export class BrapiClient {
   }
 
   /**
+   * POST /{path} with a JSON body. Used for write endpoints (e.g. creating
+   * observations). Same retry + classification policy as `get()`. The body is
+   * serialized as JSON and `Content-Type: application/json` is forced.
+   */
+  post<T>(
+    baseUrl: string,
+    path: string,
+    body: unknown,
+    ctx: Context,
+    options: BrapiRequestOptions = {},
+  ): Promise<BrapiEnvelope<T>> {
+    return this.sendJson<T>('POST', baseUrl, path, body, ctx, options);
+  }
+
+  /**
+   * PUT /{path} with a JSON body. Used for upsert / update endpoints. BrAPI
+   * routes update calls (`PUT /observations`, `PUT /germplasm`) through this.
+   */
+  put<T>(
+    baseUrl: string,
+    path: string,
+    body: unknown,
+    ctx: Context,
+    options: BrapiRequestOptions = {},
+  ): Promise<BrapiEnvelope<T>> {
+    return this.sendJson<T>('PUT', baseUrl, path, body, ctx, options);
+  }
+
+  private sendJson<T>(
+    method: 'POST' | 'PUT',
+    baseUrl: string,
+    path: string,
+    body: unknown,
+    ctx: Context,
+    options: BrapiRequestOptions = {},
+  ): Promise<BrapiEnvelope<T>> {
+    return withRetry(
+      async () => {
+        const response = await this.doFetch(
+          this.buildUrl(baseUrl, path, options.params),
+          ctx,
+          {
+            method,
+            headers: {
+              ...this.buildHeaders(options.auth),
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+          },
+          options.timeoutMs,
+        );
+        return this.parseEnvelope<T>(response);
+      },
+      {
+        operation: `brapi.${method.toLowerCase()} ${path}`,
+        context: asRequestContext(ctx),
+        maxRetries: this.serverConfig.retryMaxAttempts,
+        baseDelayMs: this.serverConfig.retryBaseDelayMs,
+        signal: ctx.signal,
+      },
+    );
+  }
+
+  /**
    * Poll `GET /search/{noun}/{searchResultsDbId}`. Returns the envelope once
    * the server replies with 200. 202 means "still processing" — the method
    * sleeps `searchPollIntervalMs` and retries until `searchPollTimeoutMs`.

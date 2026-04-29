@@ -75,8 +75,8 @@ export const brapiRawGet = tool('brapi_raw_get', {
     const client = getBrapiClient();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    rejectCrossOrigin(input.path);
     const path = normalizePath(input.path);
-    rejectCrossOrigin(path);
 
     const requestOptions: BrapiRequestOptions = {};
     if (connection.resolvedAuth) requestOptions.auth = connection.resolvedAuth;

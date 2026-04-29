@@ -143,8 +143,8 @@ describe('brapi_connect tool', () => {
     await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL, alias: 'yam' }), ctx);
 
     // Both aliases persisted in state.
-    const cassava = await ctx.state.get('brapi:conn:cassava');
-    const yam = await ctx.state.get('brapi:conn:yam');
+    const cassava = await ctx.state.get('brapi/conn/cassava');
+    const yam = await ctx.state.get('brapi/conn/yam');
     expect(cassava).toBeDefined();
     expect(yam).toBeDefined();
   });

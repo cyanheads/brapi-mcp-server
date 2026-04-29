@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-04-25
+
+Surface complete — adds brapi_submit_observations write tool, six brapi:// resources, two workflow prompts (eda_study, meta_analysis), POST/PUT methods on BrapiClient, and full test backfill (101 → 191 tests).
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-04-24
 
 Framework bump to @cyanheads/mcp-ts-core 0.6.16 — recursive describe-on-fields linting, synced skills, and .describe() coverage on every nested field, array element, and union variant across the 18-tool surface.

@@ -24,7 +24,7 @@ import type { AuthMode, ConnectAuth, RegisteredServer } from './types.js';
 
 export const DEFAULT_ALIAS = 'default';
 
-const CONN_PREFIX = 'brapi:conn:';
+const CONN_PREFIX = 'brapi/conn/';
 
 export interface RegisterInput {
   alias?: string;

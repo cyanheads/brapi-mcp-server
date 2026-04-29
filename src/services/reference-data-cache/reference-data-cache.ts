@@ -85,9 +85,9 @@ export class ReferenceDataCache {
   async invalidate(baseUrl: string, ctx: Context): Promise<void> {
     const serverSlug = sanitizeKey(baseUrl);
     await Promise.all([
-      this.deletePrefix(ctx, `brapi:ref:${PROGRAM_CFG.cachePrefix}:${serverSlug}:`),
-      this.deletePrefix(ctx, `brapi:ref:${TRIAL_CFG.cachePrefix}:${serverSlug}:`),
-      this.deletePrefix(ctx, `brapi:ref:${LOCATION_CFG.cachePrefix}:${serverSlug}:`),
+      this.deletePrefix(ctx, `brapi/ref/${PROGRAM_CFG.cachePrefix}/${serverSlug}/`),
+      this.deletePrefix(ctx, `brapi/ref/${TRIAL_CFG.cachePrefix}/${serverSlug}/`),
+      this.deletePrefix(ctx, `brapi/ref/${LOCATION_CFG.cachePrefix}/${serverSlug}/`),
     ]);
   }
 
@@ -102,7 +102,7 @@ export class ReferenceDataCache {
 
     const uniqueIds = Array.from(new Set(ids));
     const serverSlug = sanitizeKey(baseUrl);
-    const keyFor = (id: string) => `brapi:ref:${cfg.cachePrefix}:${serverSlug}:${id}`;
+    const keyFor = (id: string) => `brapi/ref/${cfg.cachePrefix}/${serverSlug}/${id}`;
 
     const cached = await ctx.state.getMany<T>(uniqueIds.map(keyFor));
 

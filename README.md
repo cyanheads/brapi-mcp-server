@@ -1,13 +1,13 @@
 <div align="center">
   <h1>brapi-mcp-server</h1>
   <p><b>MCP server for BrAPI v2.1 plant-breeding databases — connect, orient against the capability profile, and drive study / germplasm workflows across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server.</b>
-  <div>18 Tools • 0 Resources • 0 Prompts</div>
+  <div>19 Tools • 6 Resources • 2 Prompts</div>
   </p>
 </div>
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
@@ -17,7 +17,7 @@
 
 ## Tools
 
-Eighteen tools grouped by shape — connection tools bootstrap a session, `find_*` tools return a summarized page plus distributions and spill overflow rows into the DatasetStore, `get_*` tools fetch a single record with companion counts, plus pedigree walking, dataset lifecycle, and raw passthrough escape hatches.
+Nineteen tools grouped by shape — connection tools bootstrap a session, `find_*` tools return a summarized page plus distributions and spill overflow rows into the DatasetStore, `get_*` tools fetch a single record with companion counts, plus pedigree walking, dataset lifecycle, an additive write surface for observations, and raw passthrough escape hatches.
 
 ### Orient
 
@@ -49,6 +49,12 @@ Eighteen tools grouped by shape — connection tools bootstrap a session, `find_
 | Tool Name | Description |
 |:----------|:------------|
 | `brapi_manage_dataset` | Lifecycle for `find_*` spillover datasets — list, summary, load (paged rows with column projection), delete. |
+
+### Write
+
+| Tool Name | Description |
+|:----------|:------------|
+| `brapi_submit_observations` | Submit new (POST) or updated (PUT) observation rows for a study. Default `mode: preview` validates only; `mode: apply` elicits confirmation, fans POST + PUT in parallel, and reports the post-write count. Additive — no observation is destroyed. |
 
 ### Escape hatches
 
@@ -237,6 +243,50 @@ Last-resort passthrough to any BrAPI `POST /search/{noun}`. Handles the 202 / as
 
 - Same routing-nudge behavior as `brapi_raw_get`
 - Returns `kind: sync | async` and the `searchResultsDbId` when the server took the async path
+
+---
+
+### `brapi_submit_observations`
+
+Two-phase write for observation rows. Default `mode: preview` validates rows against the study's variables and returns a routing breakdown; `mode: apply` elicits user confirmation when the client supports it, then POSTs new rows and PUTs rows carrying `observationDbId` in parallel.
+
+- POST/PUT routing keyed on per-row `observationDbId` presence — mixed batches in one call
+- Pre-flight pulls `/studies/{id}/observationvariables` to flag rows whose variable isn't exposed by the study (warning, not rejection — the upstream is the source of truth)
+- Apply mode requires `ctx.elicit` confirmation OR an explicit `force: true` flag (rejected with `Forbidden` otherwise)
+- Post-write probe re-fetches `/studies/{id}/observations?pageSize=0` to surface the new total in the response
+- `latestObservationTimestamp` echoes the most recent `observationTimeStamp` across the accepted rows
+- Additive only — destructive deletion is not exposed; corrections route through PUT
+- Auth scope: `brapi:write:observations` (HTTP deployments only)
+
+---
+
+## Resources
+
+Six MCP resources mirror the curated tool surface for clients that prefer URI-addressable access. Tool-only clients lose nothing — every resource has a corresponding tool path.
+
+| URI template | Description |
+|:-------------|:------------|
+| `brapi://server/info` | Orientation envelope for the default connection (mirror of `brapi_server_info`). |
+| `brapi://calls` | Raw capability profile — supported services, their methods/versions, declared crops. |
+| `brapi://study/{studyDbId}` | Single study with FKs resolved (mirror of `brapi_get_study`). |
+| `brapi://germplasm/{germplasmDbId}` | Single germplasm with attributes and parents (mirror of `brapi_get_germplasm`). |
+| `brapi://dataset/{datasetId}` | Metadata + provenance for a persisted dataset (paged rows via `brapi_manage_dataset` mode `load`). |
+| `brapi://filters/{endpoint}` | Filter catalog for a BrAPI endpoint (mirror of `brapi_describe_filters`). |
+
+All resources use the default connection. Multi-server workflows route through the tool surface where alias is an explicit input.
+
+---
+
+## Prompts
+
+Two prompt templates package multi-step BrAPI workflows so the agent can pick them off the shelf.
+
+| Name | Args | Purpose |
+|:-----|:-----|:--------|
+| `brapi_eda_study` | `studyDbId`, `alias?` | Exploratory-data-analysis playbook for a single study — orient, variables, coverage, missing data, outliers, pedigree side-quest, structured report. |
+| `brapi_meta_analysis` | `germplasmDbIds` (CSV), `traitName`, `alias?` | Cross-study meta-analysis playbook — trait resolution, study discovery, harmonization, per-germplasm × per-study summary, across-study summary, pedigree context. |
+
+Pure templates — they generate the user message a downstream LLM consumes. No side effects.
 
 ---
 
@@ -437,9 +487,11 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 
 | Directory | Purpose |
 |:----------|:--------|
-| `src/index.ts` | `createApp()` entry point — registers the 18 tools and inits the seven services. |
+| `src/index.ts` | `createApp()` entry point — registers 19 tools, 6 resources, 2 prompts, and inits the seven services. |
 | `src/config` | Server-specific environment variable parsing with Zod. |
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`) and shared helpers (`orientation-envelope`, `find-helpers`, `connect-auth-schema`, `raw-routing-hints`). |
+| `src/mcp-server/resources` | Resource definitions (`*.resource.ts`) — URI-addressable mirrors of curated tool data. |
+| `src/mcp-server/prompts` | Prompt definitions (`*.prompt.ts`) — multi-step BrAPI workflow templates. |
 | `src/services/brapi-client` | HTTP client with retry, concurrency capping, async-search polling, private-IP guard, and binary fetch. |
 | `src/services/brapi-filters` | Static BrAPI v2.1 filter catalog. |
 | `src/services/capability-registry` | Per-connection capability profile cache. |

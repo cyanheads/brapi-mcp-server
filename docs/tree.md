@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-04-24 02:48:00
+Generated on: 2026-04-25 11:48:01
 
 ```text
 brapi-mcp-server/
@@ -15,6 +15,8 @@ brapi-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -22,6 +24,7 @@ brapi-mcp-server/
 │   ├── build-changelog.ts
 │   ├── build.ts
 │   ├── check-docs-sync.ts
+│   ├── check-framework-antipatterns.ts
 │   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
@@ -97,8 +100,16 @@ brapi-mcp-server/
 │   ├── mcp-server/
 │   │   ├── prompts/
 │   │   │   └── definitions/
+│   │   │       ├── brapi-eda-study.prompt.ts
+│   │   │       └── brapi-meta-analysis.prompt.ts
 │   │   ├── resources/
 │   │   │   └── definitions/
+│   │   │       ├── brapi-calls.resource.ts
+│   │   │       ├── brapi-dataset.resource.ts
+│   │   │       ├── brapi-filters.resource.ts
+│   │   │       ├── brapi-germplasm.resource.ts
+│   │   │       ├── brapi-server-info.resource.ts
+│   │   │       └── brapi-study.resource.ts
 │   │   └── tools/
 │   │       ├── definitions/
 │   │       │   ├── brapi-connect.tool.ts
@@ -118,6 +129,7 @@ brapi-mcp-server/
 │   │       │   ├── brapi-raw-get.tool.ts
 │   │       │   ├── brapi-raw-search.tool.ts
 │   │       │   ├── brapi-server-info.tool.ts
+│   │       │   ├── brapi-submit-observations.tool.ts
 │   │       │   └── brapi-walk-pedigree.tool.ts
 │   │       └── shared/
 │   │           ├── connect-auth-schema.ts
@@ -155,6 +167,16 @@ brapi-mcp-server/
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
+│   ├── prompts/
+│   │   ├── brapi-eda-study.prompt.test.ts
+│   │   └── brapi-meta-analysis.prompt.test.ts
+│   ├── resources/
+│   │   ├── brapi-calls.resource.test.ts
+│   │   ├── brapi-dataset.resource.test.ts
+│   │   ├── brapi-filters.resource.test.ts
+│   │   ├── brapi-germplasm.resource.test.ts
+│   │   ├── brapi-server-info.resource.test.ts
+│   │   └── brapi-study.resource.test.ts
 │   ├── services/
 │   │   ├── brapi-client.test.ts
 │   │   ├── capability-registry.test.ts
@@ -165,11 +187,23 @@ brapi-mcp-server/
 │       ├── _tool-test-helpers.ts
 │       ├── brapi-connect.tool.test.ts
 │       ├── brapi-describe-filters.tool.test.ts
+│       ├── brapi-find-genotype-calls.tool.test.ts
 │       ├── brapi-find-germplasm.tool.test.ts
+│       ├── brapi-find-images.tool.test.ts
+│       ├── brapi-find-locations.tool.test.ts
+│       ├── brapi-find-observations.tool.test.ts
 │       ├── brapi-find-studies.tool.test.ts
+│       ├── brapi-find-variables.tool.test.ts
+│       ├── brapi-find-variants.tool.test.ts
 │       ├── brapi-get-germplasm.tool.test.ts
+│       ├── brapi-get-image.tool.test.ts
 │       ├── brapi-get-study.tool.test.ts
-│       └── brapi-server-info.tool.test.ts
+│       ├── brapi-manage-dataset.tool.test.ts
+│       ├── brapi-raw-get.tool.test.ts
+│       ├── brapi-raw-search.tool.test.ts
+│       ├── brapi-server-info.tool.test.ts
+│       ├── brapi-submit-observations.tool.test.ts
+│       └── brapi-walk-pedigree.tool.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore

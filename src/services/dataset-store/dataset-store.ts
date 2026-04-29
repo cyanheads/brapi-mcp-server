@@ -21,8 +21,8 @@ import type {
   DatasetPage,
 } from './types.js';
 
-const META_PREFIX = 'brapi:ds:meta:';
-const ROWS_PREFIX = 'brapi:ds:rows:';
+const META_PREFIX = 'brapi/ds/meta/';
+const ROWS_PREFIX = 'brapi/ds/rows/';
 
 const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 1_000;
