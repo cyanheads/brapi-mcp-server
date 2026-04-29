@@ -25,7 +25,7 @@ export const brapiFiltersResource = resource('brapi://filters/{endpoint}', {
       reason: 'unknown_endpoint',
       code: JsonRpcErrorCode.NotFound,
       when: 'No filter catalog is registered for the requested endpoint',
-      recovery: 'Pick an endpoint from the list field, or use the brapi://filters resource list.',
+      recovery: `Pick a known endpoint (${ENDPOINTS.join(', ')}) — listing brapi://filters returns one resource per supported endpoint.`,
     },
   ] as const,
   params: z.object({

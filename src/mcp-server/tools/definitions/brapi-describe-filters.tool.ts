@@ -35,7 +35,7 @@ export const brapiDescribeFilters = tool('brapi_describe_filters', {
       code: JsonRpcErrorCode.NotFound,
       when: 'No filter catalog is registered for the requested endpoint',
       recovery:
-        'Pick an endpoint from availableEndpoints in the previous response or in the input enum.',
+        'Pick an endpoint from data.availableEndpoints — same set as the input enum (studies, germplasm, observations, variables, images, variants, locations).',
     },
   ] as const,
   input: z.object({

@@ -191,21 +191,22 @@ const SUBMIT_ERRORS = [
     reason: 'observations_unsupported',
     code: JsonRpcErrorCode.ValidationError,
     when: 'BrAPI server does not advertise /observations',
-    recovery: 'Confirm the target server exposes the observations endpoint before retrying.',
+    recovery:
+      'Run brapi_server_info to inspect the advertised endpoints, or call brapi_connect with a different alias for a server that exposes /observations.',
   },
   {
     reason: 'post_unsupported',
     code: JsonRpcErrorCode.ValidationError,
     when: 'Server does not advertise POST on /observations but new rows were submitted',
     recovery:
-      'Drop new rows or remove observationDbId so all rows route to PUT, or pick a server that supports POST.',
+      'Remove the rows that lack observationDbId (those are the new rows) before retrying, or connect to a different server that supports POST on /observations.',
   },
   {
     reason: 'put_unsupported',
     code: JsonRpcErrorCode.ValidationError,
     when: 'Server does not advertise PUT on /observations but update rows were submitted',
     recovery:
-      'Drop the observationDbId on each row to route as POST, or pick a server that supports PUT.',
+      'Connect to a different server that supports PUT on /observations — dropping observationDbId would route as POST and create duplicates instead of updating the existing rows.',
   },
   {
     reason: 'elicit_unavailable',

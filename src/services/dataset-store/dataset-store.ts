@@ -74,6 +74,7 @@ export class DatasetStore {
       throw notFound(`Dataset ${datasetId} not found or expired.`, {
         datasetId,
         reason: 'dataset_not_found',
+        ...ctx.recoveryFor('dataset_not_found'),
       });
     }
     return meta;
@@ -90,7 +91,11 @@ export class DatasetStore {
     if (!rows) {
       throw notFound(
         `Dataset ${datasetId} metadata exists but rows are missing (storage inconsistency or partial expiry).`,
-        { datasetId, reason: 'dataset_rows_missing' },
+        {
+          datasetId,
+          reason: 'dataset_rows_missing',
+          ...ctx.recoveryFor('dataset_rows_missing'),
+        },
       );
     }
 

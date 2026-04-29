@@ -76,7 +76,7 @@ export const brapiGetImage = tool('brapi_get_image', {
       code: JsonRpcErrorCode.NotFound,
       when: 'BrAPI server does not advertise /images in /serverinfo',
       recovery:
-        'Confirm the upstream server exposes BrAPI image endpoints; otherwise no images can be fetched.',
+        'Run brapi_server_info to inspect the advertised endpoints, or call brapi_connect with a different alias for a server that exposes /images.',
     },
   ] as const,
   input: z.object({

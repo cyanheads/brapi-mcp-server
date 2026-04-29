@@ -151,6 +151,7 @@ export class ServerRegistry {
         tokenUrl,
         payloadKeys: Object.keys(payload),
         reason: 'auth_no_access_token',
+        ...ctx.recoveryFor('auth_no_access_token'),
       });
     }
     const resolved: ResolvedAuth = {
@@ -202,7 +203,11 @@ const defaultTokenFetcher: TokenFetcher = async (url, body, ctx, options) => {
   } catch (err) {
     throw forbidden(
       `Token exchange failed at ${url}. Verify credentials and that the server exposes /token.`,
-      { tokenUrl: url, reason: 'auth_token_exchange_failed' },
+      {
+        tokenUrl: url,
+        reason: 'auth_token_exchange_failed',
+        ...ctx.recoveryFor('auth_token_exchange_failed'),
+      },
       { cause: err },
     );
   }

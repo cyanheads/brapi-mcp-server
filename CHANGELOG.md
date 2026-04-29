@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.3](changelog/0.3.x/0.3.3.md) — 2026-04-29
+
+Tighten recovery hints across BrAPI tool/resource error contracts and wire service-layer throws so declared hints actually reach the wire.
+
 ## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-04-29
 
 Adopt mcp-ts-core 0.8.6 typed-error contracts across the BrAPI surface, fix a germplasmOrigin schema bug that broke output validation against spec-compliant servers.
