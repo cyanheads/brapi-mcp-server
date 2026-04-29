@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-04-29
+
+Adopt mcp-ts-core 0.8.6 typed-error contracts across the BrAPI surface, fix a germplasmOrigin schema bug that broke output validation against spec-compliant servers.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-04-29
 
 Per-alias env-var fallback for brapi_connect — credentials live in BRAPI_<ALIAS>_* and never enter the LLM context. Plus a Breedbase /token form-encoding fix that unblocks SGN auth against Cassavabase et al.
