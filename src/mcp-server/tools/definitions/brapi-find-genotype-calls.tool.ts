@@ -9,7 +9,7 @@
  */
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { type DatasetStore, getDatasetStore } from '@/services/dataset-store/index.js';
@@ -125,8 +125,17 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
-  description: `Pull genotype calls for a germplasm × variant set. Handles BrAPI's async-search pattern transparently. Default cap of ${DEFAULT_MAX_CALLS} calls; override via maxCalls (hard cap ${HARD_MAX_CALLS}). Rows beyond the in-context loadLimit spill to DatasetStore for export via brapi_manage_dataset.`,
+  description: `Pull genotype calls for a germplasm × variant set, returned as a single resolved batch. Default cap of ${DEFAULT_MAX_CALLS} calls; override via maxCalls (hard cap ${HARD_MAX_CALLS}). Rows beyond the in-context loadLimit are persisted as a dataset handle for follow-up paging via brapi_manage_dataset.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
+  errors: [
+    {
+      reason: 'no_filters',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'No variant set, germplasm, call set, or variant filter was provided',
+      recovery:
+        'Provide variantSetDbId or germplasmDbIds before retrying — unfiltered pulls are too expensive.',
+    },
+  ] as const,
   input: z.object({
     alias: AliasInput,
     variantSetDbId: z
@@ -193,9 +202,10 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       !searchBody.callSetDbIds &&
       !searchBody.variantDbIds
     ) {
-      throw validationError(
+      throw ctx.fail(
+        'no_filters',
         'Provide at least one filter (variantSetDbId, variantSetDbIds, germplasmDbIds, callSetDbIds, or variantDbIds) — unfiltered genotype-call pulls are prohibitively expensive.',
-        { filters: searchBody },
+        { filters: searchBody, ...ctx.recoveryFor('no_filters') },
       );
     }
 

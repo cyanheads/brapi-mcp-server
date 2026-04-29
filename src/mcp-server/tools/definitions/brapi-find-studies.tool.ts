@@ -99,7 +99,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindStudies = tool('brapi_find_studies', {
   description:
-    'Locate studies matching crop, trial type, season, location, program, or free-text criteria. Results are enriched with program/trial/location context in one call. Returns a dataset handle when the upstream total exceeds loadLimit. Use brapi_describe_filters to discover extraFilters keys.',
+    'Locate studies matching crop, trial type, season, location, program, or free-text criteria. Results are enriched with program/trial/location context in one call. Returns a dataset handle when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     alias: AliasInput,

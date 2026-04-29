@@ -51,7 +51,7 @@ async function connect(
     if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
     return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
   });
-  const ctx = createMockContext({ tenantId: 't1' });
+  const ctx = createMockContext({ tenantId: 't1', errors: brapiGetImage.errors });
   await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
   fetcher.mockReset();
   return ctx;

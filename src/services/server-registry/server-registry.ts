@@ -68,7 +68,7 @@ export class ServerRegistry {
     if (!entry) {
       throw notFound(
         `No BrAPI connection registered under alias '${alias}'. Call brapi_connect first.`,
-        { alias },
+        { alias, reason: 'unknown_alias' },
       );
     }
     return entry;
@@ -150,6 +150,7 @@ export class ServerRegistry {
       throw forbidden('SGN token exchange returned no access_token', {
         tokenUrl,
         payloadKeys: Object.keys(payload),
+        reason: 'auth_no_access_token',
       });
     }
     const resolved: ResolvedAuth = {
@@ -201,7 +202,7 @@ const defaultTokenFetcher: TokenFetcher = async (url, body, ctx, options) => {
   } catch (err) {
     throw forbidden(
       `Token exchange failed at ${url}. Verify credentials and that the server exposes /token.`,
-      { tokenUrl: url },
+      { tokenUrl: url, reason: 'auth_token_exchange_failed' },
       { cause: err },
     );
   }

@@ -8,7 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getReferenceDataCache } from '@/services/reference-data-cache/index.js';
@@ -121,6 +121,15 @@ export const brapiGetStudy = tool('brapi_get_study', {
   description:
     'Fetch a single study by DbId with program, trial, and location fully resolved. Response includes cheap observation/observation-unit/variable counts as drill-down signals.',
   annotations: { readOnlyHint: true, idempotentHint: true },
+  errors: [
+    {
+      reason: 'study_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Upstream returned no study record for the requested DbId',
+      recovery:
+        'Verify the studyDbId on the target server, or run brapi_find_studies to discover valid IDs.',
+    },
+  ] as const,
   input: z.object({
     studyDbId: z.string().min(1).describe('Study identifier.'),
     alias: AliasInput,
@@ -156,10 +165,15 @@ export const brapiGetStudy = tool('brapi_get_study', {
     );
     const study = studyEnv.result;
     if (!study || typeof study !== 'object' || !study.studyDbId) {
-      throw notFound(`Study '${input.studyDbId}' not found on ${connection.baseUrl}.`, {
-        studyDbId: input.studyDbId,
-        baseUrl: connection.baseUrl,
-      });
+      throw ctx.fail(
+        'study_not_found',
+        `Study '${input.studyDbId}' not found on ${connection.baseUrl}.`,
+        {
+          studyDbId: input.studyDbId,
+          baseUrl: connection.baseUrl,
+          ...ctx.recoveryFor('study_not_found'),
+        },
+      );
     }
 
     const programDbId = asString(study.programDbId);

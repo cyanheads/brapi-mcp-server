@@ -10,8 +10,8 @@
  * @module mcp-server/tools/definitions/brapi-submit-observations.tool
  */
 
-import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
-import { forbidden, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { type Context, type HandlerContext, tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
@@ -25,7 +25,7 @@ const ObservationRowSchema = z
       .min(1)
       .optional()
       .describe(
-        'When present, the row is routed to PUT /observations (update). When absent, the row is routed to POST /observations (create).',
+        'Server-assigned identifier of an existing observation. When present, the row updates that observation; when absent, the row creates a new one.',
       ),
     observationUnitDbId: z
       .string()
@@ -186,15 +186,54 @@ interface RowDecision {
   warnings: string[];
 }
 
+const SUBMIT_ERRORS = [
+  {
+    reason: 'observations_unsupported',
+    code: JsonRpcErrorCode.ValidationError,
+    when: 'BrAPI server does not advertise /observations',
+    recovery: 'Confirm the target server exposes the observations endpoint before retrying.',
+  },
+  {
+    reason: 'post_unsupported',
+    code: JsonRpcErrorCode.ValidationError,
+    when: 'Server does not advertise POST on /observations but new rows were submitted',
+    recovery:
+      'Drop new rows or remove observationDbId so all rows route to PUT, or pick a server that supports POST.',
+  },
+  {
+    reason: 'put_unsupported',
+    code: JsonRpcErrorCode.ValidationError,
+    when: 'Server does not advertise PUT on /observations but update rows were submitted',
+    recovery:
+      'Drop the observationDbId on each row to route as POST, or pick a server that supports PUT.',
+  },
+  {
+    reason: 'elicit_unavailable',
+    code: JsonRpcErrorCode.Forbidden,
+    when: 'Apply mode invoked but client does not expose ctx.elicit and force was false',
+    recovery:
+      'Set force=true only with explicit user authorization, or use a client that supports elicitation.',
+  },
+  {
+    reason: 'user_declined',
+    code: JsonRpcErrorCode.Forbidden,
+    when: 'User declined the elicitation prompt for the apply write',
+    recovery: 'Re-run the tool when the user is ready to confirm the write.',
+  },
+] as const;
+
+type SubmitCtx = HandlerContext<(typeof SUBMIT_ERRORS)[number]['reason']>;
+
 export const brapiSubmitObservations = tool('brapi_submit_observations', {
   description:
-    'Submit new or updated observations for a study. Default mode `preview` validates rows against the study variables and returns a routing breakdown without writing. Mode `apply` elicits confirmation when supported, then POSTs new rows and PUTs rows carrying observationDbId, and returns the post-write study count plus per-row server echoes. Additive only — no observation is destroyed.',
+    'Submit new or updated observations for a study. Default mode `preview` validates rows against the study variables and returns a routing breakdown without writing. Mode `apply` elicits confirmation when supported, then creates rows that lack observationDbId, updates rows that carry one, and returns the post-write study count plus per-row server echoes. Additive only — no observation is destroyed.',
   annotations: {
     readOnlyHint: false,
     destructiveHint: false,
     idempotentHint: true,
     openWorldHint: true,
   },
+  errors: SUBMIT_ERRORS,
   input: z.object({
     alias: AliasInput,
     studyDbId: z.string().min(1).describe('Study the observations are submitted against.'),
@@ -234,9 +273,10 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
     const supportsPost = obsDescriptor?.methods?.includes('POST') ?? false;
     const supportsPut = obsDescriptor?.methods?.includes('PUT') ?? false;
     if (!obsDescriptor) {
-      throw validationError(
+      throw ctx.fail(
+        'observations_unsupported',
         `BrAPI server at ${connection.baseUrl} does not advertise '/observations' in /calls. Cannot submit observations.`,
-        { baseUrl: connection.baseUrl },
+        { baseUrl: connection.baseUrl, ...ctx.recoveryFor('observations_unsupported') },
       );
     }
 
@@ -314,15 +354,17 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
     }
 
     if (postCount > 0 && !supportsPost) {
-      throw validationError(
+      throw ctx.fail(
+        'post_unsupported',
         `Server does not advertise POST on /observations. ${postCount} new row(s) cannot be created.`,
-        { baseUrl: connection.baseUrl, postCount },
+        { baseUrl: connection.baseUrl, postCount, ...ctx.recoveryFor('post_unsupported') },
       );
     }
     if (putCount > 0 && !supportsPut) {
-      throw validationError(
+      throw ctx.fail(
+        'put_unsupported',
         `Server does not advertise PUT on /observations. ${putCount} update row(s) cannot be applied.`,
-        { baseUrl: connection.baseUrl, putCount },
+        { baseUrl: connection.baseUrl, putCount, ...ctx.recoveryFor('put_unsupported') },
       );
     }
 
@@ -480,12 +522,18 @@ interface ConfirmInput {
   valid: number;
 }
 
-async function confirmApply(ctx: Context, input: ConfirmInput): Promise<void> {
+async function confirmApply(ctx: SubmitCtx, input: ConfirmInput): Promise<void> {
   if (input.force) return;
   if (!ctx.elicit) {
-    throw forbidden(
+    throw ctx.fail(
+      'elicit_unavailable',
       'Apply mode requires user confirmation. The MCP client does not expose elicitation, so set `force: true` to bypass — but only with explicit user authorization for this write.',
-      { studyDbId: input.studyDbId, valid: input.valid, invalid: input.invalid },
+      {
+        studyDbId: input.studyDbId,
+        valid: input.valid,
+        invalid: input.invalid,
+        ...ctx.recoveryFor('elicit_unavailable'),
+      },
     );
   }
   const message = [
@@ -505,9 +553,10 @@ async function confirmApply(ctx: Context, input: ConfirmInput): Promise<void> {
     result.data !== null &&
     (result.data as { confirm?: unknown }).confirm === true;
   if (result.action !== 'accept' || !confirmed) {
-    throw forbidden('User declined to apply observation writes.', {
+    throw ctx.fail('user_declined', 'User declined to apply observation writes.', {
       studyDbId: input.studyDbId,
       action: result.action,
+      ...ctx.recoveryFor('user_declined'),
     });
   }
 }

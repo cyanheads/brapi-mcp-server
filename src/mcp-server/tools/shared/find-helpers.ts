@@ -38,14 +38,14 @@ export const LoadLimitInput = z
   .positive()
   .optional()
   .describe(
-    'Override the in-context row cap (BRAPI_LOAD_LIMIT). Rows beyond the cap spill to a dataset handle.',
+    'Override the in-context row cap (BRAPI_LOAD_LIMIT). Rows beyond the cap return as a dataset handle.',
   );
 
 export const ExtraFiltersInput = z
   .record(z.string(), z.unknown())
   .optional()
   .describe(
-    'Extra BrAPI filters forwarded verbatim. Use brapi_describe_filters to discover valid keys for the endpoint. Named params on this tool take precedence on conflict.',
+    'Extra BrAPI filters forwarded verbatim. Valid keys vary by endpoint; brapi_describe_filters enumerates them. Named params on this tool take precedence on conflict.',
   );
 
 /**

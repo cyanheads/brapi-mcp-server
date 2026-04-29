@@ -19,7 +19,7 @@ import {
 
 export const brapiServerInfo = tool('brapi_server_info', {
   description:
-    'Return the full orientation envelope for a registered BrAPI connection — server identity, capabilities, content counts, and notes. Use after `brapi_connect` to refresh capability data or when switching between registered aliases.',
+    'Return the full orientation envelope for a registered BrAPI connection — server identity, capabilities, content counts, and notes. Re-running refreshes the cached capability scan; pass an alias to read a non-default connection.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     alias: z

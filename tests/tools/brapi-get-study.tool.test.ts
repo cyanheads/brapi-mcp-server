@@ -37,7 +37,7 @@ async function connect(fetcher: MockFetcher) {
     }
     throw new Error(`Unexpected connect path: ${path}`);
   });
-  const ctx = createMockContext({ tenantId: 't1' });
+  const ctx = createMockContext({ tenantId: 't1', errors: brapiGetStudy.errors });
   await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
   fetcher.mockReset();
   return ctx;

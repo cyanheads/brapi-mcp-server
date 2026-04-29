@@ -32,7 +32,7 @@ async function connect(fetcher: MockFetcher) {
     if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
     return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
   });
-  const ctx = createMockContext({ tenantId: 't1' });
+  const ctx = createMockContext({ tenantId: 't1', errors: brapiGetGermplasm.errors });
   await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
   fetcher.mockReset();
   return ctx;

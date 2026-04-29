@@ -10,7 +10,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getDatasetStore } from '@/services/dataset-store/index.js';
 
 const DatasetMetadataSchema = z.object({
@@ -126,11 +126,43 @@ export const brapiManageDataset = tool('brapi_manage_dataset', {
   description:
     'Dataset lifecycle — list (enumerate), summary (metadata+provenance), load (page rows with column projection), delete (drop payload). Datasets are produced by find_* tools when the upstream total exceeds loadLimit. Export (CSV/Parquet) is not yet implemented.',
   annotations: { readOnlyHint: false, idempotentHint: false },
+  errors: [
+    {
+      reason: 'datasetid_required',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Mode summary, load, or delete was selected without a datasetId',
+      recovery: 'Call mode=list first to discover available dataset IDs, then retry with one.',
+    },
+    {
+      reason: 'dataset_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Requested dataset is not present in the store (never existed or already expired)',
+      recovery:
+        'Run mode=list to confirm available datasets, or rerun the find_* tool that produced it.',
+    },
+    {
+      reason: 'dataset_rows_missing',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Dataset metadata is present but the row payload was lost or partially expired',
+      recovery:
+        'Delete the stale dataset via mode=delete and rerun the find_* tool that produced it.',
+    },
+  ] as const,
   input: InputSchema,
   output: OutputSchema,
 
   async handler(input, ctx) {
     const store = getDatasetStore();
+
+    const requireDatasetId = (): string => {
+      if (!input.datasetId) {
+        throw ctx.fail('datasetid_required', `mode='${input.mode}' requires datasetId.`, {
+          mode: input.mode,
+          ...ctx.recoveryFor('datasetid_required'),
+        });
+      }
+      return input.datasetId;
+    };
 
     switch (input.mode) {
       case 'list': {
@@ -146,13 +178,13 @@ export const brapiManageDataset = tool('brapi_manage_dataset', {
         return { result: branch };
       }
       case 'summary': {
-        const datasetId = requireDatasetId(input);
+        const datasetId = requireDatasetId();
         const dataset = await store.summary(ctx, datasetId);
         const branch: z.infer<typeof SummaryResultSchema> = { mode: 'summary', dataset };
         return { result: branch };
       }
       case 'load': {
-        const datasetId = requireDatasetId(input);
+        const datasetId = requireDatasetId();
         const loadOptions: { page?: number; pageSize?: number; columns?: string[] } = {};
         if (input.page !== undefined) loadOptions.page = input.page;
         if (input.pageSize !== undefined) loadOptions.pageSize = input.pageSize;
@@ -170,7 +202,7 @@ export const brapiManageDataset = tool('brapi_manage_dataset', {
         return { result: branch };
       }
       case 'delete': {
-        const datasetId = requireDatasetId(input);
+        const datasetId = requireDatasetId();
         await store.delete(ctx, datasetId);
         const branch: z.infer<typeof DeleteResultSchema> = {
           mode: 'delete',
@@ -201,13 +233,6 @@ export const brapiManageDataset = tool('brapi_manage_dataset', {
     }
   },
 });
-
-function requireDatasetId(input: z.infer<typeof InputSchema>): string {
-  if (!input.datasetId) {
-    throw validationError(`mode='${input.mode}' requires datasetId.`, { mode: input.mode });
-  }
-  return input.datasetId;
-}
 
 function renderList(result: Extract<Result, { mode: 'list' }>): string {
   const lines: string[] = [];

@@ -110,7 +110,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindObservations = tool('brapi_find_observations', {
   description:
-    'Pull observation records filtered by study, germplasm, variable, season, or observation unit. Returns a dataset handle when the upstream total exceeds loadLimit — inspect via brapi_manage_dataset. Use brapi_describe_filters for extraFilters keys.',
+    'Pull observation records filtered by study, germplasm, variable, season, or observation unit. Returns a dataset handle when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     alias: AliasInput,

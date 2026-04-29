@@ -37,7 +37,7 @@ describe('brapi_manage_dataset tool', () => {
   });
 
   it('list returns all persisted datasets', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiManageDataset.errors });
     const ds = await seedDataset(ctx);
     const result = await brapiManageDataset.handler(
       brapiManageDataset.input.parse({ mode: 'list' }),
@@ -51,7 +51,7 @@ describe('brapi_manage_dataset tool', () => {
   });
 
   it('summary returns the metadata of a single dataset', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiManageDataset.errors });
     const ds = await seedDataset(ctx);
     const result = await brapiManageDataset.handler(
       brapiManageDataset.input.parse({ mode: 'summary', datasetId: ds.datasetId }),
@@ -65,7 +65,7 @@ describe('brapi_manage_dataset tool', () => {
   });
 
   it('load returns a paged slice with column projection', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiManageDataset.errors });
     const ds = await seedDataset(ctx, 5);
     const result = await brapiManageDataset.handler(
       brapiManageDataset.input.parse({
@@ -87,7 +87,7 @@ describe('brapi_manage_dataset tool', () => {
   });
 
   it('delete drops the dataset, then summary throws NotFound', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiManageDataset.errors });
     const ds = await seedDataset(ctx);
     await brapiManageDataset.handler(
       brapiManageDataset.input.parse({ mode: 'delete', datasetId: ds.datasetId }),
@@ -102,14 +102,14 @@ describe('brapi_manage_dataset tool', () => {
   });
 
   it('rejects summary / load / delete when datasetId is missing', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiManageDataset.errors });
     await expect(
       brapiManageDataset.handler(brapiManageDataset.input.parse({ mode: 'summary' }), ctx),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
   });
 
   it('format() renders a summary section the agent can read', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiManageDataset.errors });
     const ds = await seedDataset(ctx);
     const result = await brapiManageDataset.handler(
       brapiManageDataset.input.parse({ mode: 'summary', datasetId: ds.datasetId }),

@@ -8,6 +8,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { brapiDescribeFilters } from '@/mcp-server/tools/definitions/brapi-describe-filters.tool.js';
 import { listFilterEndpoints } from '@/services/brapi-filters/index.js';
 
@@ -19,6 +20,14 @@ export const brapiFiltersResource = resource('brapi://filters/{endpoint}', {
   description:
     'BrAPI filter catalog for a single endpoint (name, type, description, example per filter). Mirrors the brapi_describe_filters tool.',
   mimeType: 'application/json',
+  errors: [
+    {
+      reason: 'unknown_endpoint',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No filter catalog is registered for the requested endpoint',
+      recovery: 'Pick an endpoint from the list field, or use the brapi://filters resource list.',
+    },
+  ] as const,
   params: z.object({
     endpoint: z
       .string()

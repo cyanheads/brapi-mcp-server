@@ -12,6 +12,7 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import {
   forbidden,
+  internalError,
   JsonRpcErrorCode,
   McpError,
   notFound,
@@ -269,11 +270,10 @@ export class BrapiClient {
 
     for (;;) {
       if (ctx.signal.aborted) {
-        throw new McpError(
-          JsonRpcErrorCode.InternalError,
-          'Async search polling aborted by caller',
-          { noun, searchResultsDbId },
-        );
+        throw internalError('Async search polling aborted by caller', {
+          noun,
+          searchResultsDbId,
+        });
       }
       if (Date.now() - startedAt > pollTimeoutMs) {
         throw serviceUnavailable(
@@ -380,13 +380,14 @@ function reclassifyHttpError(err: unknown): void {
   const status = extractHttpStatus(err);
   if (status === undefined) return;
   if (status >= 500) return;
+  const data = asRecord(err.data) ?? {};
   if (status === 429) {
-    throw rateLimited(err.message, { ...(asRecord(err.data) ?? {}) });
+    throw rateLimited(err.message, { ...data, reason: 'upstream_rate_limited' });
   }
-  if (status === 401) throw unauthorized(err.message, asRecord(err.data));
-  if (status === 403) throw forbidden(err.message, asRecord(err.data));
-  if (status === 404) throw notFound(err.message, asRecord(err.data));
-  throw validationError(err.message, asRecord(err.data));
+  if (status === 401) throw unauthorized(err.message, { ...data, reason: 'upstream_unauthorized' });
+  if (status === 403) throw forbidden(err.message, { ...data, reason: 'upstream_forbidden' });
+  if (status === 404) throw notFound(err.message, { ...data, reason: 'upstream_not_found' });
+  throw validationError(err.message, { ...data, reason: 'upstream_bad_request' });
 }
 
 function extractHttpStatus(err: McpError): number | undefined {
@@ -422,7 +423,7 @@ function extractAsyncId(envelope: BrapiEnvelope<unknown>): string | undefined {
 function sleep(ms: number, ctx: Context): Promise<void> {
   return new Promise((resolve, reject) => {
     if (ctx.signal.aborted) {
-      reject(new McpError(JsonRpcErrorCode.InternalError, 'Sleep aborted by caller'));
+      reject(internalError('Sleep aborted by caller'));
       return;
     }
     const timer = setTimeout(() => {
@@ -431,7 +432,7 @@ function sleep(ms: number, ctx: Context): Promise<void> {
     }, ms);
     const onAbort = () => {
       clearTimeout(timer);
-      reject(new McpError(JsonRpcErrorCode.InternalError, 'Sleep aborted by caller'));
+      reject(internalError('Sleep aborted by caller'));
     };
     ctx.signal.addEventListener('abort', onAbort, { once: true });
   });

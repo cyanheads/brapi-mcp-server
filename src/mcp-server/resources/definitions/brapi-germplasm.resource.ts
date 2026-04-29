@@ -7,6 +7,7 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { brapiGetGermplasm } from '@/mcp-server/tools/definitions/brapi-get-germplasm.tool.js';
 
 export const brapiGermplasmResource = resource('brapi://germplasm/{germplasmDbId}', {
@@ -15,6 +16,15 @@ export const brapiGermplasmResource = resource('brapi://germplasm/{germplasmDbId
   description:
     'Single-germplasm resource on the default BrAPI connection — same payload as the brapi_get_germplasm tool, addressable by URI.',
   mimeType: 'application/json',
+  errors: [
+    {
+      reason: 'germplasm_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Upstream returned no germplasm record for the requested DbId',
+      recovery:
+        'Verify the germplasmDbId on the target server, or run brapi_find_germplasm to discover valid IDs.',
+    },
+  ] as const,
   params: z.object({
     germplasmDbId: z.string().min(1).describe('Germplasm identifier on the default connection.'),
   }),

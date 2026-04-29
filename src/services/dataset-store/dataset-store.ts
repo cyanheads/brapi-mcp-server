@@ -71,7 +71,10 @@ export class DatasetStore {
   async summary(ctx: Context, datasetId: string): Promise<DatasetMetadata> {
     const meta = await ctx.state.get<DatasetMetadata>(metaKey(datasetId));
     if (!meta) {
-      throw notFound(`Dataset ${datasetId} not found or expired.`, { datasetId });
+      throw notFound(`Dataset ${datasetId} not found or expired.`, {
+        datasetId,
+        reason: 'dataset_not_found',
+      });
     }
     return meta;
   }
@@ -87,7 +90,7 @@ export class DatasetStore {
     if (!rows) {
       throw notFound(
         `Dataset ${datasetId} metadata exists but rows are missing (storage inconsistency or partial expiry).`,
-        { datasetId },
+        { datasetId, reason: 'dataset_rows_missing' },
       );
     }
 

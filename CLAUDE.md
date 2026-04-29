@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.3.0
+**Version:** 0.3.2
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -165,30 +165,48 @@ Handlers receive a unified `ctx` object. Currently used surface:
 | `ctx.requestId` | Unique request ID — auto-attached to every `ctx.log` entry. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio — scopes all `ctx.state` reads/writes. |
 
-`ctx.elicit`, `ctx.sample`, and `ctx.progress` are not used yet — they'll show up when write tools (`brapi_submit_observations`) and long-running workflows (pedigree traversal, genotype-call pulls) land.
+`ctx.elicit`, `ctx.sample`, and `ctx.progress` are not used yet — they'll show up when write tools (`brapi_submit_observations`) and long-running workflows (pedigree traversal, genotype-call pulls) land. `ctx.recoveryFor(reason)` (added in framework 0.8.5) is the typed resolver for declared `errors[]` contract recovery hints — currently a no-op since no tool declares contracts; opt in when adopting `ctx.fail`.
 
 ---
 
 ## Errors
 
-Handlers throw — the framework catches, classifies, and formats. Three escalation levels:
+Handlers throw — the framework catches, classifies, and formats.
+
+**Recommended for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated); to surface it on the wire, spread `...ctx.recoveryFor('reason')` into `data` or pass an explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. No BrAPI tool currently declares contracts — adopt as new tools land.
 
 ```ts
-// 1. Plain Error — framework auto-classifies from message patterns
+errors: [
+  { reason: 'unknown_alias', code: JsonRpcErrorCode.NotFound,
+    when: 'No connection registered for this alias',
+    recovery: 'Call brapi_connect with this alias before retrying.' },
+],
+async handler(input, ctx) {
+  const conn = registry.peek(input.alias);
+  if (!conn) throw ctx.fail('unknown_alias', `No connection for ${input.alias}`,
+    { ...ctx.recoveryFor('unknown_alias') });
+  // ...
+}
+```
+
+**Fallback (no contract entry fits, services, prototype tools):** throw via factories or plain `Error`.
+
+```ts
+// Plain Error — framework auto-classifies from message patterns
 throw new Error('Item not found');           // → NotFound
 throw new Error('Invalid query format');     // → ValidationError
 
-// 2. Error factories — explicit code, concise
-import { notFound, validationError, forbidden, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+// Error factories — explicit code, concise
+import { notFound, validationError, internalError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 throw notFound('Item not found', { itemId });
 throw serviceUnavailable('API unavailable', { url }, { cause: err });
 
-// 3. McpError — full control over code and data
+// McpError — full control over code and data
 import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 throw new McpError(JsonRpcErrorCode.DatabaseError, 'Connection failed', { pool: 'primary' });
 ```
 
-Plain `Error` is fine for most cases. Use factories when the error code matters. See framework CLAUDE.md for the full auto-classification table and all available factories.
+Available factories include `notFound`, `validationError`, `forbidden`, `unauthorized`, `serviceUnavailable`, `rateLimited`, `timeout`, `conflict`, `internalError`, `serializationError`, `databaseError`, `configurationError`, `invalidParams`, `invalidRequest`. See framework CLAUDE.md for the full auto-classification table and the `api-errors` skill for contract patterns.
 
 ---
 
@@ -302,6 +320,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting via Biome |
 | `bun run lint:mcp` | Validate MCP tool / resource / prompt definitions against the spec |
 | `bun run test` | Vitest suite |
+| `bun run start` | Production mode — defers transport selection to `MCP_TRANSPORT_TYPE` (stdio default) |
 | `bun run start:stdio` | Production mode (stdio) — requires prior `bun run build` |
 | `bun run start:http` | Production mode (HTTP) — requires prior `bun run build` |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/<minor>.x/` |

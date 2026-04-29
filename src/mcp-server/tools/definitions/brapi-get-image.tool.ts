@@ -9,7 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
@@ -68,8 +68,17 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 export const brapiGetImage = tool('brapi_get_image', {
-  description: `Fetch image bytes for up to ${MAX_IMAGES_PER_CALL} imageDbIds and return them inline as \`type: image\` content blocks. Prefers the BrAPI \`/images/{id}/imagecontent\` endpoint; falls back to the \`imageURL\` field when the server doesn't implement imagecontent. Use brapi_find_images first to locate candidates. No filesystem side-effects.`,
+  description: `Fetch image bytes for up to ${MAX_IMAGES_PER_CALL} imageDbIds and return them inline as \`type: image\` content blocks. Prefers the BrAPI \`/images/{id}/imagecontent\` endpoint; falls back to the \`imageURL\` field when the server doesn't implement imagecontent. Companion: brapi_find_images locates candidate imageDbIds. No filesystem side-effects.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+  errors: [
+    {
+      reason: 'images_unsupported',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'BrAPI server does not advertise /images in /serverinfo',
+      recovery:
+        'Confirm the upstream server exposes BrAPI image endpoints; otherwise no images can be fetched.',
+    },
+  ] as const,
   input: z.object({
     imageDbIds: z
       .array(z.string().min(1))
@@ -91,9 +100,10 @@ export const brapiGetImage = tool('brapi_get_image', {
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
     const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
     if (!profile.supported.images) {
-      throw notFound(
+      throw ctx.fail(
+        'images_unsupported',
         `BrAPI server at ${connection.baseUrl} does not advertise '/images'. Cannot fetch image bytes.`,
-        { baseUrl: connection.baseUrl },
+        { baseUrl: connection.baseUrl, ...ctx.recoveryFor('images_unsupported') },
       );
     }
     const hasImageContent = Boolean(profile.supported['images/{imageDbId}/imagecontent']);

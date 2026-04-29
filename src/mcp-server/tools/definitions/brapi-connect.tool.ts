@@ -9,6 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { resolveConnectInput } from '@/config/alias-credentials.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
@@ -22,12 +23,27 @@ import {
 
 export const brapiConnect = tool('brapi_connect', {
   description:
-    'Connect to a BrAPI v2 server, authenticate, cache the capability profile, and return the full orientation envelope inline. Must be called before any other BrAPI tool. Supports multiple concurrent connections via named aliases. baseUrl + auth fall back to BRAPI_<ALIAS>_* then BRAPI_DEFAULT_* env vars when omitted, so credentials can stay out of the LLM context.',
+    'Connect to a BrAPI v2 server, authenticate, cache the capability profile, and return the full orientation envelope inline. Required handshake before other BrAPI tools. Supports multiple concurrent connections via named aliases. baseUrl + auth fall back to BRAPI_<ALIAS>_* then BRAPI_DEFAULT_* env vars when omitted, so credentials stay out of tool inputs.',
   annotations: {
     openWorldHint: true,
     readOnlyHint: false,
     idempotentHint: true,
   },
+  errors: [
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery: 'Verify the credentials and that the server exposes /token before retrying.',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Token endpoint responded but did not return an access_token',
+      recovery:
+        'Confirm the credentials are valid and the upstream IdP issues access tokens for this grant.',
+    },
+  ] as const,
   input: z.object({
     baseUrl: z
       .string()

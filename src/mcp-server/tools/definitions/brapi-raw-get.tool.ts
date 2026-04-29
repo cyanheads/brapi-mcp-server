@@ -8,7 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   type BrapiPagination,
   type BrapiRequestOptions,
@@ -52,8 +52,17 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiRawGet = tool('brapi_raw_get', {
   description:
-    'Passthrough to any BrAPI GET /{path} endpoint the goal-shaped tools do not cover. Returns the raw upstream envelope. Prefer brapi_find_*/brapi_get_* tools when applicable — they enrich results and resolve foreign keys; this tool does not. Emits a `suggestion` field when a curated tool covers the endpoint.',
+    'Passthrough to any BrAPI GET /{path} endpoint not covered by goal-shaped tools. Returns the raw upstream envelope without enrichment or foreign-key resolution. Emits a `suggestion` field when a curated tool covers the endpoint.',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  errors: [
+    {
+      reason: 'cross_origin_path',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'path argument was a full URL instead of a relative BrAPI route',
+      recovery:
+        'Pass a path like "/samples" or "/methods" — the connection alias supplies the baseUrl.',
+    },
+  ] as const,
   input: z.object({
     alias: AliasInput,
     path: z
@@ -75,7 +84,14 @@ export const brapiRawGet = tool('brapi_raw_get', {
     const client = getBrapiClient();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
-    rejectCrossOrigin(input.path);
+    // The path is appended to the registered baseUrl; if the caller smuggles a
+    // full URL (http://evil/...) `new URL()` would silently hijack the request.
+    if (/^https?:\/\//i.test(input.path)) {
+      throw ctx.fail('cross_origin_path', 'path must be a relative BrAPI route, not a full URL.', {
+        path: input.path,
+        ...ctx.recoveryFor('cross_origin_path'),
+      });
+    }
     const path = normalizePath(input.path);
 
     const requestOptions: BrapiRequestOptions = {};
@@ -148,12 +164,4 @@ function buildDisplayUrl(baseUrl: string, path: string, params?: Record<string, 
     }
   }
   return url.toString();
-}
-
-function rejectCrossOrigin(path: string): void {
-  // The path is appended to the registered baseUrl; if the caller smuggles a
-  // full URL (http://evil/...) `new URL()` would silently hijack the request.
-  if (/^https?:\/\//i.test(path)) {
-    throw validationError('path must be a relative BrAPI route, not a full URL.', { path });
-  }
 }

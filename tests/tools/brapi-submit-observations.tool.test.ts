@@ -44,7 +44,11 @@ async function connect(fetcher: MockFetcher, options: ConnectOptions = {}) {
     if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
     return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
   });
-  const ctx = createMockContext({ tenantId: 't1', ...(options.ctxOptions ?? {}) });
+  const ctx = createMockContext({
+    tenantId: 't1',
+    errors: brapiSubmitObservations.errors,
+    ...(options.ctxOptions ?? {}),
+  });
   await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
   fetcher.mockReset();
   return ctx;
@@ -296,7 +300,7 @@ describe('brapi_submit_observations tool', () => {
       if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
       return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
     });
-    const ctx = createMockContext({ tenantId: 't1' });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiSubmitObservations.errors });
     await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
     fetcher.mockReset();
 

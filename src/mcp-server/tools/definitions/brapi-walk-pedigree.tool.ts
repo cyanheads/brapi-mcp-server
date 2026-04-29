@@ -101,7 +101,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
   description:
-    'Walk germplasm ancestry or descendancy as a deduplicated DAG (BFS). BrAPI only exposes one generation per call; this tool handles traversal, cycle detection, and depth limits. Returns nodes + edges plus traversal stats (depthReached, rootCount, leafCount, cycleCount, deadEndCount).',
+    'Walk germplasm ancestry or descendancy as a deduplicated DAG, with multi-generation traversal, cycle detection, and depth limits. Returns nodes + edges plus traversal stats (depthReached, rootCount, leafCount, cycleCount, deadEndCount).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     germplasmDbIds: z

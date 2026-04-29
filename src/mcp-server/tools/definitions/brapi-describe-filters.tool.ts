@@ -9,7 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getFilterCatalog, listFilterEndpoints } from '@/services/brapi-filters/index.js';
 
 const ENDPOINT_VALUES = listFilterEndpoints();
@@ -27,8 +27,17 @@ const FilterDescriptorSchema = z
 
 export const brapiDescribeFilters = tool('brapi_describe_filters', {
   description:
-    'List the valid filter names for a BrAPI endpoint (studies, germplasm, observations, variables, images, variants, locations). Use this to discover what keys can go into the `extraFilters` passthrough on any `find_*` tool. Entries reflect the BrAPI v2.1 spec — individual servers may implement subsets.',
+    'List the valid filter names for a BrAPI endpoint (studies, germplasm, observations, variables, images, variants, locations) — companion lookup for the `extraFilters` passthrough on any `find_*` tool. Entries reflect the BrAPI v2.1 spec; individual servers may implement subsets.',
   annotations: { readOnlyHint: true, idempotentHint: true },
+  errors: [
+    {
+      reason: 'unknown_endpoint',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No filter catalog is registered for the requested endpoint',
+      recovery:
+        'Pick an endpoint from availableEndpoints in the previous response or in the input enum.',
+    },
+  ] as const,
   input: z.object({
     endpoint: z
       .enum(ENDPOINT_VALUES as [string, ...string[]])
@@ -47,12 +56,17 @@ export const brapiDescribeFilters = tool('brapi_describe_filters', {
       .describe('Every endpoint this tool can describe — useful for discovery.'),
   }),
 
-  handler(input, _ctx) {
+  handler(input, ctx) {
     const catalog = getFilterCatalog(input.endpoint);
     if (!catalog) {
-      throw notFound(
+      throw ctx.fail(
+        'unknown_endpoint',
         `No filter catalog for endpoint '${input.endpoint}'. Available: ${ENDPOINT_VALUES.join(', ')}.`,
-        { endpoint: input.endpoint, availableEndpoints: ENDPOINT_VALUES },
+        {
+          endpoint: input.endpoint,
+          availableEndpoints: ENDPOINT_VALUES,
+          ...ctx.recoveryFor('unknown_endpoint'),
+        },
       );
     }
     return {

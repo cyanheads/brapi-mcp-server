@@ -55,7 +55,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiRawSearch = tool('brapi_raw_search', {
   description:
-    'Passthrough to any BrAPI POST /search/{noun} endpoint. Handles async polling transparently. Prefer brapi_find_* tools when applicable — they layer distributions, FK resolution, and dataset spillover on top.',
+    'Passthrough to any BrAPI POST /search/{noun} endpoint, returning the resolved envelope (async polling resolved upstream). Raw passthrough — no distributions, foreign-key resolution, or dataset spillover applied.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     alias: AliasInput,
