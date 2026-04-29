@@ -69,6 +69,7 @@ Nineteen tools grouped by shape — connection tools bootstrap a session, `find_
 
 Session bootstrap. Authenticates to a BrAPI v2 server, registers the connection under a named alias, loads the capability profile via `CapabilityRegistry`, and inlines the full orientation envelope in the response. One call fully orients the agent.
 
+- `baseUrl` and `auth` are optional — when omitted they fall back to `BRAPI_<ALIAS>_*`, then `BRAPI_DEFAULT_*` env vars. Agents can call `brapi_connect({ alias: 'cassava' })` with nothing else and credentials never enter the LLM context (see [Per-alias credentials](#per-alias-credentials))
 - Tagged-union auth input: `none`, `sgn` (session-token exchange), `oauth2` (accepted at schema level, rejected at runtime pending client-credentials flow), `bearer`, `api_key`
 - Multiple concurrent connections per session via distinct aliases
 - Forces a fresh capability load on every connect — the agent expects current state
@@ -312,6 +313,7 @@ BrAPI-specific:
 - **Free-text variable ranking** — `OntologyResolver` scores variable records against a query (PUI / name / synonym / trait-class) so `find_variables text:"..."` returns ranked candidates even when the server has no `/ontologies` endpoint
 - **Dynamic filter discovery** — static v2.1 filter catalog plus an `extraFilters` passthrough lets agents drive any server-specific filter without schema churn
 - **Auth variants in one schema** — tagged-union connection auth covers none / bearer / api-key / SGN session-token exchange in a single input shape
+- **Typed error contracts** — every declared failure mode carries a stable `data.reason`, an HTTP-style `code`, and a `recovery.hint` mirrored onto the wire, so agent clients can route errors deterministically (e.g. `unknown_alias` → re-run `brapi_connect`, `dataset_not_found` → drop the stale handle)
 - **Last-resort escape hatches** — `brapi_raw_get` and `brapi_raw_search` pass through to any endpoint with routing nudges pointing at the curated tool when one exists
 
 ---
@@ -379,7 +381,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 # Server listens at http://localhost:3010/mcp
 ```
 
-No environment variables are required for the default BrAPI test server — agents can open connections at runtime via `brapi_connect`. Set `BRAPI_DEFAULT_BASE_URL` (and optional auth variables) if you want to pre-configure a default connection.
+No environment variables are required for the public BrAPI test server — agents can open connections at runtime via `brapi_connect`. **For credentialed servers, prefer env vars over agent input**: set `BRAPI_DEFAULT_*` for a default connection, or `BRAPI_<ALIAS>_*` per registered alias, so passwords / tokens / API keys stay out of the LLM context. See [Per-alias credentials](#per-alias-credentials).
 
 ### Prerequisites
 
@@ -424,15 +426,21 @@ Every variable is optional — agents can configure connections entirely at runt
 | `BRAPI_DEFAULT_BASE_URL` | Default BrAPI v2 base URL including path prefix (e.g. `https://test-server.brapi.org/brapi/v2`). | — |
 | `BRAPI_DEFAULT_USERNAME` | Default SGN-family username for session-token auth. | — |
 | `BRAPI_DEFAULT_PASSWORD` | Default SGN-family password. | — |
+| `BRAPI_DEFAULT_OAUTH_CLIENT_ID` | Default OAuth2 client ID (e.g. CGIAR-family servers). | — |
+| `BRAPI_DEFAULT_OAUTH_CLIENT_SECRET` | Default OAuth2 client secret. | — |
 | `BRAPI_DEFAULT_API_KEY` | Default static API key. | — |
 | `BRAPI_DEFAULT_API_KEY_HEADER` | Header name carrying the static API key. | `Authorization` |
 | `BRAPI_LOAD_LIMIT` | In-context row cap before `find_*` tools spill to `DatasetStore`. | `200` |
 | `BRAPI_MAX_CONCURRENT_REQUESTS` | Per-connection concurrency cap for parallel upstream fan-out. | `4` |
 | `BRAPI_RETRY_MAX_ATTEMPTS` | Max retries on 429/5xx before surfacing the error. | `3` |
+| `BRAPI_RETRY_BASE_DELAY_MS` | Base delay for exponential backoff between retries. | `500` |
 | `BRAPI_REQUEST_TIMEOUT_MS` | Per-request HTTP timeout. | `30000` |
 | `BRAPI_SEARCH_POLL_TIMEOUT_MS` | Total budget for async `/search/{noun}/{id}` polling. | `60000` |
+| `BRAPI_SEARCH_POLL_INTERVAL_MS` | Interval between async-search status checks. | `1000` |
 | `BRAPI_DATASET_TTL_SECONDS` | TTL for spilled datasets. | `86400` |
+| `BRAPI_DATASET_STORE_DIR` | Filesystem path for `DatasetStore` payloads when filesystem storage is active. | — |
 | `BRAPI_REFERENCE_CACHE_TTL_SECONDS` | TTL for reference-data cache entries (programs, trials, locations, crops). | `3600` |
+| `BRAPI_ALLOW_PRIVATE_IPS` | Allow connecting to RFC 1918 / loopback targets. Dev-only. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
@@ -440,7 +448,43 @@ Every variable is optional — agents can configure connections entirely at runt
 | `STORAGE_PROVIDER_TYPE` | Storage backend. | `in-memory` |
 | `OTEL_ENABLED` | Enable OpenTelemetry. | `false` |
 
+Per-alias overrides follow the `BRAPI_<ALIAS>_*` pattern — see [Per-alias credentials](#per-alias-credentials).
+
 See [`.env.example`](./.env.example) for the full list of optional overrides.
+
+### Per-alias credentials
+
+`brapi_connect` resolves `baseUrl` and `auth` from env vars when the agent omits them, so credentials never enter the LLM context. Three layers of precedence:
+
+1. **Explicit agent input** — always wins.
+2. **Per-alias env vars** — `BRAPI_<ALIAS>_*` where the alias name is uppercased and hyphens become underscores (`my-server` → `BRAPI_MY_SERVER_*`).
+3. **Default env vars** — `BRAPI_DEFAULT_*`, only consulted when the alias differs from `default`.
+
+Each alias carries **one** credential family — auth mode is derived from which fields are set:
+
+| Vars set | Resolved `mode` |
+|:---------|:----------------|
+| `_USERNAME` + `_PASSWORD` | `sgn` (Breedbase `/token` exchange) |
+| `_BEARER_TOKEN` | `bearer` |
+| `_API_KEY` (+ optional `_API_KEY_HEADER`) | `api_key` |
+| `_OAUTH_CLIENT_ID` + `_OAUTH_CLIENT_SECRET` (+ optional `_OAUTH_TOKEN_URL`) | `oauth2` |
+| _(none set)_ | `none` |
+
+Mixing families within a single alias raises a `ValidationError` naming the conflict.
+
+```sh
+# .env — register Cassavabase as alias 'cassava'
+BRAPI_CASSAVA_BASE_URL=https://cassavabase.org/brapi/v2
+BRAPI_CASSAVA_USERNAME=alice
+BRAPI_CASSAVA_PASSWORD=...
+
+# Register a static-API-key server as alias 'prod'
+BRAPI_PROD_BASE_URL=https://my-brapi.example.com/brapi/v2
+BRAPI_PROD_API_KEY=...
+BRAPI_PROD_API_KEY_HEADER=X-API-Key
+```
+
+Then the agent calls `brapi_connect({ alias: 'cassava' })` — no `baseUrl`, no `auth`, no secrets in the prompt.
 
 ---
 
@@ -459,8 +503,9 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
     ```sh
     bun run rebuild
+    bun run start            # transport selected via MCP_TRANSPORT_TYPE (stdio default)
+    # or pin the transport explicitly:
     bun run start:stdio
-    # or
     bun run start:http
     ```
 
