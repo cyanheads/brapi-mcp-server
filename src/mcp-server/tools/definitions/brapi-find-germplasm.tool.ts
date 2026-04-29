@@ -44,9 +44,14 @@ const GermplasmRowSchema = z
       .optional()
       .describe('MCPD biological-status label (wild / landrace / breeding / cultivar, etc.).'),
     germplasmOrigin: z
-      .string()
+      .array(
+        z
+          .object({})
+          .passthrough()
+          .describe('One origin record (collection coordinates and uncertainty per BrAPI v2).'),
+      )
       .optional()
-      .describe('Origin information — source collection, site, etc.'),
+      .describe('Origin records — array of collection-site objects per BrAPI v2.'),
     countryOfOriginCode: z.string().optional().describe('ISO 3166-1 alpha-3 country code.'),
     collection: z.string().optional().describe('Collection name this accession belongs to.'),
     instituteCode: z
@@ -114,7 +119,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   description:
-    'Find germplasm by name, synonym, accession number, PUI, crop, or free-text query. Matches across registered synonyms. Returns a dataset handle when the upstream total exceeds loadLimit. Use brapi_describe_filters to discover extraFilters keys.',
+    'Find germplasm by name, synonym, accession number, PUI, crop, or free-text query. Matches across registered synonyms. Returns a dataset handle when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     alias: AliasInput,
@@ -258,7 +263,8 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
         if (g.collection) parts.push(`collection=${g.collection}`);
         if (g.instituteCode) parts.push(`institute=${g.instituteCode}`);
         if (g.instituteName) parts.push(`instituteName=${g.instituteName}`);
-        if (g.germplasmOrigin) parts.push(`origin=${g.germplasmOrigin}`);
+        if (g.germplasmOrigin?.length)
+          parts.push(`germplasmOrigin=${g.germplasmOrigin.length} record(s)`);
         if (g.biologicalStatusOfAccessionDescription)
           parts.push(`status=${g.biologicalStatusOfAccessionDescription}`);
         if (g.pedigree) parts.push(`pedigree=${g.pedigree}`);

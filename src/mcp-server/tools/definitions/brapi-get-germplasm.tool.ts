@@ -8,7 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
@@ -30,7 +30,15 @@ const GermplasmSchema = z
       .string()
       .optional()
       .describe('MCPD biological-status label.'),
-    germplasmOrigin: z.string().optional().describe('Origin information.'),
+    germplasmOrigin: z
+      .array(
+        z
+          .object({})
+          .passthrough()
+          .describe('One origin record (collection coordinates and uncertainty per BrAPI v2).'),
+      )
+      .optional()
+      .describe('Origin records — array of collection-site objects per BrAPI v2.'),
     countryOfOriginCode: z.string().optional().describe('ISO 3166-1 alpha-3 country code.'),
     collection: z.string().optional().describe('Collection name.'),
     instituteCode: z.string().optional().describe('FAO WIEWS institute code.'),
@@ -102,6 +110,15 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
   description:
     'Fetch a single germplasm by DbId with attributes and direct parents. Response companions report study count, direct parent count, and direct descendant count — signals for pedigree depth and observation coverage.',
   annotations: { readOnlyHint: true, idempotentHint: true },
+  errors: [
+    {
+      reason: 'germplasm_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Upstream returned no germplasm record for the requested DbId',
+      recovery:
+        'Verify the germplasmDbId on the target server, or run brapi_find_germplasm to discover valid IDs.',
+    },
+  ] as const,
   input: z.object({
     germplasmDbId: z.string().min(1).describe('Germplasm identifier.'),
     alias: AliasInput,
@@ -135,10 +152,15 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     );
     const germplasm = germplasmEnv.result;
     if (!germplasm || typeof germplasm !== 'object' || !germplasm.germplasmDbId) {
-      throw notFound(`Germplasm '${input.germplasmDbId}' not found on ${connection.baseUrl}.`, {
-        germplasmDbId: input.germplasmDbId,
-        baseUrl: connection.baseUrl,
-      });
+      throw ctx.fail(
+        'germplasm_not_found',
+        `Germplasm '${input.germplasmDbId}' not found on ${connection.baseUrl}.`,
+        {
+          germplasmDbId: input.germplasmDbId,
+          baseUrl: connection.baseUrl,
+          ...ctx.recoveryFor('germplasm_not_found'),
+        },
+      );
     }
 
     const [pedigree, attributes, studyCount, progenyCount] = await Promise.all([
@@ -197,7 +219,8 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     if (g.pedigree) lines.push(`- **pedigree (string):** ${g.pedigree}`);
     if (g.biologicalStatusOfAccessionDescription)
       lines.push(`- **biologicalStatus:** ${g.biologicalStatusOfAccessionDescription}`);
-    if (g.germplasmOrigin) lines.push(`- **germplasmOrigin:** ${g.germplasmOrigin}`);
+    if (g.germplasmOrigin?.length)
+      lines.push(`- **germplasmOrigin:** ${g.germplasmOrigin.length} record(s)`);
     if (g.countryOfOriginCode) lines.push(`- **countryOfOriginCode:** ${g.countryOfOriginCode}`);
     if (g.collection) lines.push(`- **collection:** ${g.collection}`);
     if (g.instituteCode) lines.push(`- **instituteCode:** ${g.instituteCode}`);
