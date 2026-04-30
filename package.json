@@ -1,7 +1,7 @@
 {
   "name": "@cyanheads/brapi-mcp-server",
   "mcpName": "io.github.cyanheads/brapi-mcp-server",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "BrAPI v2.1 MCP server — studies, germplasm, observations, genotypes, images, and pedigrees.",
   "author": "Casey Hand @cyanheads (https://github.com/cyanheads/brapi-mcp-server#readme)",
   "type": "module",
@@ -20,19 +20,20 @@
     "server.json"
   ],
   "scripts": {
-    "build": "tsx scripts/build.ts",
-    "rebuild": "tsx scripts/clean.ts && tsx scripts/build.ts",
-    "clean": "tsx scripts/clean.ts",
-    "devcheck": "tsx scripts/devcheck.ts",
-    "tree": "tsx scripts/tree.ts",
+    "build": "bun run scripts/build.ts",
+    "rebuild": "bun run scripts/clean.ts && bun run build",
+    "clean": "bun run scripts/clean.ts",
+    "devcheck": "bun run scripts/devcheck.ts",
+    "tree": "bun run scripts/tree.ts",
     "format": "biome check --write --unsafe .",
-    "lint:mcp": "tsx scripts/lint-mcp.ts",
-    "changelog:build": "tsx scripts/build-changelog.ts",
-    "changelog:check": "tsx scripts/build-changelog.ts --check",
+    "lint:mcp": "bun run scripts/lint-mcp.ts",
+    "changelog:build": "bun run scripts/build-changelog.ts",
+    "changelog:check": "bun run scripts/build-changelog.ts --check",
     "test": "bunx --bun vitest run",
-    "start": "node dist/index.js",
-    "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
-    "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
+    "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish",
+    "start": "bun ./dist/index.js",
+    "start:stdio": "MCP_TRANSPORT_TYPE=stdio bun ./dist/index.js",
+    "start:http": "MCP_TRANSPORT_TYPE=http bun ./dist/index.js"
   },
   "keywords": [
     "mcp",
@@ -79,7 +80,6 @@
     "depcheck": "^1.4.7",
     "ignore": "^7.0.5",
     "tsc-alias": "^1.8.16",
-    "tsx": "^4.21.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
   }

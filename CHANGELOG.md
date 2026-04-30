@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.6](changelog/0.3.x/0.3.6.md) — 2026-04-30
+
+Drop the tsx runtime shim — package scripts and the production entry point invoke Bun directly. Fixes a Docker linux/arm64 build failure (tsx + Bun 1.3.13 in oven/bun:1) and aligns the script execution model with the cyanheads MCP fleet.
+
 ## [0.3.5](changelog/0.3.x/0.3.5.md) — 2026-04-30
 
 Cassavabase null-tolerance pass — schemas accept upstream nulls without dropping rows, walk-pedigree no longer false-flags inverse-edge backtracks as cycles, get-image flags broken upstream URLs. Plus npm scope rename to @cyanheads/brapi-mcp-server.

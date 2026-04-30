@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.3.5
+**Version:** 0.3.6
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -319,7 +319,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Commands
 
-**Runtime:** Scripts use `tsx` — both `npm run <cmd>` and `bun run <cmd>` work. Prefer `bun` (declared in `packageManager`).
+**Runtime:** Scripts and the production entry point use Bun directly — Bun executes TypeScript natively, no `tsx` shim. The `packageManager` field pins the version.
 
 | Command | Purpose |
 |:--------|:--------|

@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/brapi-mcp-server",
     "source": "github"
   },
-  "version": "0.3.5",
+  "version": "0.3.6",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/brapi-mcp-server",
-      "runtimeHint": "node",
-      "version": "0.3.5",
+      "runtimeHint": "bun",
+      "version": "0.3.6",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:stdio" }
@@ -41,8 +41,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/brapi-mcp-server",
-      "runtimeHint": "node",
-      "version": "0.3.5",
+      "runtimeHint": "bun",
+      "version": "0.3.6",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:http" }
