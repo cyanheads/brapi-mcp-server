@@ -186,4 +186,32 @@ describe('brapi_find_studies tool', () => {
       ),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
   });
+
+  // Cassavabase returns null for many optional string fields rather than
+  // omitting them. Schemas use .nullish() so the handler accepts both shapes.
+  it('tolerates null values on optional string fields (Cassavabase shape)', async () => {
+    const ctx = await connect(fetcher);
+    const sparseRow = {
+      studyDbId: 's-cb-1',
+      studyName: '00ayt11interspecIB',
+      studyType: 'Advanced Yield Trial',
+      trialName: '00_Ibadan',
+      locationName: 'Ibadan',
+      commonCropName: 'Cassava',
+      seasons: ['2000'],
+      active: true,
+      // Fields Cassavabase returns as null in the wild:
+      studyCode: null,
+      studyPUI: null,
+      studyDescription: null,
+      programDbId: null,
+      programName: null,
+      locationDbId: null,
+    };
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [sparseRow] }, { totalCount: 1 })));
+    const result = await brapiFindStudies.handler(brapiFindStudies.input.parse({}), ctx);
+    expect(result.returnedCount).toBe(1);
+    expect(result.results[0]?.studyCode).toBeNull();
+    expect(result.results[0]?.studyName).toBe('00ayt11interspecIB');
+  });
 });

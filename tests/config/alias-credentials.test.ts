@@ -12,6 +12,8 @@ import { describe, expect, it } from 'vitest';
 import {
   aliasEnvPrefix,
   deriveAuthFromCredentials,
+  discoverConfiguredAliases,
+  formatConfiguredAliasesHint,
   readAliasCredentials,
   resolveConnectInput,
 } from '@/config/alias-credentials.js';
@@ -243,5 +245,77 @@ describe('resolveConnectInput', () => {
       baseUrl: 'https://x.example/brapi/v2',
       auth: { mode: 'none' },
     });
+  });
+});
+
+describe('discoverConfiguredAliases', () => {
+  it('returns empty when no BRAPI_*_BASE_URL keys are set', () => {
+    expect(discoverConfiguredAliases({ BRAPI_LOAD_LIMIT: '500' })).toEqual([]);
+  });
+
+  it('discovers aliases and derives auth modes from sibling vars', () => {
+    const env = {
+      BRAPI_DEFAULT_BASE_URL: 'https://test-server.brapi.org/brapi/v2',
+      BRAPI_CASSAVA_BASE_URL: 'https://cassavabase.org/brapi/v2',
+      BRAPI_CASSAVA_USERNAME: 'u',
+      BRAPI_CASSAVA_PASSWORD: 'p',
+      BRAPI_PROD_BASE_URL: 'https://my-brapi.example.com/brapi/v2',
+      BRAPI_PROD_API_KEY: 'k',
+      BRAPI_LOAD_LIMIT: '500',
+    };
+    expect(discoverConfiguredAliases(env)).toEqual([
+      { alias: 'default', authMode: 'none', baseUrl: 'https://test-server.brapi.org/brapi/v2' },
+      { alias: 'cassava', authMode: 'sgn', baseUrl: 'https://cassavabase.org/brapi/v2' },
+      { alias: 'prod', authMode: 'api_key', baseUrl: 'https://my-brapi.example.com/brapi/v2' },
+    ]);
+  });
+
+  it('skips aliases with empty BASE_URL values', () => {
+    const env = {
+      BRAPI_CASSAVA_BASE_URL: '',
+      BRAPI_T3_BASE_URL: 'https://t3.example/brapi/v2',
+    };
+    expect(discoverConfiguredAliases(env)).toEqual([
+      { alias: 't3', authMode: 'none', baseUrl: 'https://t3.example/brapi/v2' },
+    ]);
+  });
+
+  it('reports authMode "none" when credential families collide (still surfaces alias)', () => {
+    const env = {
+      BRAPI_BAD_BASE_URL: 'https://bad.example/brapi/v2',
+      BRAPI_BAD_USERNAME: 'u',
+      BRAPI_BAD_PASSWORD: 'p',
+      BRAPI_BAD_API_KEY: 'k',
+    };
+    expect(discoverConfiguredAliases(env)).toEqual([
+      { alias: 'bad', authMode: 'none', baseUrl: 'https://bad.example/brapi/v2' },
+    ]);
+  });
+
+  it('does not match unrelated BRAPI_* env vars', () => {
+    const env = {
+      BRAPI_RETRY_BASE_DELAY_MS: '500',
+      BRAPI_DATASET_TTL_SECONDS: '86400',
+      BRAPI_MAX_CONCURRENT_REQUESTS: '4',
+    };
+    expect(discoverConfiguredAliases(env)).toEqual([]);
+  });
+});
+
+describe('formatConfiguredAliasesHint', () => {
+  it('returns empty string when nothing is configured', () => {
+    expect(formatConfiguredAliasesHint([])).toBe('');
+  });
+
+  it('lists aliases and emphasizes that other servers stay reachable', () => {
+    const hint = formatConfiguredAliasesHint([
+      { alias: 'default', authMode: 'none', baseUrl: 'https://test-server.brapi.org/brapi/v2' },
+      { alias: 'cassava', authMode: 'sgn', baseUrl: 'https://cassavabase.org/brapi/v2' },
+    ]);
+    expect(hint).toContain('`default`');
+    expect(hint).toContain('`cassava`');
+    expect(hint).toContain('shortcuts only');
+    expect(hint).toMatch(/any other BrAPI v2 server is reachable/i);
+    expect(hint).toContain('`baseUrl`');
   });
 });

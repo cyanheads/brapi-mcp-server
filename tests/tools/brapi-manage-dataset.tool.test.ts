@@ -120,4 +120,27 @@ describe('brapi_manage_dataset tool', () => {
     expect(text).toContain('find_studies');
     expect(text).toContain('rowCount: 3');
   });
+
+  it('summary surfaces truncated/maxRows when the producer hit a cap', async () => {
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiManageDataset.errors });
+    const ds = await getDatasetStore().create(ctx, {
+      source: 'find_studies',
+      baseUrl: 'https://test.example.org',
+      query: {},
+      rows: [{ id: 'row-1' }],
+      truncated: true,
+      maxRows: 50_000,
+    });
+    const result = await brapiManageDataset.handler(
+      brapiManageDataset.input.parse({ mode: 'summary', datasetId: ds.datasetId }),
+      ctx,
+    );
+    if (result.result.mode === 'summary') {
+      expect(result.result.dataset.truncated).toBe(true);
+      expect(result.result.dataset.maxRows).toBe(50_000);
+    }
+    const text = (brapiManageDataset.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('truncated: true');
+    expect(text).toContain('cap=50000');
+  });
 });

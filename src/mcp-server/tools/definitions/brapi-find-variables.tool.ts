@@ -39,50 +39,50 @@ const VariableRowSchema = z
     observationVariableDbId: z
       .string()
       .describe('Server-side identifier for the observation variable.'),
-    observationVariableName: z.string().optional().describe('Display name.'),
+    observationVariableName: z.string().nullish().describe('Display name.'),
     observationVariablePUI: z
       .string()
-      .optional()
+      .nullish()
       .describe('Persistent unique identifier — typically an ontology term URI.'),
-    ontologyDbId: z.string().optional().describe('FK to the owning ontology.'),
-    ontologyName: z.string().optional().describe('Display name of the owning ontology.'),
-    commonCropName: z.string().optional().describe('Common crop name this variable is scoped to.'),
+    ontologyDbId: z.string().nullish().describe('FK to the owning ontology.'),
+    ontologyName: z.string().nullish().describe('Display name of the owning ontology.'),
+    commonCropName: z.string().nullish().describe('Common crop name this variable is scoped to.'),
     trait: z
       .object({
-        traitDbId: z.string().optional().describe('FK to the trait.'),
-        traitName: z.string().optional().describe('Display name of the trait.'),
+        traitDbId: z.string().nullish().describe('FK to the trait.'),
+        traitName: z.string().nullish().describe('Display name of the trait.'),
         traitClass: z
           .string()
-          .optional()
+          .nullish()
           .describe('High-level trait grouping (e.g. "agronomic", "morphological").'),
-        description: z.string().optional().describe('Free-text trait description.'),
+        description: z.string().nullish().describe('Free-text trait description.'),
         synonyms: z
           .array(z.string().describe('Trait synonym value.'))
-          .optional()
+          .nullish()
           .describe('Registered trait synonyms.'),
       })
       .passthrough()
-      .optional()
+      .nullish()
       .describe('The biological trait this variable measures.'),
     scale: z
       .object({
-        scaleDbId: z.string().optional().describe('FK to the scale.'),
-        scaleName: z.string().optional().describe('Display name of the scale.'),
+        scaleDbId: z.string().nullish().describe('FK to the scale.'),
+        scaleName: z.string().nullish().describe('Display name of the scale.'),
         dataType: z
           .string()
-          .optional()
+          .nullish()
           .describe('Scale data type (e.g. "Numerical", "Categorical", "Date", "Text").'),
       })
       .passthrough()
-      .optional()
+      .nullish()
       .describe('Scale used to record this variable (units / type / range).'),
     method: z
       .object({
-        methodDbId: z.string().optional().describe('FK to the method.'),
-        methodName: z.string().optional().describe('Display name of the method.'),
+        methodDbId: z.string().nullish().describe('FK to the method.'),
+        methodName: z.string().nullish().describe('Display name of the method.'),
       })
       .passthrough()
-      .optional()
+      .nullish()
       .describe('Measurement method or protocol used to collect this variable.'),
   })
   .passthrough()

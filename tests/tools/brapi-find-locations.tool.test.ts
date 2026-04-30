@@ -134,4 +134,30 @@ describe('brapi_find_locations tool', () => {
     expect(text).toContain('USA');
     expect(text).toContain('lat=35.78');
   });
+
+  it('tolerates null values on optional fields and skips coords in format() (Cassavabase shape)', async () => {
+    const ctx = await connect(fetcher);
+    const sparseRow = {
+      locationDbId: 'loc-cb-1',
+      locationName: 'Ibadan',
+      countryCode: 'NGA',
+      countryName: 'Nigeria',
+      // Cassavabase nulls these in the wild:
+      documentationURL: null,
+      abbreviation: null,
+      locationType: null,
+      latitude: null,
+      longitude: null,
+      altitude: null,
+    };
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [sparseRow] }, { totalCount: 1 })));
+    const result = await brapiFindLocations.handler(brapiFindLocations.input.parse({}), ctx);
+    expect(result.returnedCount).toBe(1);
+    expect(result.results[0]?.documentationURL).toBeNull();
+    // null lat/lon must not render — would print `lat=null` and confuse the LLM.
+    const text = (brapiFindLocations.format!(result)[0] as { text: string }).text;
+    expect(text).not.toContain('lat=');
+    expect(text).not.toContain('lon=');
+    expect(text).not.toContain('alt=');
+  });
 });

@@ -33,25 +33,25 @@ import {
 const StudyRowSchema = z
   .object({
     studyDbId: z.string().describe('Server-side identifier for the study.'),
-    studyName: z.string().optional().describe('Display name.'),
-    studyType: z.string().optional().describe('E.g. "Yield Trial", "Phenotyping".'),
-    studyDescription: z.string().optional().describe('Free-form description.'),
-    programDbId: z.string().optional().describe('FK to program; resolve via `brapi_get_study`.'),
-    programName: z.string().optional().describe('Display name of the owning program.'),
-    trialDbId: z.string().optional().describe('FK to trial; resolve via `brapi_get_study`.'),
-    trialName: z.string().optional().describe('Display name of the owning trial.'),
-    locationDbId: z.string().optional().describe('FK to location; resolve via `brapi_get_study`.'),
-    locationName: z.string().optional().describe('Display name of the study site.'),
-    commonCropName: z.string().optional().describe('Common crop name (e.g. "Maize", "Wheat").'),
+    studyName: z.string().nullish().describe('Display name.'),
+    studyType: z.string().nullish().describe('E.g. "Yield Trial", "Phenotyping".'),
+    studyDescription: z.string().nullish().describe('Free-form description.'),
+    programDbId: z.string().nullish().describe('FK to program; resolve via `brapi_get_study`.'),
+    programName: z.string().nullish().describe('Display name of the owning program.'),
+    trialDbId: z.string().nullish().describe('FK to trial; resolve via `brapi_get_study`.'),
+    trialName: z.string().nullish().describe('Display name of the owning trial.'),
+    locationDbId: z.string().nullish().describe('FK to location; resolve via `brapi_get_study`.'),
+    locationName: z.string().nullish().describe('Display name of the study site.'),
+    commonCropName: z.string().nullish().describe('Common crop name (e.g. "Maize", "Wheat").'),
     seasons: z
       .array(z.string().describe('Season identifier — typically a year like "2022".'))
-      .optional()
+      .nullish()
       .describe('Season identifiers this study spans.'),
-    active: z.boolean().optional().describe('True while the study is open for data capture.'),
-    startDate: z.string().optional().describe('ISO 8601 start date.'),
-    endDate: z.string().optional().describe('ISO 8601 end date.'),
-    studyCode: z.string().optional().describe('Short code or alias for the study.'),
-    studyPUI: z.string().optional().describe('Persistent unique identifier (URI).'),
+    active: z.boolean().nullish().describe('True while the study is open for data capture.'),
+    startDate: z.string().nullish().describe('ISO 8601 start date.'),
+    endDate: z.string().nullish().describe('ISO 8601 end date.'),
+    studyCode: z.string().nullish().describe('Short code or alias for the study.'),
+    studyPUI: z.string().nullish().describe('Persistent unique identifier (URI).'),
   })
   .passthrough()
   .describe('One BrAPI study record.');
@@ -250,7 +250,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         if (study.locationDbId) parts.push(`locationDbId=${study.locationDbId}`);
         if (study.seasons?.length) parts.push(`seasons=${study.seasons.join(',')}`);
         if (study.commonCropName) parts.push(`crop=${study.commonCropName}`);
-        if (study.active !== undefined) parts.push(`active=${study.active}`);
+        if (study.active != null) parts.push(`active=${study.active}`);
         if (study.startDate) parts.push(`start=${study.startDate}`);
         if (study.endDate) parts.push(`end=${study.endDate}`);
         if (study.studyCode) parts.push(`code=${study.studyCode}`);

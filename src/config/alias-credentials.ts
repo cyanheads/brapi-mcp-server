@@ -10,7 +10,7 @@
  */
 
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
-import type { ConnectAuth } from '@/services/server-registry/index.js';
+import type { AuthMode, ConnectAuth } from '@/services/server-registry/index.js';
 
 /**
  * Per-alias credential bundle read from env vars. All fields optional —
@@ -152,4 +152,63 @@ export function resolveConnectInput(
     ({ mode: 'none' } as ConnectAuth);
 
   return { baseUrl, auth };
+}
+
+/**
+ * Summary of an alias discovered from env vars — what the operator pre-wired
+ * for this deployment. Surfaced to the LLM via the connect tool description so
+ * agents can pick a shortcut without the human having to enumerate them.
+ */
+export interface DiscoveredAlias {
+  alias: string;
+  authMode: AuthMode;
+  baseUrl: string;
+}
+
+const ALIAS_BASE_URL_PATTERN = /^BRAPI_([A-Z0-9_]+)_BASE_URL$/;
+
+/**
+ * Scan env for `BRAPI_<X>_BASE_URL` keys and derive the alias inventory the
+ * operator has pre-configured. Each alias resolves its credential family via
+ * the same logic `resolveConnectInput` uses; ambiguous families fall back to
+ * `none` so the alias is still surfaced (the connect call will then raise the
+ * same `ValidationError` the agent would have hit anyway).
+ *
+ * Default-alias entries land first; the rest are alphabetical.
+ */
+export function discoverConfiguredAliases(env: NodeJS.ProcessEnv = process.env): DiscoveredAlias[] {
+  const result: DiscoveredAlias[] = [];
+  for (const [key, value] of Object.entries(env)) {
+    const match = key.match(ALIAS_BASE_URL_PATTERN);
+    const captured = match?.[1];
+    if (!captured || !value) continue;
+    const alias = captured.toLowerCase();
+    const creds = readAliasCredentials(alias, env);
+    let authMode: AuthMode = 'none';
+    try {
+      const auth = deriveAuthFromCredentials(creds, alias);
+      if (auth) authMode = auth.mode;
+    } catch {
+      // Ambiguous credential family — surface the alias anyway.
+    }
+    result.push({ alias, authMode, baseUrl: value });
+  }
+  result.sort((a, b) => {
+    if (a.alias === DEFAULT_ALIAS) return -1;
+    if (b.alias === DEFAULT_ALIAS) return 1;
+    return a.alias.localeCompare(b.alias);
+  });
+  return result;
+}
+
+/**
+ * Render the discovered alias list as a sentence appended to the connect
+ * tool's description. Empty when nothing is pre-configured — the original
+ * description stands alone in that case. Phrased so that absent aliases are
+ * never read as restricted servers: any BrAPI v2 URL stays connectable.
+ */
+export function formatConfiguredAliasesHint(aliases: DiscoveredAlias[]): string {
+  if (aliases.length === 0) return '';
+  const names = aliases.map((a) => `\`${a.alias}\``).join(', ');
+  return `Pre-configured aliases on this deployment (callable without \`baseUrl\` or \`auth\` — credentials are read from server env vars): ${names}. Aliases are shortcuts only; any other BrAPI v2 server is reachable by passing \`baseUrl\` directly.`;
 }

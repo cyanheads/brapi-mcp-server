@@ -160,4 +160,34 @@ describe('brapi_get_germplasm tool', () => {
       brapiGetGermplasm.handler(brapiGetGermplasm.input.parse({ germplasmDbId: 'ghost' }), ctx),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
   });
+
+  it('tolerates null values on optional germplasm fields (Cassavabase shape)', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/germplasm/2372141')) {
+        return jsonResponse(
+          envelope({
+            germplasmDbId: '2372141',
+            germplasmName: 'unknown_accession',
+            commonCropName: 'cassava,manioc,tapioca,yuca',
+            genus: 'Manihot',
+            species: 'Manihot esculenta',
+            // Cassavabase null fields:
+            subtaxa: null,
+            subtaxaAuthority: null,
+            speciesAuthority: null,
+            biologicalStatusOfAccessionDescription: null,
+          }),
+        );
+      }
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+    const result = await brapiGetGermplasm.handler(
+      brapiGetGermplasm.input.parse({ germplasmDbId: '2372141' }),
+      ctx,
+    );
+    expect(result.germplasm.germplasmDbId).toBe('2372141');
+    expect(result.germplasm.subtaxa).toBeNull();
+  });
 });

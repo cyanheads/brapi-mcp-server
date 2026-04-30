@@ -134,4 +134,30 @@ describe('brapi_find_germplasm tool', () => {
     expect(result.dataset?.rowCount).toBe(15);
     expect(result.refinementHint).toMatch(/15 rows exceed loadLimit=10/);
   });
+
+  it('tolerates null values on optional string fields (Cassavabase shape)', async () => {
+    const ctx = await connect(fetcher);
+    const sparseRow = {
+      germplasmDbId: '2372141',
+      germplasmName: 'unknown_accession',
+      commonCropName: 'cassava,manioc,tapioca,yuca',
+      genus: 'Manihot',
+      species: 'Manihot esculenta',
+      pedigree: 'NA/NA',
+      // Cassavabase nulls in the wild:
+      subtaxa: null,
+      subtaxaAuthority: null,
+      speciesAuthority: null,
+      biologicalStatusOfAccessionDescription: null,
+      germplasmPreprocessing: null,
+      collection: null,
+      synonyms: [{ synonym: 'Kantedza', type: null }],
+      donors: [{ donorAccessionNumber: null, donorInstituteCode: null }],
+    };
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [sparseRow] }, { totalCount: 1 })));
+    const result = await brapiFindGermplasm.handler(brapiFindGermplasm.input.parse({}), ctx);
+    expect(result.returnedCount).toBe(1);
+    expect(result.results[0]?.subtaxa).toBeNull();
+    expect(result.results[0]?.synonyms?.[0]?.type).toBeNull();
+  });
 });

@@ -32,20 +32,20 @@ import {
 const LocationRowSchema = z
   .object({
     locationDbId: z.string().describe('Server-side identifier for the location.'),
-    locationName: z.string().optional().describe('Display name.'),
-    abbreviation: z.string().optional().describe('Short abbreviation.'),
-    countryCode: z.string().optional().describe('ISO 3166-1 alpha-3 country code.'),
-    countryName: z.string().optional().describe('Display name of the country.'),
+    locationName: z.string().nullish().describe('Display name.'),
+    abbreviation: z.string().nullish().describe('Short abbreviation.'),
+    countryCode: z.string().nullish().describe('ISO 3166-1 alpha-3 country code.'),
+    countryName: z.string().nullish().describe('Display name of the country.'),
     locationType: z
       .string()
-      .optional()
+      .nullish()
       .describe('Type of location (e.g. "Research Station", "Field", "Greenhouse").'),
-    latitude: z.number().optional().describe('WGS84 latitude in decimal degrees.'),
-    longitude: z.number().optional().describe('WGS84 longitude in decimal degrees.'),
-    altitude: z.number().optional().describe('Altitude in meters above sea level.'),
-    instituteName: z.string().optional().describe('Owning institute display name.'),
-    instituteAddress: z.string().optional().describe('Postal address of the institute.'),
-    documentationURL: z.string().optional().describe('URL pointing at extra documentation.'),
+    latitude: z.number().nullish().describe('WGS84 latitude in decimal degrees.'),
+    longitude: z.number().nullish().describe('WGS84 longitude in decimal degrees.'),
+    altitude: z.number().nullish().describe('Altitude in meters above sea level.'),
+    instituteName: z.string().nullish().describe('Owning institute display name.'),
+    instituteAddress: z.string().nullish().describe('Postal address of the institute.'),
+    documentationURL: z.string().nullish().describe('URL pointing at extra documentation.'),
   })
   .passthrough()
   .describe('One BrAPI location record.');
@@ -268,11 +268,11 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         if (loc.locationType) parts.push(`type=${loc.locationType}`);
         if (loc.countryCode) parts.push(`country=${loc.countryCode}`);
         if (loc.countryName) parts.push(`countryName=${loc.countryName}`);
-        if (loc.latitude !== undefined && loc.longitude !== undefined) {
+        if (loc.latitude != null && loc.longitude != null) {
           parts.push(`lat=${loc.latitude}`);
           parts.push(`lon=${loc.longitude}`);
         }
-        if (loc.altitude !== undefined) parts.push(`alt=${loc.altitude}`);
+        if (loc.altitude != null) parts.push(`alt=${loc.altitude}`);
         if (loc.instituteName) parts.push(`institute=${loc.instituteName}`);
         if (loc.instituteAddress) parts.push(`addr=${loc.instituteAddress}`);
         if (loc.documentationURL) parts.push(`docs=${loc.documentationURL}`);

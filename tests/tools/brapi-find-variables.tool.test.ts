@@ -153,4 +153,26 @@ describe('brapi_find_variables tool', () => {
       brapiFindVariables.handler(brapiFindVariables.input.parse({}), ctx),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
   });
+
+  it('tolerates null values on nested trait/scale/method fields (Cassavabase shape)', async () => {
+    const ctx = await connect(fetcher);
+    const sparseRow = {
+      observationVariableDbId: 'var-cb-1',
+      observationVariableName: 'Cassava trait',
+      // Cassavabase nulls in the wild on nested objects:
+      trait: {
+        traitDbId: 'trait-1',
+        traitName: 'Some trait',
+        traitClass: null,
+        description: null,
+      },
+      scale: { scaleDbId: 'scale-1', scaleName: null, dataType: null },
+      method: { methodDbId: null, methodName: null },
+    };
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [sparseRow] }, { totalCount: 1 })));
+    const result = await brapiFindVariables.handler(brapiFindVariables.input.parse({}), ctx);
+    expect(result.returnedCount).toBe(1);
+    expect(result.results[0]?.trait?.traitClass).toBeNull();
+    expect(result.results[0]?.scale?.scaleName).toBeNull();
+  });
 });

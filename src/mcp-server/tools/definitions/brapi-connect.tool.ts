@@ -10,7 +10,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { resolveConnectInput } from '@/config/alias-credentials.js';
+import {
+  discoverConfiguredAliases,
+  formatConfiguredAliasesHint,
+  resolveConnectInput,
+} from '@/config/alias-credentials.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getServerRegistry } from '@/services/server-registry/index.js';
@@ -21,9 +25,15 @@ import {
   OrientationEnvelopeSchema,
 } from '../shared/orientation-envelope.js';
 
+const BASE_DESCRIPTION =
+  'Open a connection to a BrAPI v2 server, authenticate, and return the full orientation envelope (server identity, capability profile, content summary). Required handshake before other BrAPI tools. Supports multiple concurrent connections via named aliases. Credentials can be configured server-side and omitted from this call.';
+
+const CONFIGURED_ALIASES_HINT = formatConfiguredAliasesHint(discoverConfiguredAliases());
+
 export const brapiConnect = tool('brapi_connect', {
-  description:
-    'Open a connection to a BrAPI v2 server, authenticate, and return the full orientation envelope (server identity, capability profile, content summary). Required handshake before other BrAPI tools. Supports multiple concurrent connections via named aliases. Credentials can be configured server-side and omitted from this call.',
+  description: CONFIGURED_ALIASES_HINT
+    ? `${BASE_DESCRIPTION} ${CONFIGURED_ALIASES_HINT}`
+    : BASE_DESCRIPTION,
   annotations: {
     openWorldHint: true,
     readOnlyHint: false,

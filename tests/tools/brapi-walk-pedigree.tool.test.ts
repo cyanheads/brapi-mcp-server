@@ -159,6 +159,54 @@ describe('brapi_walk_pedigree tool', () => {
     expect(result.warnings.join('\n')).toContain('/germplasm/{id}/progeny');
   });
 
+  it('does not count inverse-edge backtracks as cycles when direction=both', async () => {
+    const ctx = await connect(fetcher, ['germplasm/{germplasmDbId}/progeny']);
+    // g-1 ← parent of g-3; g-2 ← parent of g-3.
+    // Walking from g-3 in direction=both: ancestors yields {g-1, g-2};
+    // then expanding g-1+g-2 with descendants yields g-3 (already known).
+    // The old logic counted those inverse-edge encounters as cycles. They
+    // are not — they are the symmetric relation re-discovered from the
+    // other side. cycleCount must stay 0.
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      const ped = path.match(/\/germplasm\/([^/]+)\/pedigree$/);
+      if (ped) {
+        const id = decodeURIComponent(ped[1]!);
+        if (id === 'g-3') {
+          return jsonResponse(
+            envelope({
+              parents: [{ germplasmDbId: 'g-1' }, { germplasmDbId: 'g-2' }],
+            }),
+          );
+        }
+        return jsonResponse(envelope({ parents: [] }));
+      }
+      const prog = path.match(/\/germplasm\/([^/]+)\/progeny$/);
+      if (prog) {
+        const id = decodeURIComponent(prog[1]!);
+        if (id === 'g-1' || id === 'g-2') {
+          return jsonResponse(envelope({ data: [{ germplasmDbId: 'g-3' }] }));
+        }
+        return jsonResponse(envelope({ data: [] }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiWalkPedigree.handler(
+      brapiWalkPedigree.input.parse({
+        germplasmDbIds: ['g-3'],
+        direction: 'both',
+        maxDepth: 3,
+      }),
+      ctx,
+    );
+
+    expect(result.cycleCount).toBe(0);
+    // We still record both edges (parent and child) — that's the structural
+    // representation; we just don't double-count it as a graph cycle.
+    expect(result.edges.length).toBe(4);
+  });
+
   it('throws ValidationError when /germplasm is not advertised', async () => {
     fetcher.mockReset();
     fetcher.mockImplementation(async (url: string) => {

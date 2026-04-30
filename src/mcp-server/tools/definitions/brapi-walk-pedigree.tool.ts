@@ -214,9 +214,16 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
             relationship: 'parent',
           };
           if (parent.parentType) edge.parentType = parent.parentType;
+          const inverseKnown = isInverseEdgeKnown(state, edge);
           if (addEdge(state, edge)) producedEdge = true;
-          if (already) cycleCount++;
-          else state.frontier.add(parent.germplasmDbId);
+          if (already) {
+            // direction='both' walks BFS in two directions concurrently — we
+            // expect to re-encounter nodes via the inverse relationship as the
+            // expansions meet. That's a structural symmetry, not a cycle.
+            if (!inverseKnown) cycleCount++;
+          } else {
+            state.frontier.add(parent.germplasmDbId);
+          }
         }
 
         for (const child of result.children) {
@@ -227,9 +234,13 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
             to: result.id,
             relationship: 'child',
           };
+          const inverseKnown = isInverseEdgeKnown(state, edge);
           if (addEdge(state, edge)) producedEdge = true;
-          if (already) cycleCount++;
-          else state.frontier.add(child.germplasmDbId);
+          if (already) {
+            if (!inverseKnown) cycleCount++;
+          } else {
+            state.frontier.add(child.germplasmDbId);
+          }
         }
       }
 
@@ -341,6 +352,16 @@ function addEdge(state: WalkState, edge: z.infer<typeof EdgeSchema>): boolean {
   if (state.edges.has(key)) return false;
   state.edges.set(key, edge);
   return true;
+}
+
+/**
+ * `parent: A→B` and `child: B→A` describe the same biological relationship
+ * from opposite ends. When direction='both', BFS will discover both —
+ * detecting the inverse lets us avoid double-counting it as a cycle.
+ */
+function isInverseEdgeKnown(state: WalkState, edge: z.infer<typeof EdgeSchema>): boolean {
+  const inverseRel = edge.relationship === 'parent' ? 'child' : 'parent';
+  return state.edges.has(`${inverseRel}:${edge.to}→${edge.from}`);
 }
 
 type Expansion =

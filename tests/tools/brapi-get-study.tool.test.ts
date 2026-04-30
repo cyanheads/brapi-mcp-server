@@ -150,4 +150,33 @@ describe('brapi_get_study tool', () => {
     expect(result.program).toBeUndefined();
     expect(result.warnings.join('\n')).toContain('program FK lookup failed');
   });
+
+  it('tolerates null values on optional study fields (Cassavabase shape)', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/studies/s-cb')) {
+        return jsonResponse(
+          envelope({
+            studyDbId: 's-cb',
+            studyName: '00ayt11interspecIB',
+            studyType: 'Advanced Yield Trial',
+            // Cassavabase null fields:
+            studyCode: null,
+            studyPUI: null,
+            culturalPractices: null,
+            license: null,
+            lastUpdate: null,
+          }),
+        );
+      }
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+    const result = await brapiGetStudy.handler(
+      brapiGetStudy.input.parse({ studyDbId: 's-cb' }),
+      ctx,
+    );
+    expect(result.study.studyDbId).toBe('s-cb');
+    expect(result.study.studyCode).toBeNull();
+  });
 });

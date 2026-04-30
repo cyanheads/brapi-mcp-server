@@ -151,6 +151,38 @@ describe('brapi_get_image tool', () => {
     ).toThrow();
   });
 
+  it('emits a per-image warning when the imageURL fallback returns non-image bytes', async () => {
+    const ctx = await connect(fetcher, ['images']); // no imagecontent
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/images/img-html')) {
+        return jsonResponse(
+          envelope({
+            imageDbId: 'img-html',
+            imageURL: 'https://broken.example.org/missing.jpg',
+          }),
+        );
+      }
+      // The CDN URL serves an HTML error page rather than image bytes.
+      if (String(url).startsWith('https://broken.example.org/')) {
+        return new Response('<html>404 not found</html>', {
+          status: 200,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        });
+      }
+      throw new Error(`Unexpected path: ${url}`);
+    });
+
+    const result = await brapiGetImage.handler(
+      brapiGetImage.input.parse({ imageDbIds: ['img-html'] }),
+      ctx,
+    );
+    expect(result.images).toHaveLength(1);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]?.imageDbId).toBe('img-html');
+    expect(result.warnings[0]?.warning).toContain('text/html');
+  });
+
   it('format() emits text + image content blocks', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockImplementation(async (url: string) => {

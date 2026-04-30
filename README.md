@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>brapi-mcp-server</h1>
+  <h1>@cyanheads/brapi-mcp-server</h1>
   <p><b>MCP server for BrAPI v2.1 plant-breeding databases — connect, orient against the capability profile, and drive study / germplasm workflows across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server.</b>
   <div>19 Tools • 6 Resources • 2 Prompts</div>
   </p>
@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.3.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.3.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
@@ -74,6 +74,8 @@ Session bootstrap. Authenticates to a BrAPI v2 server, registers the connection 
 - Multiple concurrent connections per session via distinct aliases
 - Forces a fresh capability load on every connect — the agent expects current state
 - Returns the same envelope as `brapi_server_info` — server identity, auth status, capability profile (supported/missing calls), content summary, server-specific notes
+
+> **Alias discovery.** Configured aliases are appended to this tool's description at server startup, so agents see the inventory on `tools/list` without anyone having to spell them out in the prompt. Restart the server after changing `BRAPI_<ALIAS>_*` env vars to refresh. Pre-configured aliases are shortcuts only — any other BrAPI v2 server is reachable by passing `baseUrl` directly.
 
 ---
 
@@ -328,7 +330,7 @@ Add the following to your MCP client configuration file.
     "brapi": {
       "type": "stdio",
       "command": "bunx",
-      "args": ["brapi-mcp-server@latest"],
+      "args": ["@cyanheads/brapi-mcp-server@latest"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_LOG_LEVEL": "info"
@@ -346,7 +348,7 @@ Or with npx (no Bun required):
     "brapi": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "brapi-mcp-server@latest"],
+      "args": ["-y", "@cyanheads/brapi-mcp-server@latest"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_LOG_LEVEL": "info"

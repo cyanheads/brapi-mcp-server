@@ -25,6 +25,16 @@ const DatasetMetadataSchema = z.object({
   sizeBytes: z.number().int().nonnegative().describe('Serialized size of the dataset in bytes.'),
   createdAt: z.string().describe('ISO 8601 timestamp the dataset was created.'),
   expiresAt: z.string().describe('ISO 8601 timestamp after which the dataset will be purged.'),
+  truncated: z
+    .boolean()
+    .optional()
+    .describe('True when the dataset hit the spillover row/page cap before exhausting upstream.'),
+  maxRows: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe('Cap that was applied at create time, when truncation occurred.'),
 });
 
 const ListResultSchema = z
@@ -245,11 +255,12 @@ function renderList(result: Extract<Result, { mode: 'list' }>): string {
     return lines.join('\n');
   }
   lines.push('');
-  lines.push('| datasetId | source | rows | sizeBytes | createdAt | expiresAt |');
-  lines.push('|:----------|:-------|-----:|----------:|:----------|:----------|');
+  lines.push('| datasetId | source | rows | sizeBytes | createdAt | expiresAt | truncated |');
+  lines.push('|:----------|:-------|-----:|----------:|:----------|:----------|:----------|');
   for (const ds of result.datasets) {
+    const truncated = ds.truncated ? `yes (cap=${ds.maxRows ?? '?'})` : 'no';
     lines.push(
-      `| \`${ds.datasetId}\` | ${ds.source} | ${ds.rowCount} | ${ds.sizeBytes} | ${ds.createdAt} | ${ds.expiresAt} |`,
+      `| \`${ds.datasetId}\` | ${ds.source} | ${ds.rowCount} | ${ds.sizeBytes} | ${ds.createdAt} | ${ds.expiresAt} | ${truncated} |`,
     );
   }
   for (const ds of result.datasets) {
@@ -272,6 +283,9 @@ function renderSummary(dataset: z.infer<typeof DatasetMetadataSchema>): string {
   lines.push(`- sizeBytes: ${dataset.sizeBytes}`);
   lines.push(`- createdAt: ${dataset.createdAt}`);
   lines.push(`- expiresAt: ${dataset.expiresAt}`);
+  if (dataset.truncated) {
+    lines.push(`- truncated: true (cap=${dataset.maxRows ?? '?'} rows)`);
+  }
   lines.push(`- columns: ${dataset.columns.join(', ')}`);
   lines.push(`- query: \`${JSON.stringify(dataset.query)}\``);
   return lines.join('\n');

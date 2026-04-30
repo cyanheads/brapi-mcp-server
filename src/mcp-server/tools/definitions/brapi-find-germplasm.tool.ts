@@ -31,18 +31,18 @@ import {
 const GermplasmRowSchema = z
   .object({
     germplasmDbId: z.string().describe('Server-side identifier for the germplasm.'),
-    germplasmName: z.string().optional().describe('Display name.'),
-    germplasmPUI: z.string().optional().describe('Persistent unique identifier (URI).'),
-    commonCropName: z.string().optional().describe('Common crop name (e.g. "Maize", "Wheat").'),
-    accessionNumber: z.string().optional().describe('Gene-bank catalog number.'),
-    genus: z.string().optional().describe('Botanical genus.'),
-    species: z.string().optional().describe('Botanical species.'),
-    subtaxa: z.string().optional().describe('Botanical subtaxa (subspecies, variety, etc.).'),
-    defaultDisplayName: z.string().optional().describe('Preferred display label.'),
-    pedigree: z.string().optional().describe('Pedigree as a free-text string (e.g. "A/B//C").'),
+    germplasmName: z.string().nullish().describe('Display name.'),
+    germplasmPUI: z.string().nullish().describe('Persistent unique identifier (URI).'),
+    commonCropName: z.string().nullish().describe('Common crop name (e.g. "Maize", "Wheat").'),
+    accessionNumber: z.string().nullish().describe('Gene-bank catalog number.'),
+    genus: z.string().nullish().describe('Botanical genus.'),
+    species: z.string().nullish().describe('Botanical species.'),
+    subtaxa: z.string().nullish().describe('Botanical subtaxa (subspecies, variety, etc.).'),
+    defaultDisplayName: z.string().nullish().describe('Preferred display label.'),
+    pedigree: z.string().nullish().describe('Pedigree as a free-text string (e.g. "A/B//C").'),
     biologicalStatusOfAccessionDescription: z
       .string()
-      .optional()
+      .nullish()
       .describe('MCPD biological-status label (wild / landrace / breeding / cultivar, etc.).'),
     germplasmOrigin: z
       .array(
@@ -51,26 +51,26 @@ const GermplasmRowSchema = z
           .passthrough()
           .describe('One origin record (collection coordinates and uncertainty per BrAPI v2).'),
       )
-      .optional()
+      .nullish()
       .describe('Origin records — array of collection-site objects per BrAPI v2.'),
-    countryOfOriginCode: z.string().optional().describe('ISO 3166-1 alpha-3 country code.'),
-    collection: z.string().optional().describe('Collection name this accession belongs to.'),
+    countryOfOriginCode: z.string().nullish().describe('ISO 3166-1 alpha-3 country code.'),
+    collection: z.string().nullish().describe('Collection name this accession belongs to.'),
     instituteCode: z
       .string()
-      .optional()
+      .nullish()
       .describe('FAO WIEWS institute code of the holding institute.'),
-    instituteName: z.string().optional().describe('Display name of the holding institute.'),
+    instituteName: z.string().nullish().describe('Display name of the holding institute.'),
     synonyms: z
       .array(
         z
           .object({
-            synonym: z.string().optional().describe('Synonym value.'),
-            type: z.string().optional().describe('Synonym type (e.g. "COMMON", "SYNONYM").'),
+            synonym: z.string().nullish().describe('Synonym value.'),
+            type: z.string().nullish().describe('Synonym type (e.g. "COMMON", "SYNONYM").'),
           })
           .passthrough()
           .describe('Registered synonym for this germplasm.'),
       )
-      .optional()
+      .nullish()
       .describe('All registered synonyms (alternative names).'),
   })
   .passthrough()

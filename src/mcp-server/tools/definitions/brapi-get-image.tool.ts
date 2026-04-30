@@ -59,10 +59,22 @@ const ImageErrorSchema = z
   })
   .describe('Per-image error entry returned when a fetch fails.');
 
+const ImageWarningSchema = z
+  .object({
+    imageDbId: z.string().describe('Image identifier the warning applies to.'),
+    warning: z.string().describe('Advisory — bytes loaded but something is suspect.'),
+  })
+  .describe('Per-image advisory for loaded-but-suspect content (e.g. non-image MIME).');
+
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
   images: z.array(ImagePayloadSchema).describe('Successfully loaded images.'),
   errors: z.array(ImageErrorSchema).describe('Images that could not be loaded, one entry per id.'),
+  warnings: z
+    .array(ImageWarningSchema)
+    .describe(
+      'Per-image advisories for loaded payloads that appear suspect — e.g. the imageURL fallback returned a non-image MIME type, suggesting the upstream URL is broken.',
+    ),
 });
 
 type Output = z.infer<typeof OutputSchema>;
@@ -120,15 +132,24 @@ export const brapiGetImage = tool('brapi_get_image', {
 
     const images: z.infer<typeof ImagePayloadSchema>[] = [];
     const errors: z.infer<typeof ImageErrorSchema>[] = [];
+    const warnings: z.infer<typeof ImageWarningSchema>[] = [];
     for (const entry of loaded) {
-      if (entry.kind === 'ok') images.push(entry.payload);
-      else errors.push(entry);
+      if (entry.kind === 'ok') {
+        images.push(entry.payload);
+        if (entry.payload.source === 'imageURL' && !entry.payload.mimeType.startsWith('image/')) {
+          warnings.push({
+            imageDbId: entry.payload.imageDbId,
+            warning: `imageURL fallback returned content-type '${entry.payload.mimeType}' (not image/*) — the upstream URL likely points at an HTML error page or wrong resource. The bytes are returned as-is; the LLM may not be able to render them.`,
+          });
+        }
+      } else errors.push(entry);
     }
 
     const result: Output = {
       alias: connection.alias,
       images,
       errors,
+      warnings,
     };
     return result;
   },
@@ -142,6 +163,9 @@ export const brapiGetImage = tool('brapi_get_image', {
     header.push(`# ${result.images.length} image(s) loaded — \`${result.alias}\``);
     if (result.errors.length > 0) {
       header.push(`⚠ ${result.errors.length} failed — see below.`);
+    }
+    if (result.warnings.length > 0) {
+      header.push(`⚠ ${result.warnings.length} suspect — see warnings below.`);
     }
     blocks.push({ type: 'text', text: header.join('\n') });
 
@@ -179,6 +203,12 @@ export const brapiGetImage = tool('brapi_get_image', {
     }
     for (const err of result.errors) {
       blocks.push({ type: 'text', text: `### ${err.imageDbId} — failed\n- error: ${err.error}` });
+    }
+    for (const w of result.warnings) {
+      blocks.push({
+        type: 'text',
+        text: `### ${w.imageDbId} — warning\n- ${w.warning}`,
+      });
     }
     return blocks;
   },
