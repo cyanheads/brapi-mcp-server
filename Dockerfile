@@ -37,8 +37,8 @@ WORKDIR /usr/src/app
 ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
-LABEL org.opencontainers.image.title="brapi-mcp-server"
-LABEL org.opencontainers.image.description="MCP server for BrAPI v2.1 plant-breeding databases — connect, orient against the capability profile, and drive study / germplasm workflows across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server."
+LABEL org.opencontainers.image.title="@cyanheads/brapi-mcp-server"
+LABEL org.opencontainers.image.description="BrAPI v2.1 MCP server — studies, germplasm, observations, genotypes, images, and pedigrees across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server."
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/brapi-mcp-server"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 

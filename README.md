@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/brapi-mcp-server</h1>
-  <p><b>MCP server for BrAPI v2.1 plant-breeding databases — connect, orient against the capability profile, and drive study / germplasm workflows across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server.</b>
+  <p><b>BrAPI v2.1 MCP server — studies, germplasm, observations, genotypes, images, and pedigrees across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server.</b>
   <div>19 Tools • 6 Resources • 2 Prompts</div>
   </p>
 </div>
