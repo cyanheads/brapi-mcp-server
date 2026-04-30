@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-04-29 22:40:20
+Generated on: 2026-04-30 02:25:30
 
 ```text
 brapi-mcp-server/
@@ -132,7 +132,8 @@ brapi-mcp-server/
 │   │       │   ├── brapi-raw-search.tool.ts
 │   │       │   ├── brapi-server-info.tool.ts
 │   │       │   ├── brapi-submit-observations.tool.ts
-│   │       │   └── brapi-walk-pedigree.tool.ts
+│   │       │   ├── brapi-walk-pedigree.tool.ts
+│   │       │   └── index.ts
 │   │       └── shared/
 │   │           ├── connect-auth-schema.ts
 │   │           ├── find-helpers.ts
@@ -187,27 +188,28 @@ brapi-mcp-server/
 │   │   ├── dataset-store.test.ts
 │   │   ├── reference-data-cache.test.ts
 │   │   └── server-registry.test.ts
-│   └── tools/
-│       ├── _tool-test-helpers.ts
-│       ├── brapi-connect.tool.test.ts
-│       ├── brapi-describe-filters.tool.test.ts
-│       ├── brapi-find-genotype-calls.tool.test.ts
-│       ├── brapi-find-germplasm.tool.test.ts
-│       ├── brapi-find-images.tool.test.ts
-│       ├── brapi-find-locations.tool.test.ts
-│       ├── brapi-find-observations.tool.test.ts
-│       ├── brapi-find-studies.tool.test.ts
-│       ├── brapi-find-variables.tool.test.ts
-│       ├── brapi-find-variants.tool.test.ts
-│       ├── brapi-get-germplasm.tool.test.ts
-│       ├── brapi-get-image.tool.test.ts
-│       ├── brapi-get-study.tool.test.ts
-│       ├── brapi-manage-dataset.tool.test.ts
-│       ├── brapi-raw-get.tool.test.ts
-│       ├── brapi-raw-search.tool.test.ts
-│       ├── brapi-server-info.tool.test.ts
-│       ├── brapi-submit-observations.tool.test.ts
-│       └── brapi-walk-pedigree.tool.test.ts
+│   ├── tools/
+│   │   ├── _tool-test-helpers.ts
+│   │   ├── brapi-connect.tool.test.ts
+│   │   ├── brapi-describe-filters.tool.test.ts
+│   │   ├── brapi-find-genotype-calls.tool.test.ts
+│   │   ├── brapi-find-germplasm.tool.test.ts
+│   │   ├── brapi-find-images.tool.test.ts
+│   │   ├── brapi-find-locations.tool.test.ts
+│   │   ├── brapi-find-observations.tool.test.ts
+│   │   ├── brapi-find-studies.tool.test.ts
+│   │   ├── brapi-find-variables.tool.test.ts
+│   │   ├── brapi-find-variants.tool.test.ts
+│   │   ├── brapi-get-germplasm.tool.test.ts
+│   │   ├── brapi-get-image.tool.test.ts
+│   │   ├── brapi-get-study.tool.test.ts
+│   │   ├── brapi-manage-dataset.tool.test.ts
+│   │   ├── brapi-raw-get.tool.test.ts
+│   │   ├── brapi-raw-search.tool.test.ts
+│   │   ├── brapi-server-info.tool.test.ts
+│   │   ├── brapi-submit-observations.tool.test.ts
+│   │   └── brapi-walk-pedigree.tool.test.ts
+│   └── registration-gate.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
