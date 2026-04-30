@@ -25,6 +25,7 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderDatasetHandle,
   renderDistributions,
 } from '../shared/find-helpers.js';
 
@@ -52,7 +53,32 @@ const ObservationRowSchema = z
       .describe('FK to the germplasm the observation was taken on.'),
     germplasmName: z.string().optional().describe('Display name of the germplasm.'),
     observationLevel: z.string().optional().describe('Unit level — e.g. "plot", "plant", "field".'),
-    season: z.string().optional().describe('Season identifier (e.g. "2022").'),
+    season: z
+      .union([
+        z.string().describe('Season identifier as a flat string (older BrAPI servers).'),
+        z
+          .object({
+            seasonDbId: z.string().optional().describe('Server-side season identifier.'),
+            year: z
+              .union([
+                z.string().describe('Calendar year as a string (e.g. "2024").'),
+                z.number().describe('Calendar year as an integer (e.g. 2024).'),
+              ])
+              .optional()
+              .describe('Calendar year — accepts string or numeric form depending on server.'),
+            season: z.string().optional().describe('Season label (e.g. "wet", "dry", "Q1").'),
+            seasonName: z
+              .string()
+              .optional()
+              .describe('Season display name (BrAPI v2.1 alternate field).'),
+          })
+          .passthrough()
+          .describe('Structured season block per BrAPI v2.1.'),
+      ])
+      .optional()
+      .describe(
+        'Season — either a flat string or a structured `{seasonDbId, year, season}` object depending on the server.',
+      ),
     value: z
       .string()
       .optional()
@@ -199,7 +225,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       studyName: computeDistribution(fullRows, (r) => asString(r.studyName)),
       germplasmName: computeDistribution(fullRows, (r) => asString(r.germplasmName)),
       observationLevel: computeDistribution(fullRows, (r) => asString(r.observationLevel)),
-      season: computeDistribution(fullRows, (r) => asString(r.season)),
+      season: computeDistribution(fullRows, (r) => normalizeSeason(r.season)),
     };
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;
@@ -259,7 +285,8 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         if (o.studyName) parts.push(`study=${o.studyName}`);
         if (o.studyDbId) parts.push(`studyDbId=${o.studyDbId}`);
         if (o.observationLevel) parts.push(`level=${o.observationLevel}`);
-        if (o.season) parts.push(`season=${o.season}`);
+        const seasonLabel = normalizeSeason(o.season);
+        if (seasonLabel) parts.push(`season=${seasonLabel}`);
         if (o.observationTimeStamp) parts.push(`time=${o.observationTimeStamp}`);
         if (o.collector) parts.push(`collector=${o.collector}`);
         if (o.uploadedBy) parts.push(`uploadedBy=${o.uploadedBy}`);
@@ -269,12 +296,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     if (result.dataset) {
       lines.push('');
       lines.push('## Dataset handle');
-      lines.push(`- datasetId: \`${result.dataset.datasetId}\``);
-      lines.push(`- rowCount: ${result.dataset.rowCount}`);
-      lines.push(`- sizeBytes: ${result.dataset.sizeBytes}`);
-      lines.push(`- columns: ${result.dataset.columns.join(', ')}`);
-      lines.push(`- createdAt: ${result.dataset.createdAt}`);
-      lines.push(`- expiresAt: ${result.dataset.expiresAt}`);
+      lines.push(...renderDatasetHandle(result.dataset));
     }
     if (result.warnings.length > 0) {
       lines.push('');
@@ -284,3 +306,28 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+function normalizeSeason(value: unknown): string | undefined {
+  const nonEmpty = (v: unknown): string | undefined =>
+    typeof v === 'string' && v.length > 0 ? v : undefined;
+
+  if (typeof value === 'string') return nonEmpty(value);
+  if (!value || typeof value !== 'object') return;
+
+  const record = value as {
+    seasonDbId?: unknown;
+    season?: unknown;
+    seasonName?: unknown;
+    year?: unknown;
+  };
+
+  const id = nonEmpty(record.seasonDbId);
+  if (id) return id;
+
+  const label = nonEmpty(record.season) ?? nonEmpty(record.seasonName);
+  const year =
+    nonEmpty(record.year) ?? (typeof record.year === 'number' ? String(record.year) : undefined);
+
+  if (label) return year ? `${label} ${year}` : label;
+  return year;
+}

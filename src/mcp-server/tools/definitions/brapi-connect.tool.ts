@@ -23,7 +23,7 @@ import {
 
 export const brapiConnect = tool('brapi_connect', {
   description:
-    'Connect to a BrAPI v2 server, authenticate, cache the capability profile, and return the full orientation envelope inline. Required handshake before other BrAPI tools. Supports multiple concurrent connections via named aliases. baseUrl + auth fall back to BRAPI_<ALIAS>_* then BRAPI_DEFAULT_* env vars when omitted, so credentials stay out of tool inputs.',
+    'Open a connection to a BrAPI v2 server, authenticate, and return the full orientation envelope (server identity, capability profile, content summary). Required handshake before other BrAPI tools. Supports multiple concurrent connections via named aliases. Credentials can be configured server-side and omitted from this call.',
   annotations: {
     openWorldHint: true,
     readOnlyHint: false,
@@ -88,6 +88,19 @@ export const brapiConnect = tool('brapi_connect', {
       authSource: input.auth ? 'agent' : 'env',
     });
 
+    if (isMultiTenantHttpDeployment() && connection.authMode !== 'none') {
+      ctx.log.notice(
+        'Connection credentials persisted under shared `default` tenant — set MCP_AUTH_MODE=jwt|oauth for per-client isolation.',
+        {
+          alias: connection.alias,
+          baseUrl: connection.baseUrl,
+          authMode: connection.authMode,
+          mcpTransport: process.env.MCP_TRANSPORT_TYPE,
+          mcpAuthMode: process.env.MCP_AUTH_MODE ?? 'none',
+        },
+      );
+    }
+
     // Force a fresh capability load on connect — the agent expects current state.
     await capabilities.invalidate(connection.baseUrl, ctx);
     return buildOrientationEnvelope(ctx, connection, {
@@ -98,3 +111,15 @@ export const brapiConnect = tool('brapi_connect', {
 
   format: (result) => [{ type: 'text', text: formatOrientationEnvelope(result) }],
 });
+
+/**
+ * True when the server is running over HTTP without per-client auth, in which
+ * case `ctx.state` collapses every caller into the shared `default` tenant —
+ * including the bearer token resolved by SGN/OAuth at connection time.
+ */
+function isMultiTenantHttpDeployment(): boolean {
+  const transport = (process.env.MCP_TRANSPORT_TYPE ?? 'stdio').toLowerCase();
+  if (transport !== 'http') return false;
+  const authMode = (process.env.MCP_AUTH_MODE ?? 'none').toLowerCase();
+  return authMode !== 'jwt' && authMode !== 'oauth';
+}

@@ -24,6 +24,7 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderDatasetHandle,
   renderDistributions,
 } from '../shared/find-helpers.js';
 
@@ -35,29 +36,40 @@ const VariantRowSchema = z
       .optional()
       .describe('Known names / aliases for this variant.'),
     variantSetDbId: z
-      .string()
+      .union([
+        z.string().describe('Single variant-set FK (older BrAPI servers).'),
+        z
+          .array(z.string().describe('One variant-set FK.'))
+          .describe('Variant-set FK array — a variant may belong to multiple sets.'),
+      ])
       .optional()
-      .describe('FK to the variant set this variant belongs to.'),
-    variantType: z.string().optional().describe('Variant type (e.g. "SNP", "INDEL", "DUP").'),
+      .describe(
+        'FK to the variant set(s) this variant belongs to. May be a string or string[] depending on server.',
+      ),
+    variantSetDbIds: z
+      .array(z.string().describe('Variant-set FK.'))
+      .optional()
+      .describe('Plural-form FK array per BrAPI v2.1 spec, when the server uses it.'),
+    variantType: z.string().nullish().describe('Variant type (e.g. "SNP", "INDEL", "DUP").'),
     referenceBases: z
       .string()
-      .optional()
+      .nullish()
       .describe('Reference allele sequence at the variant position.'),
     alternateBases: z
       .array(z.string().describe('Alternate allele sequence.'))
-      .optional()
+      .nullish()
       .describe('Alternate alleles observed at this position.'),
-    referenceName: z.string().optional().describe('Reference sequence name (e.g. "chr01").'),
-    start: z.number().optional().describe('1-based inclusive start position.'),
-    end: z.number().optional().describe('1-based exclusive end position.'),
-    filtersPassed: z.boolean().optional().describe('True when the variant passed all QC filters.'),
+    referenceName: z.string().nullish().describe('Reference sequence name (e.g. "chr01").'),
+    start: z.number().nullish().describe('1-based inclusive start position.'),
+    end: z.number().nullish().describe('1-based exclusive end position.'),
+    filtersPassed: z.boolean().nullish().describe('True when the variant passed all QC filters.'),
     filtersApplied: z
       .boolean()
-      .optional()
+      .nullish()
       .describe('True when QC filters were evaluated on this variant.'),
     filtersFailed: z
       .array(z.string().describe('Filter ID that failed.'))
-      .optional()
+      .nullish()
       .describe('IDs of QC filters this variant failed, when any.'),
   })
   .passthrough()
@@ -178,7 +190,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     const distributions = {
       variantType: computeDistribution(fullRows, (r) => asString(r.variantType)),
       referenceName: computeDistribution(fullRows, (r) => asString(r.referenceName)),
-      variantSetDbId: computeDistribution(fullRows, (r) => asString(r.variantSetDbId)),
+      variantSetDbId: computeDistribution(fullRows, (r) => collectVariantSetIds(r)),
     };
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;
@@ -227,14 +239,15 @@ export const brapiFindVariants = tool('brapi_find_variants', {
         const parts: string[] = [`**${label}**`];
         parts.push(`id=\`${v.variantDbId}\``);
         if (v.variantType) parts.push(`type=${v.variantType}`);
-        if (v.variantSetDbId) parts.push(`set=${v.variantSetDbId}`);
+        const setIds = collectVariantSetIds(v);
+        if (setIds && setIds.length > 0) parts.push(`set=${setIds.join(',')}`);
         if (v.referenceName) parts.push(`ref=${v.referenceName}`);
-        if (v.start !== undefined) parts.push(`start=${v.start}`);
-        if (v.end !== undefined) parts.push(`end=${v.end}`);
+        if (v.start != null) parts.push(`start=${v.start}`);
+        if (v.end != null) parts.push(`end=${v.end}`);
         if (v.referenceBases) parts.push(`refBases=${v.referenceBases}`);
         if (v.alternateBases?.length) parts.push(`altBases=${v.alternateBases.join(',')}`);
-        if (v.filtersApplied !== undefined) parts.push(`filtersApplied=${v.filtersApplied}`);
-        if (v.filtersPassed !== undefined) parts.push(`filtersPassed=${v.filtersPassed}`);
+        if (v.filtersApplied != null) parts.push(`filtersApplied=${v.filtersApplied}`);
+        if (v.filtersPassed != null) parts.push(`filtersPassed=${v.filtersPassed}`);
         if (v.filtersFailed?.length) parts.push(`filtersFailed=${v.filtersFailed.join(',')}`);
         if (v.variantNames?.length) parts.push(`names=${v.variantNames.join(',')}`);
         lines.push(`- ${parts.join(' · ')}`);
@@ -243,12 +256,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     if (result.dataset) {
       lines.push('');
       lines.push('## Dataset handle');
-      lines.push(`- datasetId: \`${result.dataset.datasetId}\``);
-      lines.push(`- rowCount: ${result.dataset.rowCount}`);
-      lines.push(`- sizeBytes: ${result.dataset.sizeBytes}`);
-      lines.push(`- columns: ${result.dataset.columns.join(', ')}`);
-      lines.push(`- createdAt: ${result.dataset.createdAt}`);
-      lines.push(`- expiresAt: ${result.dataset.expiresAt}`);
+      lines.push(...renderDatasetHandle(result.dataset));
     }
     if (result.warnings.length > 0) {
       lines.push('');
@@ -258,3 +266,16 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+function collectVariantSetIds(row: Record<string, unknown>): string[] | undefined {
+  const ids = new Set<string>();
+  const collect = (value: unknown): void => {
+    if (typeof value === 'string' && value.length > 0) ids.add(value);
+    else if (Array.isArray(value)) {
+      for (const v of value) if (typeof v === 'string' && v.length > 0) ids.add(v);
+    }
+  };
+  collect(row.variantSetDbId);
+  collect(row.variantSetDbIds);
+  return ids.size > 0 ? Array.from(ids) : undefined;
+}

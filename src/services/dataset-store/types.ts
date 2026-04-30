@@ -10,12 +10,16 @@ export interface CreateDatasetInput {
   baseUrl: string;
   /** Optional column list; inferred from the first row when omitted. */
   columns?: string[];
+  /** Cap the producer applied — number of rows that would have been pulled without truncation. Omit when no cap was applied. */
+  maxRows?: number;
   /** Full query params / filter map — required for reproducibility. */
   query: unknown;
   /** Row payload. */
   rows: Record<string, unknown>[];
   /** Original tool / operation that produced the dataset (e.g. 'find_studies'). */
   source: string;
+  /** True when the producer hit a cap before exhausting the upstream result set. */
+  truncated?: boolean;
 }
 
 export interface DatasetMetadata {
@@ -26,11 +30,15 @@ export interface DatasetMetadata {
   datasetId: string;
   /** ISO 8601 expiry — when the TTL will evict the dataset. */
   expiresAt: string;
+  /** Cap that was applied at create time. Omitted when none. */
+  maxRows?: number;
   query: unknown;
   rowCount: number;
   /** Serialized payload size in bytes (UTF-8 JSON). */
   sizeBytes: number;
   source: string;
+  /** True when the dataset rows were capped before exhausting upstream. */
+  truncated?: boolean;
 }
 
 export interface DatasetLoadOptions {

@@ -12,7 +12,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
-import { AliasInput, buildRequestOptions } from '../shared/find-helpers.js';
+import { AliasInput, buildRequestOptions, isUpstreamNotFound } from '../shared/find-helpers.js';
 
 const GermplasmSchema = z
   .object({
@@ -144,12 +144,28 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     const id = encodeURIComponent(input.germplasmDbId);
     const warnings: string[] = [];
 
-    const germplasmEnv = await client.get<Record<string, unknown>>(
-      connection.baseUrl,
-      `/germplasm/${id}`,
-      ctx,
-      buildRequestOptions(connection),
-    );
+    let germplasmEnv: Awaited<ReturnType<typeof client.get<Record<string, unknown>>>>;
+    try {
+      germplasmEnv = await client.get<Record<string, unknown>>(
+        connection.baseUrl,
+        `/germplasm/${id}`,
+        ctx,
+        buildRequestOptions(connection),
+      );
+    } catch (err) {
+      if (isUpstreamNotFound(err)) {
+        throw ctx.fail(
+          'germplasm_not_found',
+          `Germplasm '${input.germplasmDbId}' not found on ${connection.baseUrl}.`,
+          {
+            germplasmDbId: input.germplasmDbId,
+            baseUrl: connection.baseUrl,
+            ...ctx.recoveryFor('germplasm_not_found'),
+          },
+        );
+      }
+      throw err;
+    }
     const germplasm = germplasmEnv.result;
     if (!germplasm || typeof germplasm !== 'object' || !germplasm.germplasmDbId) {
       throw ctx.fail(
@@ -163,27 +179,48 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
       );
     }
 
+    const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
+    const supportsPedigree = Boolean(profile.supported['germplasm/{germplasmDbId}/pedigree']);
+    const supportsAttributes = Boolean(profile.supported['germplasm/{germplasmDbId}/attributes']);
+    const supportsProgeny = Boolean(profile.supported['germplasm/{germplasmDbId}/progeny']);
+    const supportsStudies = profile.supported.studies?.methods?.includes('GET') ?? false;
+
     const [pedigree, attributes, studyCount, progenyCount] = await Promise.all([
-      fetchPedigree(client, connection.baseUrl, id, ctx, buildRequestOptions(connection)).catch(
-        (err) => recordWarning(warnings, 'pedigree lookup failed', err),
-      ),
-      fetchAttributes(client, connection.baseUrl, id, ctx, buildRequestOptions(connection)).catch(
-        (err) => recordWarning(warnings, 'attributes lookup failed', err),
-      ),
-      fetchTotalCount(
-        client,
-        connection.baseUrl,
-        '/studies',
-        ctx,
-        buildRequestOptions(connection, { germplasmDbIds: [input.germplasmDbId], pageSize: 0 }),
-      ).catch((err) => recordWarning(warnings, 'study count probe failed', err)),
-      fetchTotalCount(
-        client,
-        connection.baseUrl,
-        `/germplasm/${id}/progeny`,
-        ctx,
-        buildRequestOptions(connection, { pageSize: 0 }),
-      ).catch((err) => recordWarning(warnings, 'progeny count probe failed', err)),
+      supportsPedigree
+        ? fetchPedigree(client, connection.baseUrl, id, ctx, buildRequestOptions(connection)).catch(
+            (err) => recordWarning(warnings, 'pedigree lookup failed', err),
+          )
+        : Promise.resolve(undefined),
+      supportsAttributes
+        ? fetchAttributes(
+            client,
+            connection.baseUrl,
+            id,
+            ctx,
+            buildRequestOptions(connection),
+          ).catch((err) => recordWarning(warnings, 'attributes lookup failed', err))
+        : Promise.resolve(undefined),
+      supportsStudies
+        ? fetchTotalCount(
+            client,
+            connection.baseUrl,
+            '/studies',
+            ctx,
+            buildRequestOptions(connection, {
+              germplasmDbIds: [input.germplasmDbId],
+              pageSize: 1,
+            }),
+          ).catch((err) => recordWarning(warnings, 'study count probe failed', err))
+        : Promise.resolve(undefined),
+      supportsProgeny
+        ? fetchTotalCount(
+            client,
+            connection.baseUrl,
+            `/germplasm/${id}/progeny`,
+            ctx,
+            buildRequestOptions(connection, { pageSize: 1 }),
+          ).catch((err) => recordWarning(warnings, 'progeny count probe failed', err))
+        : Promise.resolve(undefined),
     ]);
 
     const parents = pedigree?.parents ?? [];

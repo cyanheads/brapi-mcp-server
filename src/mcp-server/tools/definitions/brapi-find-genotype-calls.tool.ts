@@ -12,7 +12,11 @@ import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { type DatasetStore, getDatasetStore } from '@/services/dataset-store/index.js';
+import {
+  type CreateDatasetInput,
+  type DatasetStore,
+  getDatasetStore,
+} from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
@@ -21,6 +25,7 @@ import {
   buildRequestOptions,
   computeDistribution,
   DatasetHandleSchema,
+  renderDatasetHandle,
   renderDistributions,
   toDatasetHandle,
 } from '../shared/find-helpers.js';
@@ -125,7 +130,8 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
-  description: `Pull genotype calls for a germplasm × variant set, returned as a single resolved batch. Default cap of ${DEFAULT_MAX_CALLS} calls; override via maxCalls (hard cap ${HARD_MAX_CALLS}). Rows beyond the in-context loadLimit are persisted as a dataset handle for follow-up paging via brapi_manage_dataset.`,
+  description:
+    'Pull genotype calls for a germplasm × variant set, returned as a single resolved batch. Capped per call by maxCalls; rows beyond loadLimit are persisted as a dataset handle for follow-up paging.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -226,6 +232,12 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       variantSetDbId: computeDistribution(collected.rows, (r) => asString(r.variantSetDbId)),
     };
 
+    if (collected.rows.length === 0 && hasNamedFilter(searchBody)) {
+      warnings.push(
+        'Upstream returned 0 calls for the requested filters. The variant set or filter combination may not match any data on this server.',
+      );
+    }
+
     const shouldSpill = collected.rows.length > loadLimit;
     let datasetMeta: z.infer<typeof DatasetHandleSchema> | undefined;
     if (shouldSpill) {
@@ -235,6 +247,8 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         connection,
         body: searchBody,
         rows: collected.rows,
+        truncated: collected.truncated,
+        maxRows: maxCalls,
       });
     }
 
@@ -292,12 +306,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     if (result.dataset) {
       lines.push('');
       lines.push('## Dataset handle');
-      lines.push(`- datasetId: \`${result.dataset.datasetId}\``);
-      lines.push(`- rowCount: ${result.dataset.rowCount}`);
-      lines.push(`- sizeBytes: ${result.dataset.sizeBytes}`);
-      lines.push(`- columns: ${result.dataset.columns.join(', ')}`);
-      lines.push(`- createdAt: ${result.dataset.createdAt}`);
-      lines.push(`- expiresAt: ${result.dataset.expiresAt}`);
+      lines.push(...renderDatasetHandle(result.dataset));
     }
     if (result.warnings.length > 0) {
       lines.push('');
@@ -455,16 +464,34 @@ interface SpillCallsInput {
   body: Record<string, unknown>;
   connection: RegisteredServer;
   ctx: Context;
+  maxRows: number;
   rows: z.infer<typeof CallRowSchema>[];
   store: DatasetStore;
+  truncated: boolean;
 }
 
 async function spillCalls(input: SpillCallsInput): Promise<z.infer<typeof DatasetHandleSchema>> {
-  const metadata = await input.store.create(input.ctx, {
+  const createInput: CreateDatasetInput = {
     source: 'find_genotype_calls',
     baseUrl: input.connection.baseUrl,
     query: input.body,
     rows: input.rows as Record<string, unknown>[],
-  });
+  };
+  if (input.truncated) {
+    createInput.truncated = true;
+    createInput.maxRows = input.maxRows;
+  }
+  const metadata = await input.store.create(input.ctx, createInput);
   return toDatasetHandle(metadata);
+}
+
+function hasNamedFilter(body: Record<string, unknown>): boolean {
+  const isNonEmptyArray = (v: unknown) => Array.isArray(v) && v.length > 0;
+  return (
+    typeof body.variantSetDbId === 'string' ||
+    isNonEmptyArray(body.variantSetDbIds) ||
+    isNonEmptyArray(body.germplasmDbIds) ||
+    isNonEmptyArray(body.callSetDbIds) ||
+    isNonEmptyArray(body.variantDbIds)
+  );
 }

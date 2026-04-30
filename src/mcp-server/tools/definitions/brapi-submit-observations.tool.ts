@@ -16,7 +16,12 @@ import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
-import { AliasInput, buildRequestOptions, extractRows } from '../shared/find-helpers.js';
+import {
+  AliasInput,
+  buildRequestOptions,
+  extractRows,
+  isUpstreamNotFound,
+} from '../shared/find-helpers.js';
 
 const ObservationRowSchema = z
   .object({
@@ -195,6 +200,13 @@ const SUBMIT_ERRORS = [
       'Run brapi_server_info to inspect the advertised endpoints, or call brapi_connect with a different alias for a server that exposes /observations.',
   },
   {
+    reason: 'study_not_found',
+    code: JsonRpcErrorCode.NotFound,
+    when: 'Upstream returned no study record for the requested studyDbId',
+    recovery:
+      'Verify the studyDbId on the target server, or run brapi_find_studies to discover valid IDs before retrying.',
+  },
+  {
     reason: 'post_unsupported',
     code: JsonRpcErrorCode.ValidationError,
     when: 'Server does not advertise POST on /observations but new rows were submitted',
@@ -227,7 +239,7 @@ type SubmitCtx = HandlerContext<(typeof SUBMIT_ERRORS)[number]['reason']>;
 
 export const brapiSubmitObservations = tool('brapi_submit_observations', {
   description:
-    'Submit new or updated observations for a study. Default mode `preview` validates rows against the study variables and returns a routing breakdown without writing. Mode `apply` elicits confirmation when supported, then creates rows that lack observationDbId, updates rows that carry one, and returns the post-write study count plus per-row server echoes. Additive only — no observation is destroyed.',
+    'Submit observations for a study. Default mode `preview` validates rows against the study variables and returns a routing breakdown without writing. Mode `apply` elicits confirmation when supported, then creates new rows or updates existing ones based on observationDbId presence. Additive only — no observation is destroyed.',
   annotations: {
     readOnlyHint: false,
     destructiveHint: false,
@@ -281,8 +293,20 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
       );
     }
 
+    const studyLookup = await fetchStudyExistence(input.studyDbId, connection, client, ctx);
+    if (!studyLookup.exists) {
+      throw ctx.fail(
+        'study_not_found',
+        `Study '${input.studyDbId}' not found on ${connection.baseUrl}.`,
+        {
+          studyDbId: input.studyDbId,
+          baseUrl: connection.baseUrl,
+          ...ctx.recoveryFor('study_not_found'),
+        },
+      );
+    }
+    const studyName = studyLookup.studyName;
     const knownVariables = await fetchStudyVariables(input.studyDbId, connection, client, ctx);
-    const studyName = await fetchStudyName(input.studyDbId, connection, client, ctx);
 
     const decisions: RowDecision[] = [];
     const perRowWarnings: z.infer<typeof PerRowWarningSchema>[] = [];
@@ -571,9 +595,9 @@ async function fetchStudyVariables(
   try {
     const env = await client.get<unknown>(
       connection.baseUrl,
-      `/studies/${encodeURIComponent(studyDbId)}/observationvariables`,
+      '/variables',
       ctx,
-      buildRequestOptions(connection, { pageSize: 1000 }),
+      buildRequestOptions(connection, { studyDbId, pageSize: 1000 }),
     );
     const known = new Set<string>();
     const rows = extractRows<Record<string, unknown>>(
@@ -593,12 +617,12 @@ async function fetchStudyVariables(
   }
 }
 
-async function fetchStudyName(
+async function fetchStudyExistence(
   studyDbId: string,
   connection: RegisteredServer,
   client: BrapiClient,
   ctx: Context,
-): Promise<string | undefined> {
+): Promise<{ exists: boolean; studyName?: string }> {
   try {
     const env = await client.get<Record<string, unknown>>(
       connection.baseUrl,
@@ -606,10 +630,18 @@ async function fetchStudyName(
       ctx,
       buildRequestOptions(connection),
     );
-    const name = env.result?.studyName;
-    return typeof name === 'string' && name.length > 0 ? name : undefined;
-  } catch {
-    return;
+    const study = env.result;
+    if (!study || typeof study !== 'object' || !study.studyDbId) {
+      return { exists: false };
+    }
+    const name = study.studyName;
+    return typeof name === 'string' && name.length > 0
+      ? { exists: true, studyName: name }
+      : { exists: true };
+  } catch (err) {
+    if (isUpstreamNotFound(err)) return { exists: false };
+    // Transient errors (timeouts, 5xx) — propagate so the user sees the real cause.
+    throw err;
   }
 }
 
@@ -622,9 +654,9 @@ async function fetchStudyObservationCount(
   try {
     const env = await client.get<unknown>(
       connection.baseUrl,
-      `/studies/${encodeURIComponent(studyDbId)}/observations`,
+      '/observations',
       ctx,
-      buildRequestOptions(connection, { pageSize: 0 }),
+      buildRequestOptions(connection, { studyDbIds: [studyDbId], pageSize: 1 }),
     );
     const total = env.metadata?.pagination?.totalCount;
     return typeof total === 'number' ? total : undefined;

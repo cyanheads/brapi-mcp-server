@@ -24,6 +24,7 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderDatasetHandle,
   renderDistributions,
 } from '../shared/find-helpers.js';
 
@@ -210,6 +211,21 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;
     const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions);
 
+    // Heuristic: if the user asked for a text filter and the upstream returned
+    // every row that matches all the *other* filters (i.e. the text didn't
+    // narrow anything), the server probably doesn't honor the filter.
+    if (
+      input.text &&
+      totalCount > 0 &&
+      firstPage.totalCount !== undefined &&
+      firstPage.rows.length === firstPage.totalCount &&
+      !hasRowsMatchingText(firstPage.rows, input.text)
+    ) {
+      warnings.push(
+        `Free-text filter '${input.text}' may not be honored by this server — none of the returned rows obviously match the query string.`,
+      );
+    }
+
     const result: Output = {
       alias: connection.alias,
       results: firstPage.rows as z.infer<typeof GermplasmRowSchema>[],
@@ -281,12 +297,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     if (result.dataset) {
       lines.push('');
       lines.push('## Dataset handle');
-      lines.push(`- datasetId: \`${result.dataset.datasetId}\``);
-      lines.push(`- rowCount: ${result.dataset.rowCount}`);
-      lines.push(`- sizeBytes: ${result.dataset.sizeBytes}`);
-      lines.push(`- columns: ${result.dataset.columns.join(', ')}`);
-      lines.push(`- createdAt: ${result.dataset.createdAt}`);
-      lines.push(`- expiresAt: ${result.dataset.expiresAt}`);
+      lines.push(...renderDatasetHandle(result.dataset));
     }
     if (result.warnings.length > 0) {
       lines.push('');
@@ -296,3 +307,32 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+function hasRowsMatchingText(rows: readonly Record<string, unknown>[], text: string): boolean {
+  const needle = text.toLowerCase();
+  const containsNeedle = (value: unknown): boolean =>
+    typeof value === 'string' && value.toLowerCase().includes(needle);
+
+  for (const row of rows) {
+    if (
+      containsNeedle(row.germplasmName) ||
+      containsNeedle(row.germplasmPUI) ||
+      containsNeedle(row.accessionNumber) ||
+      containsNeedle(row.defaultDisplayName)
+    ) {
+      return true;
+    }
+    if (Array.isArray(row.synonyms)) {
+      for (const entry of row.synonyms) {
+        if (
+          entry &&
+          typeof entry === 'object' &&
+          containsNeedle((entry as Record<string, unknown>).synonym)
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}

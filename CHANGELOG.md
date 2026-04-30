@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.4](changelog/0.3.x/0.3.4.md) — 2026-04-29
+
+Field-test pass against real BrAPI servers — capability-gated companion lookups, top-level study FK probes, structured-season + multi-set variant tolerance, and a multi-tenant HTTP deployment notice.
+
 ## [0.3.3](changelog/0.3.x/0.3.3.md) — 2026-04-29
 
 Tighten recovery hints across BrAPI tool/resource error contracts and wire service-layer throws so declared hints actually reach the wire.

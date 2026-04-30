@@ -26,6 +26,7 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderDatasetHandle,
   renderDistributions,
 } from '../shared/find-helpers.js';
 
@@ -109,7 +110,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     locations: z
       .array(z.string())
       .optional()
-      .describe('Filter by locationDbIds (not names — resolve via brapi_find_locations first).'),
+      .describe('Filter by locationDbIds (server-side identifiers, not display names).'),
     programs: z.array(z.string()).optional().describe('Filter by programDbIds.'),
     trials: z.array(z.string()).optional().describe('Filter by trialDbIds.'),
     studyNames: z.array(z.string()).optional().describe('Filter by study display name.'),
@@ -261,12 +262,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     if (result.dataset) {
       lines.push('');
       lines.push('## Dataset handle');
-      lines.push(`- datasetId: \`${result.dataset.datasetId}\``);
-      lines.push(`- rowCount: ${result.dataset.rowCount}`);
-      lines.push(`- sizeBytes: ${result.dataset.sizeBytes}`);
-      lines.push(`- columns: ${result.dataset.columns.join(', ')}`);
-      lines.push(`- createdAt: ${result.dataset.createdAt}`);
-      lines.push(`- expiresAt: ${result.dataset.expiresAt}`);
+      lines.push(...renderDatasetHandle(result.dataset));
     }
     if (result.warnings.length > 0) {
       lines.push('');

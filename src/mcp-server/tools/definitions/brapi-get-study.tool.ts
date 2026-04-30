@@ -13,7 +13,7 @@ import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getReferenceDataCache } from '@/services/reference-data-cache/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
-import { AliasInput, buildRequestOptions } from '../shared/find-helpers.js';
+import { AliasInput, buildRequestOptions, isUpstreamNotFound } from '../shared/find-helpers.js';
 
 const StudySchema = z
   .object({
@@ -157,12 +157,28 @@ export const brapiGetStudy = tool('brapi_get_study', {
     const referenceLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) referenceLookup.auth = connection.resolvedAuth;
 
-    const studyEnv = await client.get<Record<string, unknown>>(
-      connection.baseUrl,
-      `/studies/${encodeURIComponent(input.studyDbId)}`,
-      ctx,
-      buildRequestOptions(connection),
-    );
+    let studyEnv: Awaited<ReturnType<typeof client.get<Record<string, unknown>>>>;
+    try {
+      studyEnv = await client.get<Record<string, unknown>>(
+        connection.baseUrl,
+        `/studies/${encodeURIComponent(input.studyDbId)}`,
+        ctx,
+        buildRequestOptions(connection),
+      );
+    } catch (err) {
+      if (isUpstreamNotFound(err)) {
+        throw ctx.fail(
+          'study_not_found',
+          `Study '${input.studyDbId}' not found on ${connection.baseUrl}.`,
+          {
+            studyDbId: input.studyDbId,
+            baseUrl: connection.baseUrl,
+            ...ctx.recoveryFor('study_not_found'),
+          },
+        );
+      }
+      throw err;
+    }
     const study = studyEnv.result;
     if (!study || typeof study !== 'object' || !study.studyDbId) {
       throw ctx.fail(
@@ -175,6 +191,12 @@ export const brapiGetStudy = tool('brapi_get_study', {
         },
       );
     }
+
+    const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
+    const supportsObservations = profile.supported.observations?.methods?.includes('GET') ?? false;
+    const supportsObservationUnits =
+      profile.supported.observationunits?.methods?.includes('GET') ?? false;
+    const supportsVariables = profile.supported.variables?.methods?.includes('GET') ?? false;
 
     const programDbId = asString(study.programDbId);
     const trialDbId = asString(study.trialDbId);
@@ -196,27 +218,42 @@ export const brapiGetStudy = tool('brapi_get_study', {
             .getLocations(connection.baseUrl, [locationDbId], ctx, referenceLookup)
             .catch((err) => recordWarning(warnings, 'location FK lookup failed', err))
         : Promise.resolve(undefined),
-      fetchTotalCount(
-        client,
-        connection.baseUrl,
-        `/studies/${encodeURIComponent(input.studyDbId)}/observations`,
-        ctx,
-        buildRequestOptions(connection, { pageSize: 0 }),
-      ).catch((err) => recordWarning(warnings, 'observation count probe failed', err)),
-      fetchTotalCount(
-        client,
-        connection.baseUrl,
-        `/studies/${encodeURIComponent(input.studyDbId)}/observationunits`,
-        ctx,
-        buildRequestOptions(connection, { pageSize: 0 }),
-      ).catch((err) => recordWarning(warnings, 'observation-unit count probe failed', err)),
-      fetchTotalCount(
-        client,
-        connection.baseUrl,
-        `/studies/${encodeURIComponent(input.studyDbId)}/observationvariables`,
-        ctx,
-        buildRequestOptions(connection, { pageSize: 0 }),
-      ).catch((err) => recordWarning(warnings, 'variable count probe failed', err)),
+      supportsObservations
+        ? fetchTotalCount(
+            client,
+            connection.baseUrl,
+            '/observations',
+            ctx,
+            buildRequestOptions(connection, {
+              studyDbIds: [input.studyDbId],
+              pageSize: 1,
+            }),
+          ).catch((err) => recordWarning(warnings, 'observation count probe failed', err))
+        : Promise.resolve(undefined),
+      supportsObservationUnits
+        ? fetchTotalCount(
+            client,
+            connection.baseUrl,
+            '/observationunits',
+            ctx,
+            buildRequestOptions(connection, {
+              studyDbIds: [input.studyDbId],
+              pageSize: 1,
+            }),
+          ).catch((err) => recordWarning(warnings, 'observation-unit count probe failed', err))
+        : Promise.resolve(undefined),
+      supportsVariables
+        ? fetchTotalCount(
+            client,
+            connection.baseUrl,
+            '/variables',
+            ctx,
+            buildRequestOptions(connection, {
+              studyDbId: input.studyDbId,
+              pageSize: 1,
+            }),
+          ).catch((err) => recordWarning(warnings, 'variable count probe failed', err))
+        : Promise.resolve(undefined),
     ]);
 
     const result: Output = {

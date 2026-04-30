@@ -52,7 +52,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiRawGet = tool('brapi_raw_get', {
   description:
-    'Passthrough to any BrAPI GET /{path} endpoint not covered by goal-shaped tools. Returns the raw upstream envelope without enrichment or foreign-key resolution. Emits a `suggestion` field when a curated tool covers the endpoint.',
+    'Passthrough to any BrAPI GET /{path} endpoint. Returns the raw upstream envelope without enrichment or foreign-key resolution. Emits a `suggestion` field when a curated tool exists for the same data.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {

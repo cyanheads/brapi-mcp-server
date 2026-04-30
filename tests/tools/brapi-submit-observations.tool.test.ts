@@ -61,7 +61,7 @@ function setupReadCalls(
   fetcher.mockImplementation(async (url: string, _t, _c, init: RequestInit) => {
     const path = pathnameOf(url);
     const u = new URL(String(url));
-    if (path.endsWith('/observationvariables')) {
+    if (path.endsWith('/variables')) {
       const data = (options.variables ?? ['var-1', 'var-2']).map((id) => ({
         observationVariableDbId: id,
       }));
@@ -70,7 +70,11 @@ function setupReadCalls(
     if (path.endsWith('/studies/study-1') && (init?.method ?? 'GET') === 'GET') {
       return jsonResponse(envelope({ studyDbId: 'study-1', studyName: options.studyName ?? 'S' }));
     }
-    if (path.endsWith('/studies/study-1/observations') && u.searchParams.get('pageSize') === '0') {
+    if (
+      path.endsWith('/observations') &&
+      (init?.method ?? 'GET') === 'GET' &&
+      u.searchParams.get('pageSize') === '1'
+    ) {
       return jsonResponse(
         envelope({ data: [] }, { totalCount: options.studyObservationCount ?? 99 }),
       );

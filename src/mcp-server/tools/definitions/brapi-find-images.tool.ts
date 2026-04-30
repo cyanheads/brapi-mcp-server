@@ -24,6 +24,7 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderDatasetHandle,
   renderDistributions,
 } from '../shared/find-helpers.js';
 
@@ -261,12 +262,7 @@ export const brapiFindImages = tool('brapi_find_images', {
     if (result.dataset) {
       lines.push('');
       lines.push('## Dataset handle');
-      lines.push(`- datasetId: \`${result.dataset.datasetId}\``);
-      lines.push(`- rowCount: ${result.dataset.rowCount}`);
-      lines.push(`- sizeBytes: ${result.dataset.sizeBytes}`);
-      lines.push(`- columns: ${result.dataset.columns.join(', ')}`);
-      lines.push(`- createdAt: ${result.dataset.createdAt}`);
-      lines.push(`- expiresAt: ${result.dataset.expiresAt}`);
+      lines.push(...renderDatasetHandle(result.dataset));
     }
     if (result.warnings.length > 0) {
       lines.push('');

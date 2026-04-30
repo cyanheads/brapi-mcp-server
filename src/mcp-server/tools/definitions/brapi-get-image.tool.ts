@@ -68,7 +68,7 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 export const brapiGetImage = tool('brapi_get_image', {
-  description: `Fetch image bytes for up to ${MAX_IMAGES_PER_CALL} imageDbIds and return them inline as \`type: image\` content blocks. Prefers the BrAPI \`/images/{id}/imagecontent\` endpoint; falls back to the \`imageURL\` field when the server doesn't implement imagecontent. Companion: brapi_find_images locates candidate imageDbIds. No filesystem side-effects.`,
+  description: `Fetch image bytes for up to ${MAX_IMAGES_PER_CALL} imageDbIds and return them inline as \`type: image\` content blocks. Falls back to the metadata \`imageURL\` when the server lacks dedicated image-content delivery. No filesystem side-effects.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   errors: [
     {
@@ -106,7 +106,13 @@ export const brapiGetImage = tool('brapi_get_image', {
         { baseUrl: connection.baseUrl, ...ctx.recoveryFor('images_unsupported') },
       );
     }
-    const hasImageContent = Boolean(profile.supported['images/{imageDbId}/imagecontent']);
+    // /imagecontent must declare GET — many servers expose it for PUT-only upload.
+    const imagecontentDescriptor = profile.supported['images/{imageDbId}/imagecontent'];
+    const hasImageContent = Boolean(
+      imagecontentDescriptor &&
+        (imagecontentDescriptor.methods === undefined ||
+          imagecontentDescriptor.methods.includes('GET')),
+    );
 
     const loaded = await Promise.all(
       input.imageDbIds.map((id) => fetchOne(id, hasImageContent, connection, client, ctx)),

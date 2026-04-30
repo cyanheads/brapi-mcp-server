@@ -25,6 +25,7 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderDatasetHandle,
   renderDistributions,
 } from '../shared/find-helpers.js';
 
@@ -98,7 +99,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindLocations = tool('brapi_find_locations', {
   description:
-    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Optional client-side bounding-box filter (bbox) restricts rows by latitude/longitude ranges after the upstream fetch. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Optional bbox parameter restricts rows to a latitude/longitude window. Returns a dataset handle when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     alias: AliasInput,
@@ -204,6 +205,15 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     const filteredReturned = bbox
       ? firstPage.rows.filter((r) => insideBbox(r, bbox))
       : firstPage.rows;
+    if (bbox && fullRows.length > 0 && filteredFull.length === 0) {
+      warnings.push(
+        `bbox excluded all ${fullRows.length} upstream location(s). Verify the latitude/longitude window matches the server's coordinate convention.`,
+      );
+    } else if (bbox && filteredFull.length < fullRows.length) {
+      warnings.push(
+        `bbox excluded ${fullRows.length - filteredFull.length} of ${fullRows.length} upstream location(s).`,
+      );
+    }
 
     const distributions = {
       countryCode: computeDistribution(filteredFull, (r) => asString(r.countryCode)),
@@ -272,12 +282,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     if (result.dataset) {
       lines.push('');
       lines.push('## Dataset handle');
-      lines.push(`- datasetId: \`${result.dataset.datasetId}\``);
-      lines.push(`- rowCount: ${result.dataset.rowCount}`);
-      lines.push(`- sizeBytes: ${result.dataset.sizeBytes}`);
-      lines.push(`- columns: ${result.dataset.columns.join(', ')}`);
-      lines.push(`- createdAt: ${result.dataset.createdAt}`);
-      lines.push(`- expiresAt: ${result.dataset.expiresAt}`);
+      lines.push(...renderDatasetHandle(result.dataset));
     }
     if (result.warnings.length > 0) {
       lines.push('');

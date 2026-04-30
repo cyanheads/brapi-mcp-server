@@ -27,7 +27,12 @@ async function connect(fetcher: MockFetcher) {
       return jsonResponse(
         envelope({
           serverName: 'Test',
-          calls: [{ service: 'studies', methods: ['GET'], versions: ['2.1'] }],
+          calls: [
+            { service: 'studies', methods: ['GET'], versions: ['2.1'] },
+            { service: 'observations', methods: ['GET'], versions: ['2.1'] },
+            { service: 'observationunits', methods: ['GET'], versions: ['2.1'] },
+            { service: 'variables', methods: ['GET'], versions: ['2.1'] },
+          ],
         }),
       );
     }
@@ -93,7 +98,7 @@ describe('brapi_get_study tool', () => {
       if (path.endsWith('/observationunits')) {
         return jsonResponse(envelope({ data: [] }, { totalCount: 120 }));
       }
-      if (path.endsWith('/observationvariables')) {
+      if (path.endsWith('/variables')) {
         return jsonResponse(envelope({ data: [] }, { totalCount: 18 }));
       }
       throw new Error(`Unexpected path: ${path}`);

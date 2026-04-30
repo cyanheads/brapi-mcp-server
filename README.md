@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.3.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.3.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
@@ -525,6 +525,18 @@ docker run --rm -p 3010:3010 brapi-mcp-server
 ```
 
 The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `/var/log/brapi-mcp-server`. OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+
+### Multi-user HTTP deployments
+
+`ctx.state` — where `ServerRegistry` (connection aliases + resolved bearer tokens), `DatasetStore` (spilled `find_*` rows), and `CapabilityRegistry` (cached `/serverinfo` profiles) live — is **scoped by `tenantId`, not by MCP session id**. Tenant resolution:
+
+| Mode | Resolved `tenantId` |
+|:-----|:--------------------|
+| `MCP_TRANSPORT_TYPE=stdio` (any auth) | `default` |
+| `MCP_TRANSPORT_TYPE=http` + `MCP_AUTH_MODE=none` (default) | `default` for every connected client |
+| `MCP_TRANSPORT_TYPE=http` + `MCP_AUTH_MODE=jwt` or `oauth` | JWT `tid` claim, fail-closed if absent |
+
+In HTTP + `none`, every client shares one bucket: connection aliases registered by one user (including the access token resolved from an SGN `/token` exchange) are reachable to any other connected user. For shared HTTP deployments, set `MCP_AUTH_MODE=jwt` (HS256, `MCP_AUTH_SECRET_KEY`) or `oauth` (JWKS, `OAUTH_ISSUER_URL` + `OAUTH_AUDIENCE`) so each caller's `tid` carves its own state.
 
 ---
 

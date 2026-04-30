@@ -30,6 +30,7 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderDatasetHandle,
   renderDistributions,
 } from '../shared/find-helpers.js';
 
@@ -153,7 +154,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindVariables = tool('brapi_find_variables', {
   description:
-    'Find observation variables (traits) by name, trait class, ontology term, or free-text query. Free-text matches are ranked client-side via OntologyResolver; results may resolve to ontology URIs when the server exposes them. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Find observation variables (traits) by name, trait class, ontology term, or free-text query. Free-text queries are ranked against the returned set and may resolve to ontology URIs when the server advertises them. Returns a dataset handle when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     alias: AliasInput,
@@ -363,12 +364,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     if (result.dataset) {
       lines.push('');
       lines.push('## Dataset handle');
-      lines.push(`- datasetId: \`${result.dataset.datasetId}\``);
-      lines.push(`- rowCount: ${result.dataset.rowCount}`);
-      lines.push(`- sizeBytes: ${result.dataset.sizeBytes}`);
-      lines.push(`- columns: ${result.dataset.columns.join(', ')}`);
-      lines.push(`- createdAt: ${result.dataset.createdAt}`);
-      lines.push(`- expiresAt: ${result.dataset.expiresAt}`);
+      lines.push(...renderDatasetHandle(result.dataset));
     }
     if (result.warnings.length > 0) {
       lines.push('');

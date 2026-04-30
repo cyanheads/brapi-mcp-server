@@ -58,6 +58,8 @@ export class DatasetStore {
       createdAt: now.toISOString(),
       expiresAt: expiresAt.toISOString(),
     };
+    if (input.truncated) metadata.truncated = true;
+    if (typeof input.maxRows === 'number') metadata.maxRows = input.maxRows;
 
     await Promise.all([
       ctx.state.set(metaKey(datasetId), metadata, { ttl }),

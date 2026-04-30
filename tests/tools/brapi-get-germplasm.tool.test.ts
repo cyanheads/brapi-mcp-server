@@ -26,7 +26,19 @@ async function connect(fetcher: MockFetcher) {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
-        envelope({ calls: [{ service: 'germplasm', methods: ['GET'], versions: ['2.1'] }] }),
+        envelope({
+          calls: [
+            { service: 'germplasm', methods: ['GET'], versions: ['2.1'] },
+            { service: 'germplasm/{germplasmDbId}/pedigree', methods: ['GET'], versions: ['2.1'] },
+            {
+              service: 'germplasm/{germplasmDbId}/attributes',
+              methods: ['GET'],
+              versions: ['2.1'],
+            },
+            { service: 'germplasm/{germplasmDbId}/progeny', methods: ['GET'], versions: ['2.1'] },
+            { service: 'studies', methods: ['GET'], versions: ['2.1'] },
+          ],
+        }),
       );
     }
     if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));

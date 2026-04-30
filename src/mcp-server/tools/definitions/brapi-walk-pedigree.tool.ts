@@ -14,7 +14,7 @@ import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
-import { AliasInput, buildRequestOptions } from '../shared/find-helpers.js';
+import { AliasInput, buildRequestOptions, isUpstreamNotFound } from '../shared/find-helpers.js';
 
 const DEFAULT_MAX_DEPTH = 3;
 const MAX_NODES = 1_000;
@@ -157,6 +157,17 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       warnings.push(
         'Server does not expose /germplasm/{id}/progeny — descendant traversal is skipped.',
       );
+    }
+
+    if (hasPedigree) {
+      const missing = await Promise.all(
+        input.germplasmDbIds.map(async (id) =>
+          (await rootExists(id, client, connection, ctx)) ? null : id,
+        ),
+      );
+      for (const id of missing) {
+        if (id) warnings.push(`Root germplasm '${id}' was not found in /germplasm/{id}/pedigree.`);
+      }
     }
 
     const state = createWalkState(input.germplasmDbIds);
@@ -370,6 +381,29 @@ async function expandNode(id: string, input: ExpandInput): Promise<Expansion> {
   }
 }
 
+async function rootExists(
+  id: string,
+  client: BrapiClient,
+  connection: RegisteredServer,
+  ctx: Context,
+): Promise<boolean> {
+  try {
+    const env = await client.get<Record<string, unknown> | null>(
+      connection.baseUrl,
+      `/germplasm/${encodeURIComponent(id)}/pedigree`,
+      ctx,
+      buildRequestOptions(connection),
+    );
+    // Some servers (e.g. test-server.brapi.org) reply 200 with `result: null`
+    // for unknown germplasm instead of 404.
+    return env.result != null;
+  } catch (err) {
+    if (isUpstreamNotFound(err)) return false;
+    // Non-404 errors get surfaced when the BFS later expands the node.
+    return true;
+  }
+}
+
 async function fetchPedigree(
   client: BrapiClient,
   connection: RegisteredServer,
@@ -406,17 +440,18 @@ async function fetchProgeny(
   encodedId: string,
   ctx: Context,
 ): Promise<Array<{ germplasmDbId: string; germplasmName?: string }>> {
-  const env = await client.get<Record<string, unknown>>(
+  const env = await client.get<Record<string, unknown> | null>(
     connection.baseUrl,
     `/germplasm/${encodedId}/progeny`,
     ctx,
     buildRequestOptions(connection),
   );
-  const rawProgeny = (env.result as { progeny?: unknown; data?: unknown })?.progeny;
+  const result = env.result as { progeny?: unknown; data?: unknown } | null;
+  const rawProgeny = result?.progeny;
   const fallback = Array.isArray(rawProgeny)
     ? rawProgeny
-    : Array.isArray((env.result as { data?: unknown }).data)
-      ? (env.result as { data: unknown[] }).data
+    : Array.isArray(result?.data)
+      ? (result.data as unknown[])
       : [];
   const children: Array<{ germplasmDbId: string; germplasmName?: string }> = [];
   for (const entry of fallback) {

@@ -9,6 +9,7 @@
  */
 
 import { type Context, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
 import type {
   BrapiClient,
@@ -17,8 +18,17 @@ import type {
   BrapiRequestOptions,
   ResolvedAuth,
 } from '@/services/brapi-client/index.js';
-import type { DatasetMetadata, DatasetStore } from '@/services/dataset-store/index.js';
+import type {
+  CreateDatasetInput,
+  DatasetMetadata,
+  DatasetStore,
+} from '@/services/dataset-store/index.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
+
+/** True when the thrown value is an upstream 404 surfaced by the BrAPI client. */
+export function isUpstreamNotFound(err: unknown): boolean {
+  return err instanceof McpError && err.code === JsonRpcErrorCode.NotFound;
+}
 
 /** Upper cap on how many rows we'll pull for DatasetStore spillover per call. */
 export const MAX_SPILLOVER_ROWS = 50_000;
@@ -222,13 +232,41 @@ export const DatasetHandleSchema = z.object({
     .describe('Full column list of the persisted rows.'),
   createdAt: z.string().describe('ISO 8601 timestamp the dataset was created.'),
   expiresAt: z.string().describe('ISO 8601 timestamp after which the dataset will be purged.'),
+  truncated: z
+    .boolean()
+    .optional()
+    .describe('True when the dataset hit a row cap before exhausting upstream.'),
+  maxRows: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe('Cap that was applied at create time, when truncation occurred.'),
 });
 
 export type DatasetHandle = z.infer<typeof DatasetHandleSchema>;
 
+/**
+ * Render a DatasetHandle as bullet lines, matching the existing find_* tool
+ * format. Centralized so the truncated/maxRows fields surface consistently.
+ */
+export function renderDatasetHandle(handle: DatasetHandle): string[] {
+  const lines = [
+    `- datasetId: \`${handle.datasetId}\``,
+    `- rowCount: ${handle.rowCount}`,
+    `- sizeBytes: ${handle.sizeBytes}`,
+    `- columns: ${handle.columns.join(', ')}`,
+    `- createdAt: ${handle.createdAt}`,
+    `- expiresAt: ${handle.expiresAt}`,
+  ];
+  if (handle.truncated) lines.push(`- truncated: true`);
+  if (typeof handle.maxRows === 'number') lines.push(`- maxRows: ${handle.maxRows}`);
+  return lines;
+}
+
 /** Project a `DatasetMetadata` to the in-context handle shape. */
 export function toDatasetHandle(metadata: DatasetMetadata): DatasetHandle {
-  return {
+  const handle: DatasetHandle = {
     datasetId: metadata.datasetId,
     rowCount: metadata.rowCount,
     sizeBytes: metadata.sizeBytes,
@@ -236,6 +274,9 @@ export function toDatasetHandle(metadata: DatasetMetadata): DatasetHandle {
     createdAt: metadata.createdAt,
     expiresAt: metadata.expiresAt,
   };
+  if (metadata.truncated) handle.truncated = true;
+  if (typeof metadata.maxRows === 'number') handle.maxRows = metadata.maxRows;
+  return handle;
 }
 
 export interface MaybeSpillInput<T> {
@@ -330,12 +371,21 @@ export async function spillToDataset<T extends Record<string, unknown>>(
     if (pageRows.length < pageSize) break;
   }
 
-  const dataset = await input.store.create(input.ctx, {
+  const reachedRowCap = rows.length >= remainingTarget && input.totalCount > rows.length;
+  const reachedPageCap = pagesFetched >= MAX_SPILLOVER_PAGES && input.totalCount > rows.length;
+  const truncated = reachedRowCap || reachedPageCap;
+
+  const createInput: CreateDatasetInput = {
     source: input.source,
     baseUrl: input.connection.baseUrl,
     query: input.filters,
     rows,
-  });
+  };
+  if (truncated) {
+    createInput.truncated = true;
+    createInput.maxRows = MAX_SPILLOVER_ROWS;
+  }
+  const dataset = await input.store.create(input.ctx, createInput);
 
   return { dataset, fullRows: rows, pagesFetched };
 }
