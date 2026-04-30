@@ -1,7 +1,7 @@
 /**
  * @fileoverview `brapi_get_study` — fetch a single study by DbId, resolve
  * program/trial/location FKs via ReferenceDataCache, and attach cheap
- * `pageSize=0` counts (observations, observation units, variables) as
+ * `pageSize=1` counts (observations, observation units, variables) as
  * response companions so the agent can decide where to drill next.
  *
  * @module mcp-server/tools/definitions/brapi-get-study.tool
@@ -13,7 +13,12 @@ import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getReferenceDataCache } from '@/services/reference-data-cache/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
-import { AliasInput, buildRequestOptions, isUpstreamNotFound } from '../shared/find-helpers.js';
+import {
+  AliasInput,
+  buildRequestOptions,
+  extractCoordinates,
+  isUpstreamNotFound,
+} from '../shared/find-helpers.js';
 
 const StudySchema = z
   .object({
@@ -76,9 +81,24 @@ const LocationSchema = z
       .string()
       .nullish()
       .describe('Type of location (e.g. "Research Station", "Field").'),
-    latitude: z.number().nullish().describe('WGS84 latitude in decimal degrees.'),
-    longitude: z.number().nullish().describe('WGS84 longitude in decimal degrees.'),
+    latitude: z
+      .number()
+      .nullish()
+      .describe(
+        'WGS84 latitude in decimal degrees (legacy field; modern servers use coordinates).',
+      ),
+    longitude: z
+      .number()
+      .nullish()
+      .describe(
+        'WGS84 longitude in decimal degrees (legacy field; modern servers use coordinates).',
+      ),
     altitude: z.number().nullish().describe('Altitude in meters above sea level.'),
+    coordinates: z
+      .object({})
+      .passthrough()
+      .nullish()
+      .describe('BrAPI v2 GeoJSON Feature carrying [lon, lat, alt?] in geometry.coordinates.'),
   })
   .passthrough();
 
@@ -317,6 +337,14 @@ export const brapiGetStudy = tool('brapi_get_study', {
       lines.push('');
       lines.push('## Location');
       renderKeyValues(lines, result.location);
+      const coords = extractCoordinates(result.location);
+      if (coords && result.location.latitude == null && result.location.longitude == null) {
+        lines.push(`- **latitude:** ${coords.latitude}`);
+        lines.push(`- **longitude:** ${coords.longitude}`);
+        if (coords.altitude != null && result.location.altitude == null) {
+          lines.push(`- **altitude:** ${coords.altitude}`);
+        }
+      }
     }
 
     lines.push('');

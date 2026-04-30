@@ -253,7 +253,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     );
     const edges = Array.from(state.edges.values());
 
-    const leafCount = computeLeafCount(nodes, edges);
+    const leafCount = computeLeafCount(nodes, edges, input.direction);
 
     const result: Output = {
       alias: connection.alias,
@@ -490,22 +490,37 @@ async function fetchProgeny(
 function computeLeafCount(
   nodes: z.infer<typeof NodeSchema>[],
   edges: z.infer<typeof EdgeSchema>[],
+  direction: 'ancestors' | 'descendants' | 'both',
 ): number {
-  // A leaf has no outgoing edge (in the walked direction). For 'parent'
-  // edges, `from` is the parent — so nodes that never appear as `from` in
-  // parent edges are ancestry-leaves. For 'child' edges, nodes that never
-  // appear as `from` in child edges are descendancy-leaves.
-  const parentSources = new Set<string>();
-  const childSources = new Set<string>();
+  /*
+   * A leaf is a node where the walk terminated in the requested direction —
+   * the BFS visited it but found no further nodes to expand to. In edge
+   * terms: ancestors are recorded as `parent: <ancestor>→<descendant>`, so
+   * a node is an ancestor leaf when nothing points TO it as a child (it's
+   * never the `to` of any parent edge). Descendant edges are mirror image:
+   * `child: <descendant>→<ancestor>`, so a descendant leaf is never the
+   * `to` of any child edge.
+   *
+   * Roots are excluded — they're the seed of the walk, not a terminal.
+   */
+  const hasParent = new Set<string>();
+  const hasChild = new Set<string>();
   for (const edge of edges) {
-    if (edge.relationship === 'parent') parentSources.add(edge.from);
-    else childSources.add(edge.from);
+    if (edge.relationship === 'parent') hasParent.add(edge.to);
+    else hasChild.add(edge.to);
   }
   let leaves = 0;
   for (const node of nodes) {
-    const hasParentOut = parentSources.has(node.germplasmDbId);
-    const hasChildOut = childSources.has(node.germplasmDbId);
-    if (!hasParentOut && !hasChildOut) leaves++;
+    if (node.isRoot) continue;
+    if (direction === 'ancestors' && !hasParent.has(node.germplasmDbId)) leaves++;
+    else if (direction === 'descendants' && !hasChild.has(node.germplasmDbId)) leaves++;
+    else if (
+      direction === 'both' &&
+      !hasParent.has(node.germplasmDbId) &&
+      !hasChild.has(node.germplasmDbId)
+    ) {
+      leaves++;
+    }
   }
   return leaves;
 }

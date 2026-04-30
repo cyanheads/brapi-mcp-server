@@ -24,8 +24,10 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
+  renderFindHeader,
 } from '../shared/find-helpers.js';
 
 const VariantRowSchema = z
@@ -113,6 +115,15 @@ const OutputSchema = z.object({
 
 type Output = z.infer<typeof OutputSchema>;
 
+const SERVER_TO_USER: Record<string, string> = {
+  variantSetDbIds: 'variantSets',
+  variantDbIds: 'variants',
+  referenceDbIds: 'references',
+  referenceName: 'referenceName',
+  start: 'start',
+  end: 'end',
+};
+
 export const brapiFindVariants = tool('brapi_find_variants', {
   description:
     'Find variant records by variant set, reference sequence, or genomic region (start/end, 1-based inclusive / exclusive). Returns a dataset handle when the upstream total exceeds loadLimit.',
@@ -194,7 +205,9 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     };
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions);
+    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+      availableFilters: ['variantSets', 'variants', 'references', 'referenceName', 'start', 'end'],
+    });
 
     const result: Output = {
       alias: connection.alias,
@@ -213,7 +226,15 @@ export const brapiFindVariants = tool('brapi_find_variants', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`# ${result.returnedCount} of ${result.totalCount} variants — \`${result.alias}\``);
+    lines.push(
+      renderFindHeader({
+        noun: 'variants',
+        alias: result.alias,
+        returnedCount: result.returnedCount,
+        totalCount: result.totalCount,
+        dataset: result.dataset,
+      }),
+    );
     lines.push('');
     if (result.hasMore) {
       lines.push(
@@ -225,7 +246,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       lines.push(`**Refinement hint:** ${result.refinementHint}`);
       lines.push('');
     }
-    lines.push(`Applied filters: \`${JSON.stringify(result.appliedFilters)}\``);
+    lines.push(renderAppliedFilters(result.appliedFilters, SERVER_TO_USER));
     lines.push('');
     lines.push('## Distributions');
     lines.push(renderDistributions(result.distributions) || '_No values to summarize._');

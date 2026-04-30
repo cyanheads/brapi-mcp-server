@@ -27,6 +27,7 @@ import {
   DatasetHandleSchema,
   renderDatasetHandle,
   renderDistributions,
+  renderFindHeader,
   toDatasetHandle,
 } from '../shared/find-helpers.js';
 
@@ -270,9 +271,14 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(
-      `# ${result.returnedCount} of ${result.totalCount} calls — \`${result.alias}\`${result.truncated ? ' (truncated at maxCalls)' : ''}`,
-    );
+    const headerBase = renderFindHeader({
+      noun: 'calls',
+      alias: result.alias,
+      returnedCount: result.returnedCount,
+      totalCount: result.totalCount,
+      dataset: result.dataset,
+    });
+    lines.push(result.truncated ? `${headerBase} (truncated at maxCalls)` : headerBase);
     lines.push('');
     lines.push(`Search body: \`${JSON.stringify(result.searchBody)}\``);
     lines.push('');

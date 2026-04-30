@@ -114,6 +114,9 @@ function toCandidate(
   source: OntologyCandidate['source'],
 ): OntologyCandidate {
   const candidate: OntologyCandidate = { source };
+  if (variable.observationVariableDbId) {
+    candidate.observationVariableDbId = variable.observationVariableDbId;
+  }
   if (variable.observationVariablePUI) candidate.termId = variable.observationVariablePUI;
   const name = variable.observationVariableName ?? variable.trait?.name;
   if (name) candidate.name = name;

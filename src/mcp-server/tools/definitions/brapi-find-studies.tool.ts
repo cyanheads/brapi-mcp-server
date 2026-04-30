@@ -19,6 +19,7 @@ import {
   asString,
   asStringArray,
   buildRefinementHint,
+  checkFilterMatchRates,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -26,8 +27,10 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
+  renderFindHeader,
 } from '../shared/find-helpers.js';
 
 const StudyRowSchema = z
@@ -97,6 +100,21 @@ const OutputSchema = z.object({
 });
 
 type Output = z.infer<typeof OutputSchema>;
+
+/** Server-side filter key → user-facing tool param name. Used in format() to
+ * render `Applied filters` so the user can correlate what they typed with
+ * what got sent upstream. */
+const SERVER_TO_USER: Record<string, string> = {
+  commonCropNames: 'crop',
+  studyTypes: 'trialTypes',
+  seasonDbIds: 'seasons',
+  locationDbIds: 'locations',
+  programDbIds: 'programs',
+  trialDbIds: 'trials',
+  studyNames: 'studyNames',
+  active: 'active',
+  searchText: 'text',
+};
 
 export const brapiFindStudies = tool('brapi_find_studies', {
   description:
@@ -189,8 +207,36 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       commonCropName: computeDistribution(fullRows, (r) => asString(r.commonCropName)),
     };
 
+    checkFilterMatchRates(warnings, fullRows.length, [
+      { paramName: 'seasons', requestedValues: input.seasons, distribution: distributions.seasons },
+      {
+        paramName: 'trialTypes',
+        requestedValues: input.trialTypes,
+        distribution: distributions.studyType,
+        caseInsensitive: true,
+      },
+      {
+        paramName: 'crop',
+        requestedValues: input.crop !== undefined ? [input.crop] : undefined,
+        distribution: distributions.commonCropName,
+        caseInsensitive: true,
+      },
+    ]);
+
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions);
+    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+      availableFilters: [
+        'crop',
+        'trialTypes',
+        'seasons',
+        'locations',
+        'programs',
+        'trials',
+        'studyNames',
+        'active',
+        'text',
+      ],
+    });
 
     ctx.log.info('find_studies completed', {
       baseUrl: connection.baseUrl,
@@ -216,7 +262,15 @@ export const brapiFindStudies = tool('brapi_find_studies', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`# ${result.returnedCount} of ${result.totalCount} studies — \`${result.alias}\``);
+    lines.push(
+      renderFindHeader({
+        noun: 'studies',
+        alias: result.alias,
+        returnedCount: result.returnedCount,
+        totalCount: result.totalCount,
+        dataset: result.dataset,
+      }),
+    );
     lines.push('');
     if (result.hasMore) {
       lines.push(
@@ -228,7 +282,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       lines.push(`**Refinement hint:** ${result.refinementHint}`);
       lines.push('');
     }
-    lines.push(`Applied filters: \`${JSON.stringify(result.appliedFilters)}\``);
+    lines.push(renderAppliedFilters(result.appliedFilters, SERVER_TO_USER));
     lines.push('');
     lines.push('## Distributions');
     const rendered = renderDistributions(result.distributions);

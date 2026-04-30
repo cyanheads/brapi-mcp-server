@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.8](changelog/0.3.x/0.3.8.md) — 2026-04-29
+
+Field-test fixes from real CassavaBase data — GeoJSON coordinates, `pageSize=0`→`pageSize=1` for v2.1-strict servers, variable text-match by dbId when PUI is sparse, pedigree leaf-count correctness — plus shared `find_*` rendering.
+
 ## [0.3.7](changelog/0.3.x/0.3.7.md) — 2026-04-29
 
 Add `BRAPI_ENABLE_WRITES` env-var gate for the write surface — `brapi_submit_observations` is omitted from `tools/list` unless the operator opts in for the deployment. Mirrors obsidian-mcp-server's `OBSIDIAN_ENABLE_COMMANDS` pattern.

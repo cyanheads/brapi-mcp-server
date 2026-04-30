@@ -99,6 +99,45 @@ describe('brapi_walk_pedigree tool', () => {
     expect(result.edges).toHaveLength(3); // g-2→g-1, g-3→g-1, g-4→g-2
     expect(result.depthReached).toBeGreaterThanOrEqual(2);
     expect(result.cycleCount).toBe(0);
+    // Ancestor leaves are unparented ancestors (g-3, g-4) — not the root and
+    // not nodes that have further ancestors recorded (g-2 has g-4 above it).
+    expect(result.leafCount).toBe(2);
+  });
+
+  it('counts unparented ancestors as leaves (not the root)', async () => {
+    const ctx = await connect(fetcher);
+    // g-1 → parents [g-2, g-3, g-4]; all three are unparented terminals.
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      const m = path.match(/\/germplasm\/([^/]+)\/pedigree$/);
+      if (m) {
+        const id = decodeURIComponent(m[1]!);
+        if (id === 'g-1') {
+          return jsonResponse(
+            envelope({
+              parents: [
+                { germplasmDbId: 'g-2' },
+                { germplasmDbId: 'g-3' },
+                { germplasmDbId: 'g-4' },
+              ],
+            }),
+          );
+        }
+        return jsonResponse(envelope({ parents: [] }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiWalkPedigree.handler(
+      brapiWalkPedigree.input.parse({
+        germplasmDbIds: ['g-1'],
+        direction: 'ancestors',
+        maxDepth: 2,
+      }),
+      ctx,
+    );
+    expect(result.leafCount).toBe(3);
+    expect(result.deadEndCount).toBe(0);
   });
 
   it('detects cycles when an ancestor reappears', async () => {

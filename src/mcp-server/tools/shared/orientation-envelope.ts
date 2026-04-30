@@ -3,7 +3,7 @@
  * by both `brapi_connect` (inlined after registration) and
  * `brapi_server_info` (on-demand). Pulls from CapabilityRegistry and the
  * active ServerRegistry entry, then layers in cheap opportunistic counts via
- * `pageSize=0` probes. Counts degrade silently — a server that doesn't
+ * `pageSize=1` probes. Counts degrade silently — a server that doesn't
  * honor the probe just omits the field rather than failing the whole call.
  *
  * @module mcp-server/tools/shared/orientation-envelope
@@ -132,7 +132,10 @@ export interface BuildEnvelopeDeps {
 /**
  * Compose the orientation envelope for a connected server. Runs the
  * CapabilityRegistry profile (cached after the first call) plus a parallel
- * set of cheap `pageSize=0` probes for totals.
+ * set of cheap `pageSize=1` probes for totals. BrAPI v2.1 mandates
+ * `pageSize >= 1` — strict servers reject `pageSize=0` with HTTP 400, so
+ * we ask for one row and ignore it; only `metadata.pagination.totalCount`
+ * matters here.
  */
 export async function buildOrientationEnvelope(
   ctx: Context,
@@ -223,7 +226,7 @@ async function fetchOpportunisticCounts(
       try {
         const env = await client.get<unknown>(baseUrl, probe.path, ctx, {
           ...baseOptions,
-          params: { pageSize: 0 },
+          params: { pageSize: 1 },
         });
         const total = env.metadata?.pagination?.totalCount;
         if (typeof total === 'number' && Number.isFinite(total)) {

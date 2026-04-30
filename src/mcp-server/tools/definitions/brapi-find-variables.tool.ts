@@ -23,6 +23,7 @@ import {
   AliasInput,
   asString,
   buildRefinementHint,
+  checkFilterMatchRates,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -30,8 +31,10 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
+  renderFindHeader,
 } from '../shared/find-helpers.js';
 
 const VariableRowSchema = z
@@ -90,6 +93,10 @@ const VariableRowSchema = z
 
 const CandidateSchema = z
   .object({
+    observationVariableDbId: z
+      .string()
+      .optional()
+      .describe('Server-side variable DbId of the source row, when present.'),
     termId: z
       .string()
       .optional()
@@ -151,6 +158,18 @@ const OutputSchema = z.object({
 });
 
 type Output = z.infer<typeof OutputSchema>;
+
+const SERVER_TO_USER: Record<string, string> = {
+  observationVariableDbIds: 'variables',
+  observationVariableNames: 'variableNames',
+  observationVariablePUIs: 'variablePUIs',
+  traitClasses: 'traitClasses',
+  ontologyDbIds: 'ontologies',
+  studyDbId: 'studies',
+  methodDbIds: 'methods',
+  scaleDbIds: 'scales',
+  commonCropName: 'crop',
+};
 
 export const brapiFindVariables = tool('brapi_find_variables', {
   description:
@@ -258,13 +277,24 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     if (input.text) {
       candidates = resolver.match(input.text, fullRows as VariableLike[], { limit: 10 });
       if (candidates.length > 0) {
-        const orderedIds = new Set(candidates.map((c) => c.termId).filter(Boolean));
-        // Promote matched rows to the top of the in-context set.
+        // PUI is sparse on real servers (CassavaBase doesn't populate it),
+        // so promote rows by observationVariableDbId — always present —
+        // and fall back to PUI for any candidate that lacked the dbId.
+        const matchedDbIds = new Set(
+          candidates.map((c) => c.observationVariableDbId).filter((v): v is string => Boolean(v)),
+        );
+        const matchedPuis = new Set(
+          candidates.map((c) => c.termId).filter((v): v is string => Boolean(v)),
+        );
         const matched: Record<string, unknown>[] = [];
         const rest: Record<string, unknown>[] = [];
         for (const row of firstPage.rows) {
+          const dbId = row.observationVariableDbId;
           const pui = row.observationVariablePUI;
-          if (typeof pui === 'string' && orderedIds.has(pui)) matched.push(row);
+          const isMatch =
+            (typeof dbId === 'string' && matchedDbIds.has(dbId)) ||
+            (typeof pui === 'string' && matchedPuis.has(pui));
+          if (isMatch) matched.push(row);
           else rest.push(row);
         }
         rankedResults = [...matched, ...rest];
@@ -285,8 +315,35 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       }),
     };
 
+    checkFilterMatchRates(warnings, fullRows.length, [
+      {
+        paramName: 'traitClasses',
+        requestedValues: input.traitClasses,
+        distribution: distributions.traitClass,
+        caseInsensitive: true,
+      },
+      {
+        paramName: 'ontologies',
+        requestedValues: input.ontologies,
+        distribution: distributions.ontologyDbId,
+      },
+    ]);
+
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions);
+    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+      availableFilters: [
+        'variables',
+        'variableNames',
+        'variablePUIs',
+        'traitClasses',
+        'ontologies',
+        'studies',
+        'methods',
+        'scales',
+        'crop',
+        'text',
+      ],
+    });
 
     const result: Output = {
       alias: connection.alias,
@@ -306,7 +363,15 @@ export const brapiFindVariables = tool('brapi_find_variables', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`# ${result.returnedCount} of ${result.totalCount} variables — \`${result.alias}\``);
+    lines.push(
+      renderFindHeader({
+        noun: 'variables',
+        alias: result.alias,
+        returnedCount: result.returnedCount,
+        totalCount: result.totalCount,
+        dataset: result.dataset,
+      }),
+    );
     lines.push('');
     if (result.hasMore) {
       lines.push(
@@ -318,13 +383,15 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       lines.push(`**Refinement hint:** ${result.refinementHint}`);
       lines.push('');
     }
-    lines.push(`Applied filters: \`${JSON.stringify(result.appliedFilters)}\``);
+    lines.push(renderAppliedFilters(result.appliedFilters, SERVER_TO_USER));
     lines.push('');
     if (result.ontologyCandidates.length > 0) {
       lines.push('## Ontology candidates (ranked)');
       for (const c of result.ontologyCandidates) {
         const parts: string[] = [];
         if (c.name) parts.push(`**${c.name}**`);
+        if (c.observationVariableDbId)
+          parts.push(`observationVariableDbId=\`${c.observationVariableDbId}\``);
         if (c.termId) parts.push(`termId=\`${c.termId}\``);
         if (c.ontologyDbId) parts.push(`ontology=${c.ontologyDbId}`);
         parts.push(`source=${c.source}`);

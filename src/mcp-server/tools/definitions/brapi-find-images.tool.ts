@@ -17,6 +17,7 @@ import {
   AliasInput,
   asString,
   buildRefinementHint,
+  checkFilterMatchRates,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -24,8 +25,10 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
+  renderFindHeader,
 } from '../shared/find-helpers.js';
 
 const ImageRowSchema = z
@@ -103,6 +106,16 @@ const OutputSchema = z.object({
 });
 
 type Output = z.infer<typeof OutputSchema>;
+
+const SERVER_TO_USER: Record<string, string> = {
+  imageDbIds: 'images',
+  observationUnitDbIds: 'observationUnits',
+  observationDbIds: 'observations',
+  studyDbIds: 'studies',
+  imageFileNames: 'imageFileNames',
+  mimeTypes: 'mimeTypes',
+  descriptiveOntologyTerms: 'descriptiveOntologyTerms',
+};
 
 export const brapiFindImages = tool('brapi_find_images', {
   description:
@@ -194,8 +207,32 @@ export const brapiFindImages = tool('brapi_find_images', {
       }),
     };
 
+    checkFilterMatchRates(warnings, fullRows.length, [
+      {
+        paramName: 'mimeTypes',
+        requestedValues: input.mimeTypes,
+        distribution: distributions.mimeType,
+        caseInsensitive: true,
+      },
+      {
+        paramName: 'descriptiveOntologyTerms',
+        requestedValues: input.descriptiveOntologyTerms,
+        distribution: distributions.descriptiveOntologyTerms,
+      },
+    ]);
+
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions);
+    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+      availableFilters: [
+        'images',
+        'observationUnits',
+        'observations',
+        'studies',
+        'imageFileNames',
+        'mimeTypes',
+        'descriptiveOntologyTerms',
+      ],
+    });
 
     const result: Output = {
       alias: connection.alias,
@@ -214,7 +251,15 @@ export const brapiFindImages = tool('brapi_find_images', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`# ${result.returnedCount} of ${result.totalCount} images — \`${result.alias}\``);
+    lines.push(
+      renderFindHeader({
+        noun: 'images',
+        alias: result.alias,
+        returnedCount: result.returnedCount,
+        totalCount: result.totalCount,
+        dataset: result.dataset,
+      }),
+    );
     lines.push('');
     if (result.hasMore) {
       lines.push(
@@ -226,7 +271,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       lines.push(`**Refinement hint:** ${result.refinementHint}`);
       lines.push('');
     }
-    lines.push(`Applied filters: \`${JSON.stringify(result.appliedFilters)}\``);
+    lines.push(renderAppliedFilters(result.appliedFilters, SERVER_TO_USER));
     lines.push('');
     lines.push('## Distributions');
     lines.push(renderDistributions(result.distributions) || '_No values to summarize._');

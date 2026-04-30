@@ -18,15 +18,19 @@ import {
   AliasInput,
   asString,
   buildRefinementHint,
+  checkFilterMatchRates,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
+  extractCoordinates,
   LoadLimitInput,
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
+  renderFindHeader,
 } from '../shared/find-helpers.js';
 
 const LocationRowSchema = z
@@ -40,9 +44,24 @@ const LocationRowSchema = z
       .string()
       .nullish()
       .describe('Type of location (e.g. "Research Station", "Field", "Greenhouse").'),
-    latitude: z.number().nullish().describe('WGS84 latitude in decimal degrees.'),
-    longitude: z.number().nullish().describe('WGS84 longitude in decimal degrees.'),
+    latitude: z
+      .number()
+      .nullish()
+      .describe(
+        'WGS84 latitude in decimal degrees (legacy field; modern servers use coordinates).',
+      ),
+    longitude: z
+      .number()
+      .nullish()
+      .describe(
+        'WGS84 longitude in decimal degrees (legacy field; modern servers use coordinates).',
+      ),
     altitude: z.number().nullish().describe('Altitude in meters above sea level.'),
+    coordinates: z
+      .object({})
+      .passthrough()
+      .nullish()
+      .describe('BrAPI v2 GeoJSON Feature carrying [lon, lat, alt?] in geometry.coordinates.'),
     instituteName: z.string().nullish().describe('Owning institute display name.'),
     instituteAddress: z.string().nullish().describe('Postal address of the institute.'),
     documentationURL: z.string().nullish().describe('URL pointing at extra documentation.'),
@@ -96,6 +115,14 @@ const OutputSchema = z.object({
 });
 
 type Output = z.infer<typeof OutputSchema>;
+
+const SERVER_TO_USER: Record<string, string> = {
+  locationDbIds: 'locations',
+  locationNames: 'locationNames',
+  countryCodes: 'countryCodes',
+  locationTypes: 'locationTypes',
+  abbreviations: 'abbreviations',
+};
 
 export const brapiFindLocations = tool('brapi_find_locations', {
   description:
@@ -220,8 +247,32 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       locationType: computeDistribution(filteredFull, (r) => asString(r.locationType)),
     };
 
+    checkFilterMatchRates(warnings, filteredFull.length, [
+      {
+        paramName: 'countryCodes',
+        requestedValues: input.countryCodes,
+        distribution: distributions.countryCode,
+        caseInsensitive: true,
+      },
+      {
+        paramName: 'locationTypes',
+        requestedValues: input.locationTypes,
+        distribution: distributions.locationType,
+        caseInsensitive: true,
+      },
+    ]);
+
     const totalCount = bbox ? filteredFull.length : (firstPage.totalCount ?? firstPage.rows.length);
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions);
+    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+      availableFilters: [
+        'locations',
+        'locationNames',
+        'countryCodes',
+        'locationTypes',
+        'abbreviations',
+        'bbox',
+      ],
+    });
 
     const result: Output = {
       alias: connection.alias,
@@ -240,7 +291,15 @@ export const brapiFindLocations = tool('brapi_find_locations', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`# ${result.returnedCount} of ${result.totalCount} locations — \`${result.alias}\``);
+    lines.push(
+      renderFindHeader({
+        noun: 'locations',
+        alias: result.alias,
+        returnedCount: result.returnedCount,
+        totalCount: result.totalCount,
+        dataset: result.dataset,
+      }),
+    );
     lines.push('');
     if (result.hasMore) {
       lines.push(
@@ -252,7 +311,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       lines.push(`**Refinement hint:** ${result.refinementHint}`);
       lines.push('');
     }
-    lines.push(`Applied filters: \`${JSON.stringify(result.appliedFilters)}\``);
+    lines.push(renderAppliedFilters(result.appliedFilters, SERVER_TO_USER));
     lines.push('');
     lines.push('## Distributions');
     lines.push(renderDistributions(result.distributions) || '_No values to summarize._');
@@ -268,11 +327,14 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         if (loc.locationType) parts.push(`type=${loc.locationType}`);
         if (loc.countryCode) parts.push(`country=${loc.countryCode}`);
         if (loc.countryName) parts.push(`countryName=${loc.countryName}`);
-        if (loc.latitude != null && loc.longitude != null) {
-          parts.push(`lat=${loc.latitude}`);
-          parts.push(`lon=${loc.longitude}`);
+        const coords = extractCoordinates(loc);
+        if (coords) {
+          parts.push(`lat=${coords.latitude}`);
+          parts.push(`lon=${coords.longitude}`);
+          if (coords.altitude != null) parts.push(`alt=${coords.altitude}`);
+        } else if (loc.altitude != null) {
+          parts.push(`alt=${loc.altitude}`);
         }
-        if (loc.altitude != null) parts.push(`alt=${loc.altitude}`);
         if (loc.instituteName) parts.push(`institute=${loc.instituteName}`);
         if (loc.instituteAddress) parts.push(`addr=${loc.instituteAddress}`);
         if (loc.documentationURL) parts.push(`docs=${loc.documentationURL}`);
@@ -338,8 +400,8 @@ function normalizeBbox(
 }
 
 function insideBbox(row: Record<string, unknown>, bbox: Bbox): boolean {
-  const lat = row.latitude;
-  const lon = row.longitude;
-  if (typeof lat !== 'number' || typeof lon !== 'number') return false;
+  const coords = extractCoordinates(row);
+  if (!coords) return false;
+  const { latitude: lat, longitude: lon } = coords;
   return lat >= bbox.minLat && lat <= bbox.maxLat && lon >= bbox.minLon && lon <= bbox.maxLon;
 }

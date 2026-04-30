@@ -33,12 +33,16 @@ export interface Trial {
 export interface Location {
   abbreviation?: string;
   altitude?: number;
+  /** BrAPI v2 GeoJSON Feature carrying [lon, lat, alt?] in geometry.coordinates. */
+  coordinates?: { type?: string; geometry?: { type?: string; coordinates?: number[] } };
   countryCode?: string;
   countryName?: string;
   documentationURL?: string;
+  /** Legacy WGS84 latitude — modern BrAPI v2 servers use `coordinates` instead. */
   latitude?: number;
   locationDbId: string;
   locationName?: string;
   locationType?: string;
+  /** Legacy WGS84 longitude — modern BrAPI v2 servers use `coordinates` instead. */
   longitude?: number;
 }

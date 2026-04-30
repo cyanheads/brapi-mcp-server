@@ -4,7 +4,7 @@
  * against the study's observation variables and returns a routing breakdown
  * (POST for new rows, PUT for rows carrying `observationDbId`); `mode: 'apply'`
  * elicits confirmation when supported, fans the rows out to POST + PUT in
- * parallel, then verifies the post-state with a cheap `pageSize=0` count.
+ * parallel, then verifies the post-state with a cheap `pageSize=1` count.
  * Additive write — no observation is destroyed by this tool.
  *
  * @module mcp-server/tools/definitions/brapi-submit-observations.tool

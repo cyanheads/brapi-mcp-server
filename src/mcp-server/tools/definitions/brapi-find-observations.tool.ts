@@ -18,6 +18,7 @@ import {
   AliasInput,
   asString,
   buildRefinementHint,
+  checkFilterMatchRates,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -25,8 +26,10 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
+  renderFindHeader,
 } from '../shared/find-helpers.js';
 
 const ObservationRowSchema = z
@@ -134,6 +137,20 @@ const OutputSchema = z.object({
 
 type Output = z.infer<typeof OutputSchema>;
 
+const SERVER_TO_USER: Record<string, string> = {
+  studyDbIds: 'studies',
+  germplasmDbIds: 'germplasm',
+  observationVariableDbIds: 'variables',
+  observationUnitDbIds: 'observationUnits',
+  observationDbIds: 'observations',
+  seasonDbIds: 'seasons',
+  programDbIds: 'programs',
+  trialDbIds: 'trials',
+  observationLevels: 'observationLevels',
+  observationTimeStampRangeStart: 'timestampFrom',
+  observationTimeStampRangeEnd: 'timestampTo',
+};
+
 export const brapiFindObservations = tool('brapi_find_observations', {
   description:
     'Pull observation records filtered by study, germplasm, variable, season, or observation unit. Returns a dataset handle when the upstream total exceeds loadLimit.',
@@ -228,8 +245,32 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       season: computeDistribution(fullRows, (r) => normalizeSeason(r.season)),
     };
 
+    checkFilterMatchRates(warnings, fullRows.length, [
+      { paramName: 'seasons', requestedValues: input.seasons, distribution: distributions.season },
+      {
+        paramName: 'observationLevels',
+        requestedValues: input.observationLevels,
+        distribution: distributions.observationLevel,
+        caseInsensitive: true,
+      },
+    ]);
+
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions);
+    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+      availableFilters: [
+        'studies',
+        'germplasm',
+        'variables',
+        'observationUnits',
+        'observations',
+        'seasons',
+        'programs',
+        'trials',
+        'observationLevels',
+        'timestampFrom',
+        'timestampTo',
+      ],
+    });
 
     const result: Output = {
       alias: connection.alias,
@@ -249,7 +290,13 @@ export const brapiFindObservations = tool('brapi_find_observations', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(
-      `# ${result.returnedCount} of ${result.totalCount} observations — \`${result.alias}\``,
+      renderFindHeader({
+        noun: 'observations',
+        alias: result.alias,
+        returnedCount: result.returnedCount,
+        totalCount: result.totalCount,
+        dataset: result.dataset,
+      }),
     );
     lines.push('');
     if (result.hasMore) {
@@ -262,7 +309,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       lines.push(`**Refinement hint:** ${result.refinementHint}`);
       lines.push('');
     }
-    lines.push(`Applied filters: \`${JSON.stringify(result.appliedFilters)}\``);
+    lines.push(renderAppliedFilters(result.appliedFilters, SERVER_TO_USER));
     lines.push('');
     lines.push('## Distributions');
     lines.push(renderDistributions(result.distributions) || '_No values to summarize._');

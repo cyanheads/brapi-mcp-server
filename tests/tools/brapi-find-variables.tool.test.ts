@@ -122,6 +122,34 @@ describe('brapi_find_variables tool', () => {
     expect(result.results[0]?.observationVariableDbId).toBe('var-1');
   });
 
+  it('promotes free-text matches by observationVariableDbId when PUI is missing (CassavaBase)', async () => {
+    const ctx = await connect(fetcher);
+    // Real CassavaBase variables don't carry observationVariablePUI; promotion
+    // must fall back to observationVariableDbId, which is always populated.
+    const rows = [
+      {
+        observationVariableDbId: 'var-other',
+        observationVariableName: 'Plant height',
+        trait: { traitName: 'Plant height' },
+      },
+      {
+        observationVariableDbId: 'var-dm',
+        observationVariableName: 'Dry matter percent',
+        trait: { traitName: 'Dry matter content' },
+      },
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+
+    const result = await brapiFindVariables.handler(
+      brapiFindVariables.input.parse({ text: 'dry matter' }),
+      ctx,
+    );
+
+    expect(result.ontologyCandidates.length).toBeGreaterThan(0);
+    expect(result.ontologyCandidates[0]?.observationVariableDbId).toBe('var-dm');
+    expect(result.results[0]?.observationVariableDbId).toBe('var-dm');
+  });
+
   it('warns when more than one studyDbId is supplied (BrAPI accepts only one)', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));

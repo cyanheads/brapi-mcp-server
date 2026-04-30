@@ -17,6 +17,7 @@ import {
   AliasInput,
   asString,
   buildRefinementHint,
+  checkFilterMatchRates,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -24,8 +25,10 @@ import {
   loadInitialPage,
   maybeSpill,
   mergeFilters,
+  renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
+  renderFindHeader,
 } from '../shared/find-helpers.js';
 
 const GermplasmRowSchema = z
@@ -118,6 +121,19 @@ const OutputSchema = z.object({
 
 type Output = z.infer<typeof OutputSchema>;
 
+const SERVER_TO_USER: Record<string, string> = {
+  germplasmNames: 'names',
+  germplasmDbIds: 'germplasmDbIds',
+  germplasmPUIs: 'germplasmPUIs',
+  accessionNumbers: 'accessionNumbers',
+  commonCropNames: 'crops',
+  synonyms: 'synonyms',
+  collections: 'collections',
+  genus: 'genus',
+  species: 'species',
+  searchText: 'text',
+};
+
 export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   description:
     'Find germplasm by name, synonym, accession number, PUI, crop, or free-text query. Matches across registered synonyms. Returns a dataset handle when the upstream total exceeds loadLimit.',
@@ -208,8 +224,48 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       countryOfOriginCode: computeDistribution(fullRows, (r) => asString(r.countryOfOriginCode)),
     };
 
+    checkFilterMatchRates(warnings, fullRows.length, [
+      {
+        paramName: 'crops',
+        requestedValues: input.crops,
+        distribution: distributions.commonCropName,
+        caseInsensitive: true,
+      },
+      {
+        paramName: 'genus',
+        requestedValues: input.genus !== undefined ? [input.genus] : undefined,
+        distribution: distributions.genus,
+        caseInsensitive: true,
+      },
+      {
+        paramName: 'species',
+        requestedValues: input.species !== undefined ? [input.species] : undefined,
+        distribution: distributions.species,
+        caseInsensitive: true,
+      },
+      {
+        paramName: 'collections',
+        requestedValues: input.collections,
+        distribution: distributions.collection,
+        caseInsensitive: true,
+      },
+    ]);
+
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions);
+    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+      availableFilters: [
+        'names',
+        'germplasmDbIds',
+        'germplasmPUIs',
+        'accessionNumbers',
+        'crops',
+        'synonyms',
+        'collections',
+        'genus',
+        'species',
+        'text',
+      ],
+    });
 
     // Heuristic: if the user asked for a text filter and the upstream returned
     // every row that matches all the *other* filters (i.e. the text didn't
@@ -243,7 +299,15 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`# ${result.returnedCount} of ${result.totalCount} germplasm — \`${result.alias}\``);
+    lines.push(
+      renderFindHeader({
+        noun: 'germplasm',
+        alias: result.alias,
+        returnedCount: result.returnedCount,
+        totalCount: result.totalCount,
+        dataset: result.dataset,
+      }),
+    );
     lines.push('');
     if (result.hasMore) {
       lines.push(
@@ -255,7 +319,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       lines.push(`**Refinement hint:** ${result.refinementHint}`);
       lines.push('');
     }
-    lines.push(`Applied filters: \`${JSON.stringify(result.appliedFilters)}\``);
+    lines.push(renderAppliedFilters(result.appliedFilters, SERVER_TO_USER));
     lines.push('');
     lines.push('## Distributions');
     lines.push(renderDistributions(result.distributions) || '_No values to summarize._');

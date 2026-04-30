@@ -135,6 +135,47 @@ export function computeDistribution<T>(
   return Object.fromEntries([...counts.entries()].sort(([, a], [, b]) => b - a));
 }
 
+/**
+ * Render the standardized header line for `find_*` tools. When a dataset
+ * spillover is present, surfaces the dataset row count alongside the
+ * in-context count and the upstream total — `{returned} of {total}` alone
+ * hides the middle number and confuses readers when filters miss server-
+ * side and the dataset row count diverges from both.
+ */
+export function renderFindHeader(opts: {
+  noun: string;
+  alias: string;
+  returnedCount: number;
+  totalCount: number;
+  dataset?: { rowCount: number } | undefined;
+}): string {
+  if (opts.dataset) {
+    return `# ${opts.returnedCount} returned · ${opts.dataset.rowCount} in dataset · ${opts.totalCount} total ${opts.noun} — \`${opts.alias}\``;
+  }
+  return `# ${opts.returnedCount} of ${opts.totalCount} ${opts.noun} — \`${opts.alias}\``;
+}
+
+/**
+ * Render the applied-filters block, optionally translating server-side
+ * keys to the user-facing parameter names declared by the tool. Server
+ * keys without a user-facing alias (e.g. anything from `extraFilters`) are
+ * rendered as-is.
+ */
+export function renderAppliedFilters(
+  filters: Record<string, unknown>,
+  serverToUser: Record<string, string> = {},
+): string {
+  const entries = Object.entries(filters);
+  if (entries.length === 0) return 'Applied filters: `{}`';
+  const lines: string[] = ['Applied filters:'];
+  for (const [serverKey, value] of entries) {
+    const userKey = serverToUser[serverKey];
+    const label = userKey ? `${userKey} → ${serverKey}` : serverKey;
+    lines.push(`- \`${label}\`: ${JSON.stringify(value)}`);
+  }
+  return lines.join('\n');
+}
+
 /** Cheap sanity-render for a distributions block in markdown. */
 export function renderDistributions(distributions: Record<string, Record<string, number>>): string {
   const lines: string[] = [];
@@ -414,14 +455,113 @@ export function asStringArray(value: unknown): string[] | undefined {
 }
 
 /**
+ * Extract WGS84 coordinates from a BrAPI v2 record. Modern servers carry
+ * coordinates as a GeoJSON Feature (`coordinates.geometry.coordinates =
+ * [lon, lat, alt?]`); some legacy and mixed-mode servers also expose
+ * top-level `latitude`/`longitude`/`altitude`. Returns `undefined` only
+ * when both shapes are missing or malformed. Accepts `unknown` so callers
+ * can pass Zod-passthrough rows without an explicit cast.
+ */
+export function extractCoordinates(
+  record: unknown,
+): { latitude: number; longitude: number; altitude?: number } | undefined {
+  if (typeof record !== 'object' || record === null) return;
+  const r = record as Record<string, unknown>;
+  const geometry = (r.coordinates as { geometry?: unknown } | null | undefined)?.geometry;
+  const geoCoords = (geometry as { coordinates?: unknown } | null | undefined)?.coordinates;
+  if (Array.isArray(geoCoords) && geoCoords.length >= 2) {
+    const [lon, lat, alt] = geoCoords;
+    if (typeof lat === 'number' && typeof lon === 'number') {
+      const result: { latitude: number; longitude: number; altitude?: number } = {
+        latitude: lat,
+        longitude: lon,
+      };
+      if (typeof alt === 'number') result.altitude = alt;
+      return result;
+    }
+  }
+  const lat = r.latitude;
+  const lon = r.longitude;
+  if (typeof lat === 'number' && typeof lon === 'number') {
+    const result: { latitude: number; longitude: number; altitude?: number } = {
+      latitude: lat,
+      longitude: lon,
+    };
+    const alt = r.altitude;
+    if (typeof alt === 'number') result.altitude = alt;
+    return result;
+  }
+  return;
+}
+
+/**
+ * One filter → distribution mapping for `checkFilterMatchRates`. Used to
+ * detect upstream servers that silently ignore a filter and return the
+ * unfiltered set instead of the requested subset.
+ */
+export interface FilterMatchCheck {
+  /** Compare case-insensitively (default: false). */
+  caseInsensitive?: boolean;
+  /** Distribution computed from the returned rows for the corresponding field. */
+  distribution: Record<string, number>;
+  /** User-facing filter name (e.g. "seasons"). Surfaces in the warning. */
+  paramName: string;
+  /** Requested values from the agent. Undefined or empty means skip this check. */
+  requestedValues: readonly (string | number | boolean)[] | undefined;
+}
+
+/**
+ * Verify that requested filter values appear in the returned distributions.
+ * When the upstream silently drops a filter, all requested values miss the
+ * distribution — the warning lets the agent (and the user) know the result
+ * set may not actually match the query. Skips checks where the distribution
+ * is empty (no signal) or where no values were requested.
+ */
+export function checkFilterMatchRates(
+  warnings: string[],
+  fullRowCount: number,
+  checks: readonly FilterMatchCheck[],
+): void {
+  if (fullRowCount === 0) return;
+  for (const check of checks) {
+    if (!check.requestedValues || check.requestedValues.length === 0) continue;
+    const distKeys = Object.keys(check.distribution);
+    if (distKeys.length === 0) continue;
+
+    const norm = (v: string) => (check.caseInsensitive ? v.toLowerCase() : v);
+    const haystack = new Set(distKeys.map(norm));
+    const matched = check.requestedValues.some((v) => haystack.has(norm(String(v))));
+    if (matched) continue;
+
+    const sample = distKeys.slice(0, 5).join(', ');
+    const overflow = distKeys.length > 5 ? `, …+${distKeys.length - 5} more` : '';
+    warnings.push(
+      `Filter '${check.paramName}' requested ${JSON.stringify(check.requestedValues)} but no returned row matches — the server may not honor this filter. Observed values: ${sample}${overflow}.`,
+    );
+  }
+}
+
+export interface RefinementHintOptions {
+  /**
+   * Filter parameter names available on the calling tool. Used to suggest
+   * concrete narrowers when no distribution has enough cardinality to
+   * pick a specific value. Skipped when omitted.
+   */
+  availableFilters?: readonly string[];
+}
+
+/**
  * Compose a refinement hint for a too-large result set. Picks the highest-
  * cardinality non-empty distribution to suggest as a narrower. Returns
- * undefined when the result set fits under `loadLimit`.
+ * undefined when the result set fits under `loadLimit`. When distributions
+ * are too sparse to surface a specific value, falls back to suggesting
+ * the tool's available filter parameters by name.
  */
 export function buildRefinementHint(
   totalCount: number,
   loadLimit: number,
   distributions: Record<string, Record<string, number>>,
+  options: RefinementHintOptions = {},
 ): string | undefined {
   if (totalCount <= loadLimit) return;
   let best: { field: string; topValue: string; count: number; cardinality: number } | undefined;
@@ -435,10 +575,14 @@ export function buildRefinementHint(
       best = { field, topValue, count, cardinality: entries.length };
     }
   }
-  if (!best) {
-    return `${totalCount} rows exceed loadLimit=${loadLimit}. Add more specific filters or raise loadLimit.`;
+  if (best) {
+    return `${totalCount} rows exceed loadLimit=${loadLimit}. The ${best.field} distribution spans ${best.cardinality} values — narrowing to \`${best.topValue}\` would cut to ~${best.count} rows.`;
   }
-  return `${totalCount} rows exceed loadLimit=${loadLimit}. The ${best.field} distribution spans ${best.cardinality} values — narrowing to \`${best.topValue}\` would cut to ~${best.count} rows.`;
+  if (options.availableFilters && options.availableFilters.length > 0) {
+    const suggestions = options.availableFilters.map((f) => `\`${f}\``).join(', ');
+    return `${totalCount} rows exceed loadLimit=${loadLimit}. Distributions are too sparse to surface a specific narrower — try filtering on ${suggestions}, or raise loadLimit.`;
+  }
+  return `${totalCount} rows exceed loadLimit=${loadLimit}. Add more specific filters or raise loadLimit.`;
 }
 
 export type { BrapiEnvelope, BrapiPagination, ResolvedAuth, ServerConfig };

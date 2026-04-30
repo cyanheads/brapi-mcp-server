@@ -15,6 +15,12 @@ export interface OntologyCandidate {
   description?: string;
   /** Display name of the trait/variable/term. */
   name?: string;
+  /**
+   * Server-side variable DbId of the row this candidate was scored from.
+   * Always populated when the source variable carries one; used by callers
+   * to map candidates back to rows (PUI is too sparse on real servers).
+   */
+  observationVariableDbId?: string;
   /** Originating ontology (e.g. "CO_334"). */
   ontologyDbId?: string;
   /**

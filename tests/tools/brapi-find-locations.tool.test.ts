@@ -160,4 +160,59 @@ describe('brapi_find_locations tool', () => {
     expect(text).not.toContain('lon=');
     expect(text).not.toContain('alt=');
   });
+
+  it('extracts coordinates from BrAPI v2 GeoJSON Feature shape (CassavaBase real shape)', async () => {
+    const ctx = await connect(fetcher);
+    // CassavaBase's real `/locations/3` response — only GeoJSON, no legacy lat/lon.
+    const geoJsonRow = {
+      locationDbId: '3',
+      locationName: 'Ibadan',
+      countryCode: 'NGA',
+      coordinates: {
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [3.947, 7.378, 234] },
+      },
+    };
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [geoJsonRow] }, { totalCount: 1 })));
+
+    const result = await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({
+        bbox: { minLat: -90, maxLat: 90, minLon: -180, maxLon: 180 },
+      }),
+      ctx,
+    );
+    expect(result.returnedCount).toBe(1);
+    const text = (brapiFindLocations.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('lat=7.378');
+    expect(text).toContain('lon=3.947');
+    expect(text).toContain('alt=234');
+  });
+
+  it('bbox honors GeoJSON coordinates and excludes outside-window points', async () => {
+    const ctx = await connect(fetcher);
+    const rows = [
+      {
+        locationDbId: 'in',
+        locationName: 'Ibadan',
+        coordinates: { type: 'Feature', geometry: { type: 'Point', coordinates: [3.947, 7.378] } },
+      },
+      {
+        locationDbId: 'out',
+        locationName: 'Reykjavik',
+        coordinates: {
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [-21.9, 64.1] },
+        },
+      },
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+    const result = await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({
+        bbox: { minLat: 0, maxLat: 30, minLon: -10, maxLon: 30 },
+      }),
+      ctx,
+    );
+    expect(result.returnedCount).toBe(1);
+    expect(result.results[0]?.locationDbId).toBe('in');
+  });
 });

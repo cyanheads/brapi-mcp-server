@@ -202,12 +202,15 @@ export const brapiGetImage = tool('brapi_get_image', {
       });
     }
     for (const err of result.errors) {
-      blocks.push({ type: 'text', text: `### ${err.imageDbId} — failed\n- error: ${err.error}` });
+      blocks.push({
+        type: 'text',
+        text: `\n### ${err.imageDbId} — failed\n- error: ${err.error}`,
+      });
     }
     for (const w of result.warnings) {
       blocks.push({
         type: 'text',
-        text: `### ${w.imageDbId} — warning\n- ${w.warning}`,
+        text: `\n### ${w.imageDbId} — warning\n- ${w.warning}`,
       });
     }
     return blocks;
