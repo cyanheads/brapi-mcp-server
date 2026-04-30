@@ -101,6 +101,13 @@ const ServerConfigSchema = z.object({
     .default('false')
     .transform((v) => v === 'true')
     .describe('Allow connecting to RFC 1918 / loopback targets. Dev-only.'),
+  enableWrites: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true')
+    .describe(
+      'Opt-in flag for the write surface (`brapi_submit_observations`). Off by default — the tool is omitted from `tools/list` unless the operator opts in for this deployment.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -127,6 +134,7 @@ export function getServerConfig(): ServerConfig {
     searchPollTimeoutMs: 'BRAPI_SEARCH_POLL_TIMEOUT_MS',
     searchPollIntervalMs: 'BRAPI_SEARCH_POLL_INTERVAL_MS',
     allowPrivateIps: 'BRAPI_ALLOW_PRIVATE_IPS',
+    enableWrites: 'BRAPI_ENABLE_WRITES',
   });
   return _config;
 }

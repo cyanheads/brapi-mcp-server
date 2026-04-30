@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/brapi-mcp-server",
     "source": "github"
   },
-  "version": "0.3.6",
+  "version": "0.3.7",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/brapi-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.3.6",
+      "version": "0.3.7",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:stdio" }
@@ -24,6 +24,13 @@
           "description": "Default BrAPI v2 base URL. Optional — connections can be opened at runtime via the brapi_connect tool instead.",
           "format": "string",
           "isRequired": false
+        },
+        {
+          "name": "BRAPI_ENABLE_WRITES",
+          "description": "Opt-in flag for the write surface (brapi_submit_observations). Off by default — the tool is omitted from tools/list unless the operator opts in.",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
         },
         {
           "name": "MCP_LOG_LEVEL",
@@ -42,7 +49,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/brapi-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.3.6",
+      "version": "0.3.7",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:http" }
@@ -53,6 +60,13 @@
           "description": "Default BrAPI v2 base URL. Optional — connections can be opened at runtime via the brapi_connect tool instead.",
           "format": "string",
           "isRequired": false
+        },
+        {
+          "name": "BRAPI_ENABLE_WRITES",
+          "description": "Opt-in flag for the write surface (brapi_submit_observations). Off by default — the tool is omitted from tools/list unless the operator opts in.",
+          "format": "string",
+          "isRequired": false,
+          "default": "false"
         },
         {
           "name": "MCP_HTTP_HOST",

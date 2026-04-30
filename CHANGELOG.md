@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.7](changelog/0.3.x/0.3.7.md) — 2026-04-29
+
+Add `BRAPI_ENABLE_WRITES` env-var gate for the write surface — `brapi_submit_observations` is omitted from `tools/list` unless the operator opts in for the deployment. Mirrors obsidian-mcp-server's `OBSIDIAN_ENABLE_COMMANDS` pattern.
+
 ## [0.3.6](changelog/0.3.x/0.3.6.md) — 2026-04-30
 
 Drop the tsx runtime shim — package scripts and the production entry point invoke Bun directly. Fixes a Docker linux/arm64 build failure (tsx + Bun 1.3.13 in oven/bun:1) and aligns the script execution model with the cyanheads MCP fleet.

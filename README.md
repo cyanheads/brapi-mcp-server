@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.3.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.3.7-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
@@ -54,7 +54,7 @@ Nineteen tools grouped by shape — connection tools bootstrap a session, `find_
 
 | Tool Name | Description |
 |:----------|:------------|
-| `brapi_submit_observations` | Submit new (POST) or updated (PUT) observation rows for a study. Default `mode: preview` validates only; `mode: apply` elicits confirmation, fans POST + PUT in parallel, and reports the post-write count. Additive — no observation is destroyed. |
+| `brapi_submit_observations` | Submit new (POST) or updated (PUT) observation rows for a study. Default `mode: preview` validates only; `mode: apply` elicits confirmation, fans POST + PUT in parallel, and reports the post-write count. Additive — no observation is destroyed. **Opt-in via `BRAPI_ENABLE_WRITES=true`** — omitted from `tools/list` otherwise. |
 
 ### Escape hatches
 
@@ -253,6 +253,8 @@ Last-resort passthrough to any BrAPI `POST /search/{noun}`. Handles the 202 / as
 
 Two-phase write for observation rows. Default `mode: preview` validates rows against the study's variables and returns a routing breakdown; `mode: apply` elicits user confirmation when the client supports it, then POSTs new rows and PUTs rows carrying `observationDbId` in parallel.
 
+> **Off by default.** Registered only when the operator sets `BRAPI_ENABLE_WRITES=true`; omitted from the surface otherwise. Operator-level deploy-time consent for the only mutation tool — the in-tool preview default, `ctx.elicit` confirmation, `force: true` bypass, and `brapi:write:observations` auth scope all continue to apply when registration is on.
+
 - POST/PUT routing keyed on per-row `observationDbId` presence — mixed batches in one call
 - Pre-flight pulls `/studies/{id}/observationvariables` to flag rows whose variable isn't exposed by the study (warning, not rejection — the upstream is the source of truth)
 - Apply mode requires `ctx.elicit` confirmation OR an explicit `force: true` flag (rejected with `Forbidden` otherwise)
@@ -443,6 +445,7 @@ Every variable is optional — agents can configure connections entirely at runt
 | `BRAPI_DATASET_STORE_DIR` | Filesystem path for `DatasetStore` payloads when filesystem storage is active. | — |
 | `BRAPI_REFERENCE_CACHE_TTL_SECONDS` | TTL for reference-data cache entries (programs, trials, locations, crops). | `3600` |
 | `BRAPI_ALLOW_PRIVATE_IPS` | Allow connecting to RFC 1918 / loopback targets. Dev-only. | `false` |
+| `BRAPI_ENABLE_WRITES` | Opt-in flag for the write surface (`brapi_submit_observations`). Off by default — the tool is omitted from `tools/list` unless the operator opts in for this deployment. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |

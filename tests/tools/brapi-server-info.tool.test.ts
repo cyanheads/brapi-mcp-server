@@ -34,6 +34,7 @@ const baseConfig: ServerConfig = {
   searchPollTimeoutMs: 5_000,
   searchPollIntervalMs: 1,
   allowPrivateIps: false,
+  enableWrites: false,
 };
 
 function jsonResponse(body: unknown) {

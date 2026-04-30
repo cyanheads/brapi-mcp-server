@@ -36,6 +36,7 @@ export const TEST_CONFIG: ServerConfig = {
   searchPollTimeoutMs: 5_000,
   searchPollIntervalMs: 1,
   allowPrivateIps: false,
+  enableWrites: false,
 };
 
 export function jsonResponse(body: unknown, status = 200): Response {
