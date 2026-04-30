@@ -14,6 +14,9 @@ import type { OntologyCandidate, ResolveOptions } from './types.js';
 /**
  * Loose shape of a BrAPI observation-variable record. Every field is
  * optional because server implementations vary in what they populate.
+ * Trait subobject fields follow BrAPI v2.1 naming (`traitName`,
+ * `traitDescription`); both legacy `name` / `description` aliases are
+ * accepted for older or non-conformant servers.
  */
 export interface VariableLike {
   method?: { methodName?: string };
@@ -26,9 +29,13 @@ export interface VariableLike {
   synonyms?: string[] | undefined;
   trait?: {
     traitClass?: string;
+    /** Legacy alias for `traitDescription` — accepted for older servers. */
     description?: string;
+    /** Legacy alias for `traitName` — accepted for older servers. */
     name?: string;
     synonyms?: string[];
+    traitDescription?: string;
+    traitName?: string;
   };
 }
 
@@ -90,7 +97,7 @@ export class OntologyResolver {
       return { candidate: toCandidate(variable, 'synonymMatch'), score: 40 };
     }
 
-    const traitName = variable.trait?.name?.toLowerCase();
+    const traitName = (variable.trait?.traitName ?? variable.trait?.name)?.toLowerCase();
     if (traitName?.includes(query)) {
       return { candidate: toCandidate(variable, 'nameMatch'), score: 35 };
     }
@@ -100,7 +107,9 @@ export class OntologyResolver {
       return { candidate: toCandidate(variable, 'traitClassMatch'), score: 30 };
     }
 
-    const traitDescription = variable.trait?.description?.toLowerCase();
+    const traitDescription = (
+      variable.trait?.traitDescription ?? variable.trait?.description
+    )?.toLowerCase();
     if (traitDescription?.includes(query)) {
       return { candidate: toCandidate(variable, 'nameMatch'), score: 20 };
     }
@@ -118,9 +127,11 @@ function toCandidate(
     candidate.observationVariableDbId = variable.observationVariableDbId;
   }
   if (variable.observationVariablePUI) candidate.termId = variable.observationVariablePUI;
-  const name = variable.observationVariableName ?? variable.trait?.name;
+  const name =
+    variable.observationVariableName ?? variable.trait?.traitName ?? variable.trait?.name;
   if (name) candidate.name = name;
-  if (variable.trait?.description) candidate.description = variable.trait.description;
+  const description = variable.trait?.traitDescription ?? variable.trait?.description;
+  if (description) candidate.description = description;
   if (variable.ontologyDbId) candidate.ontologyDbId = variable.ontologyDbId;
   const combinedSynonyms = [...(variable.synonyms ?? []), ...(variable.trait?.synonyms ?? [])];
   if (combinedSynonyms.length > 0) candidate.synonyms = Array.from(new Set(combinedSynonyms));

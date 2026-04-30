@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.9](changelog/0.3.x/0.3.9.md) — 2026-04-29
+
+Resolver field-name fix for BrAPI v2.1 trait subobjects + bbox swap-on-zero detection for non-conformant GeoJSON deployments.
+
 ## [0.3.8](changelog/0.3.x/0.3.8.md) — 2026-04-29
 
 Field-test fixes from real CassavaBase data — GeoJSON coordinates, `pageSize=0`→`pageSize=1` for v2.1-strict servers, variable text-match by dbId when PUI is sparse, pedigree leaf-count correctness — plus shared `find_*` rendering.

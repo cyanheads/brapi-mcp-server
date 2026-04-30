@@ -18,11 +18,13 @@ import {
   AliasInput,
   asString,
   buildRefinementHint,
+  type CoordinateAxisOrder,
   checkFilterMatchRates,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
   extractCoordinates,
+  hasPointGeometry,
   LoadLimitInput,
   loadInitialPage,
   maybeSpill,
@@ -112,6 +114,11 @@ const OutputSchema = z.object({
   appliedFilters: z
     .record(z.string(), z.unknown())
     .describe('The final filter map sent to the server (named + extraFilters).'),
+  coordinateAxisOrder: z
+    .enum(['spec', 'swapped'])
+    .describe(
+      'Axis interpretation used when reading GeoJSON Point coordinates. "spec" follows the GeoJSON RFC 7946 [lon, lat, alt?] convention. "swapped" indicates the upstream server stores [lat, lon, alt?] (non-conformant) and bbox + rendered coordinates were interpreted accordingly.',
+    ),
 });
 
 type Output = z.infer<typeof OutputSchema>;
@@ -126,7 +133,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindLocations = tool('brapi_find_locations', {
   description:
-    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Optional bbox parameter restricts rows to a latitude/longitude window. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Optional bbox parameter restricts rows to a latitude/longitude window. When the spec-correct GeoJSON [lon, lat, alt] reading produces zero matches and at least one row carries a Point geometry, the bbox filter retries once with axes swapped (handles non-conformant servers that store [lat, lon, alt]) and surfaces a warning + `coordinateAxisOrder: "swapped"`. Returns a dataset handle when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     alias: AliasInput,
@@ -228,14 +235,35 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     });
 
     const bbox = normalizeBbox(input.bbox, warnings);
-    const filteredFull = bbox ? fullRows.filter((r) => insideBbox(r, bbox)) : fullRows;
-    const filteredReturned = bbox
-      ? firstPage.rows.filter((r) => insideBbox(r, bbox))
+    let coordinateAxisOrder: CoordinateAxisOrder = 'spec';
+    let filteredFull = bbox ? fullRows.filter((r) => insideBbox(r, bbox, 'spec')) : fullRows;
+    let filteredReturned = bbox
+      ? firstPage.rows.filter((r) => insideBbox(r, bbox, 'spec'))
       : firstPage.rows;
     if (bbox && fullRows.length > 0 && filteredFull.length === 0) {
-      warnings.push(
-        `bbox excluded all ${fullRows.length} upstream location(s). Verify the latitude/longitude window matches the server's coordinate convention.`,
-      );
+      // Spec pass excluded everything. If at least one row carries a Point
+      // geometry, the server may store coordinates as [lat, lon, alt] rather
+      // than the GeoJSON-standard [lon, lat, alt] (the BrAPI Community Test
+      // Server is a known offender). Retry once with axes swapped — the
+      // retry is in-memory over already-fetched rows. If the swap recovers
+      // matches, surface a loud warning so operators can chase the upstream
+      // quirk; if it still produces zero, fall through to the existing
+      // verify-coordinate-convention warning.
+      const swappedFull = fullRows.some(hasPointGeometry)
+        ? fullRows.filter((r) => insideBbox(r, bbox, 'swapped'))
+        : [];
+      if (swappedFull.length > 0) {
+        coordinateAxisOrder = 'swapped';
+        filteredFull = swappedFull;
+        filteredReturned = firstPage.rows.filter((r) => insideBbox(r, bbox, 'swapped'));
+        warnings.push(
+          `Server appears to store GeoJSON coordinates as [lat, lon, alt] rather than the spec-required [lon, lat, alt]. Bbox matches returned under the swapped interpretation; report to the server operator so the source quirk gets fixed upstream.`,
+        );
+      } else {
+        warnings.push(
+          `bbox excluded all ${fullRows.length} upstream location(s). Verify the latitude/longitude window matches the server's coordinate convention.`,
+        );
+      }
     } else if (bbox && filteredFull.length < fullRows.length) {
       warnings.push(
         `bbox excluded ${fullRows.length - filteredFull.length} of ${fullRows.length} upstream location(s).`,
@@ -283,6 +311,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       distributions,
       warnings,
       appliedFilters: filters,
+      coordinateAxisOrder,
     };
     if (refinementHint) result.refinementHint = refinementHint;
     if (datasetMeta) result.dataset = datasetMeta;
@@ -300,6 +329,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         dataset: result.dataset,
       }),
     );
+    lines.push(`**Coordinate axis order:** ${result.coordinateAxisOrder}`);
     lines.push('');
     if (result.hasMore) {
       lines.push(
@@ -327,7 +357,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         if (loc.locationType) parts.push(`type=${loc.locationType}`);
         if (loc.countryCode) parts.push(`country=${loc.countryCode}`);
         if (loc.countryName) parts.push(`countryName=${loc.countryName}`);
-        const coords = extractCoordinates(loc);
+        const coords = extractCoordinates(loc, result.coordinateAxisOrder);
         if (coords) {
           parts.push(`lat=${coords.latitude}`);
           parts.push(`lon=${coords.longitude}`);
@@ -399,8 +429,12 @@ function normalizeBbox(
   return { minLat, maxLat, minLon, maxLon };
 }
 
-function insideBbox(row: Record<string, unknown>, bbox: Bbox): boolean {
-  const coords = extractCoordinates(row);
+function insideBbox(
+  row: Record<string, unknown>,
+  bbox: Bbox,
+  axisOrder: CoordinateAxisOrder,
+): boolean {
+  const coords = extractCoordinates(row, axisOrder);
   if (!coords) return false;
   const { latitude: lat, longitude: lon } = coords;
   return lat >= bbox.minLat && lat <= bbox.maxLat && lon >= bbox.minLon && lon <= bbox.maxLon;

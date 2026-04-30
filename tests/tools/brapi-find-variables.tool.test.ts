@@ -122,6 +122,50 @@ describe('brapi_find_variables tool', () => {
     expect(result.results[0]?.observationVariableDbId).toBe('var-1');
   });
 
+  it('surfaces candidates when the free-text query only matches trait.traitName (BrAPI v2.1 test-server shape)', async () => {
+    const ctx = await connect(fetcher);
+    // Mirrors the BrAPI Community Test Server: variable names don't contain
+    // "plant height" but `trait.traitName` does. Without the field-name fix,
+    // the resolver looked at `trait.name` (always undefined on v2.1 servers)
+    // and returned an empty candidate list. With the fix, both rows surface
+    // and get promoted to the top of `results`.
+    const rows = [
+      {
+        observationVariableDbId: 'variable3',
+        observationVariableName: 'Pawpaw Fruit Yield',
+        trait: { traitName: 'Fruit Yield', traitDescription: 'fruit yield' },
+      },
+      {
+        observationVariableDbId: 'variable1',
+        observationVariableName: 'Corn Stalk Height',
+        trait: { traitName: 'Plant Height', traitDescription: 'plant height' },
+      },
+      {
+        observationVariableDbId: 'variable2',
+        observationVariableName: 'Pawpaw Height',
+        trait: { traitName: 'Plant Height', traitDescription: 'plant height' },
+      },
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+
+    const result = await brapiFindVariables.handler(
+      brapiFindVariables.input.parse({ text: 'plant height' }),
+      ctx,
+    );
+
+    expect(result.ontologyCandidates.length).toBe(2);
+    expect(result.ontologyCandidates.map((c) => c.observationVariableDbId).sort()).toEqual([
+      'variable1',
+      'variable2',
+    ]);
+    expect(
+      result.results
+        .slice(0, 2)
+        .map((r) => r.observationVariableDbId)
+        .sort(),
+    ).toEqual(['variable1', 'variable2']);
+  });
+
   it('promotes free-text matches by observationVariableDbId when PUI is missing (CassavaBase)', async () => {
     const ctx = await connect(fetcher);
     // Real CassavaBase variables don't carry observationVariablePUI; promotion

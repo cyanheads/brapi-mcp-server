@@ -455,23 +455,38 @@ export function asStringArray(value: unknown): string[] | undefined {
 }
 
 /**
+ * Axis interpretation for GeoJSON Point coordinates:
+ *   - `spec` — RFC 7946 standard `[lon, lat, alt?]` (default)
+ *   - `swapped` — non-conformant `[lat, lon, alt?]` deployments (e.g. the
+ *     BrAPI Community Test Server). `find_locations` falls back to this
+ *     reading when a bbox filter under spec ordering returns zero matches.
+ */
+export type CoordinateAxisOrder = 'spec' | 'swapped';
+
+/**
  * Extract WGS84 coordinates from a BrAPI v2 record. Modern servers carry
  * coordinates as a GeoJSON Feature (`coordinates.geometry.coordinates =
  * [lon, lat, alt?]`); some legacy and mixed-mode servers also expose
  * top-level `latitude`/`longitude`/`altitude`. Returns `undefined` only
  * when both shapes are missing or malformed. Accepts `unknown` so callers
  * can pass Zod-passthrough rows without an explicit cast.
+ *
+ * `axisOrder` controls how a GeoJSON `Point.coordinates` array is read.
+ * Legacy top-level `latitude`/`longitude` fields are unambiguous by name
+ * and are not affected.
  */
 export function extractCoordinates(
   record: unknown,
+  axisOrder: CoordinateAxisOrder = 'spec',
 ): { latitude: number; longitude: number; altitude?: number } | undefined {
   if (typeof record !== 'object' || record === null) return;
   const r = record as Record<string, unknown>;
   const geometry = (r.coordinates as { geometry?: unknown } | null | undefined)?.geometry;
   const geoCoords = (geometry as { coordinates?: unknown } | null | undefined)?.coordinates;
   if (Array.isArray(geoCoords) && geoCoords.length >= 2) {
-    const [lon, lat, alt] = geoCoords;
-    if (typeof lat === 'number' && typeof lon === 'number') {
+    const [a, b, alt] = geoCoords;
+    if (typeof a === 'number' && typeof b === 'number') {
+      const [lon, lat] = axisOrder === 'spec' ? [a, b] : [b, a];
       const result: { latitude: number; longitude: number; altitude?: number } = {
         latitude: lat,
         longitude: lon,
@@ -492,6 +507,27 @@ export function extractCoordinates(
     return result;
   }
   return;
+}
+
+/**
+ * True when a BrAPI record carries a GeoJSON `Point` geometry with a
+ * 2- or 3-element numeric coordinate array. Used by the bbox swap-on-zero
+ * heuristic to decide whether retrying with axes swapped is worth doing —
+ * Polygon-only or geometry-less rows can't be reinterpreted.
+ */
+export function hasPointGeometry(record: unknown): boolean {
+  if (typeof record !== 'object' || record === null) return false;
+  const r = record as Record<string, unknown>;
+  const geometry = (r.coordinates as { geometry?: unknown } | null | undefined)?.geometry;
+  if (!geometry || typeof geometry !== 'object') return false;
+  const g = geometry as { type?: unknown; coordinates?: unknown };
+  if (g.type !== 'Point') return false;
+  return (
+    Array.isArray(g.coordinates) &&
+    g.coordinates.length >= 2 &&
+    typeof g.coordinates[0] === 'number' &&
+    typeof g.coordinates[1] === 'number'
+  );
 }
 
 /**

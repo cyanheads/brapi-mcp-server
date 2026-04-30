@@ -188,6 +188,124 @@ describe('brapi_find_locations tool', () => {
     expect(text).toContain('alt=234');
   });
 
+  it('retries bbox with axes swapped when spec ordering returns zero against a non-conformant server (BrAPI test-server shape)', async () => {
+    const ctx = await connect(fetcher);
+    // Mirrors the BrAPI Community Test Server: Cornell at (42.44, -76.46) is
+    // stored as [42.44423, -76.46313, 123]. Read GeoJSON-spec ([lon, lat]),
+    // it'd be (lat=-76.46, lon=42.44) — outside any sane upstate-NY bbox.
+    // The swap-on-zero retry should recover the row.
+    const rows = [
+      {
+        locationDbId: 'location_01',
+        locationName: 'Location 1',
+        coordinates: {
+          type: 'Feature',
+          geometry: { type: 'Point', coordinates: [42.44423, -76.46313, 123] },
+        },
+      },
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+
+    const result = await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({
+        bbox: { minLat: 42, maxLat: 43, minLon: -77, maxLon: -76 },
+      }),
+      ctx,
+    );
+
+    expect(result.coordinateAxisOrder).toBe('swapped');
+    expect(result.returnedCount).toBe(1);
+    expect(result.results[0]?.locationDbId).toBe('location_01');
+    expect(result.warnings.join('\n')).toContain('[lat, lon, alt]');
+    // Renderer must use the same swapped reading as the bbox filter, otherwise
+    // the LLM sees coords that contradict the warning.
+    const text = (brapiFindLocations.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('lat=42.44423');
+    expect(text).toContain('lon=-76.46313');
+  });
+
+  it('keeps coordinateAxisOrder="spec" when the spec reading matches and never retries with a swap', async () => {
+    const ctx = await connect(fetcher);
+    const rows = [
+      {
+        locationDbId: 'in',
+        locationName: 'Ibadan',
+        coordinates: { type: 'Feature', geometry: { type: 'Point', coordinates: [3.947, 7.378] } },
+      },
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+    const result = await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({
+        bbox: { minLat: 0, maxLat: 30, minLon: -10, maxLon: 30 },
+      }),
+      ctx,
+    );
+    expect(result.coordinateAxisOrder).toBe('spec');
+    expect(result.returnedCount).toBe(1);
+    expect(result.warnings.some((w) => w.includes('[lat, lon, alt]'))).toBe(false);
+  });
+
+  it('keeps the verify-coordinate-convention warning when both spec and swapped readings exclude every row', async () => {
+    const ctx = await connect(fetcher);
+    // Point in Reykjavik, but the bbox covers central Africa — neither
+    // reading produces matches.
+    const rows = [
+      {
+        locationDbId: 'rey',
+        locationName: 'Reykjavik',
+        coordinates: { type: 'Feature', geometry: { type: 'Point', coordinates: [-21.9, 64.1] } },
+      },
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+    const result = await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({
+        bbox: { minLat: 0, maxLat: 10, minLon: 0, maxLon: 10 },
+      }),
+      ctx,
+    );
+    expect(result.coordinateAxisOrder).toBe('spec');
+    expect(result.returnedCount).toBe(0);
+    const text = result.warnings.join('\n');
+    expect(text).toContain('Verify the latitude/longitude window');
+    expect(text).not.toContain('[lat, lon, alt]');
+  });
+
+  it('does not trigger swap retry when no row carries a Point geometry (Polygon-only)', async () => {
+    const ctx = await connect(fetcher);
+    const rows = [
+      {
+        locationDbId: 'poly',
+        locationName: 'Field A',
+        coordinates: {
+          type: 'Feature',
+          geometry: {
+            type: 'Polygon',
+            coordinates: [
+              [
+                [42.44556, -76.45888, 123],
+                [42.4415, -76.45888, 123],
+                [42.4415, -76.4632, 123],
+                [42.44556, -76.4632, 123],
+                [42.44556, -76.45888, 123],
+              ],
+            ],
+          },
+        },
+      },
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+    const result = await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({
+        bbox: { minLat: 42, maxLat: 43, minLon: -77, maxLon: -76 },
+      }),
+      ctx,
+    );
+    expect(result.coordinateAxisOrder).toBe('spec');
+    expect(result.returnedCount).toBe(0);
+    expect(result.warnings.some((w) => w.includes('[lat, lon, alt]'))).toBe(false);
+    expect(result.warnings.join('\n')).toContain('Verify the latitude/longitude window');
+  });
+
   it('bbox honors GeoJSON coordinates and excludes outside-window points', async () => {
     const ctx = await connect(fetcher);
     const rows = [
