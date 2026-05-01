@@ -1,14 +1,14 @@
 /**
- * @fileoverview Dialect for CassavaBase (and other CXGN / SGN-derived BrAPI
- * deployments — Sweetpotatobase, Yambase, Musabase, BananaBase, etc.). These
- * servers run the SGN BrAPI implementation, which predates the BrAPI v2.1
+ * @fileoverview Dialects for CassavaBase and broader CXGN / SGN-derived BrAPI
+ * deployments — Breedbase, Sweetpotatobase, Yambase, Musabase, BananaBase,
+ * T3, etc. These servers run the SGN BrAPI implementation, which predates the BrAPI v2.1
  * filter-name normalization and only honors the older **singular** query
  * parameters on GET list endpoints. Sending `commonCropNames=Cassava` is
  * silently ignored upstream — the singular `commonCropName=Cassava` works.
  * Empirically verified against `https://cassavabase.org/brapi/v2` on
  * 2026-04-30.
  *
- * The dialect:
+ * The dialects:
  *   1. Translates plural filter keys to their singular equivalents per
  *      endpoint, downcasting array values to the first element with a loud
  *      warning when more than one value was supplied (the GET surface can't
@@ -165,41 +165,51 @@ const DISABLED_SEARCH_ENDPOINTS: ReadonlySet<string> = new Set([
   'callsets',
 ]);
 
-export const cassavabaseDialect: BrapiDialect = {
-  id: 'cassavabase',
-  disabledSearchEndpoints: DISABLED_SEARCH_ENDPOINTS,
-  adaptGetFilters(endpoint, filters): DialectAdaptation {
-    const mapping = PLURAL_TO_SINGULAR[endpoint] ?? {};
-    const dropped = DROPPED_FILTERS[endpoint] ?? EMPTY_DROP_SET;
-    const out: Record<string, unknown> = {};
-    const warnings: string[] = [];
+function createSgnFamilyDialect(id: string, label: string): BrapiDialect {
+  return {
+    id,
+    disabledSearchEndpoints: DISABLED_SEARCH_ENDPOINTS,
+    notes: [
+      'SGN/Breedbase-style GET filters use singular names for many fields; this dialect translates plural BrAPI v2.1 filters before sending requests.',
+      'Several advertised POST /search routes are treated as unavailable because SGN-family deployments often expose them in /calls while serving broken or hanging responses.',
+    ],
+    adaptGetFilters(endpoint, filters): DialectAdaptation {
+      const mapping = PLURAL_TO_SINGULAR[endpoint] ?? {};
+      const dropped = DROPPED_FILTERS[endpoint] ?? EMPTY_DROP_SET;
+      const out: Record<string, unknown> = {};
+      const warnings: string[] = [];
 
-    for (const [key, value] of Object.entries(filters)) {
-      if (value === undefined) continue;
-      if (dropped.has(key)) {
-        warnings.push(
-          `Cassavabase dialect: dropped filter '${key}' — this server does not honor it. Adjust the query or omit the filter.`,
-        );
-        continue;
-      }
-      const target = mapping[key];
-      if (!target) {
-        out[key] = value;
-        continue;
-      }
-      if (Array.isArray(value)) {
-        if (value.length === 0) continue;
-        out[target] = value[0];
-        if (value.length > 1) {
+      for (const [key, value] of Object.entries(filters)) {
+        if (value === undefined) continue;
+        if (dropped.has(key)) {
           warnings.push(
-            `Cassavabase dialect: '${key}' downcast to '${target}'; only the first value (${JSON.stringify(value[0])}) was sent — Cassavabase's GET /${endpoint} accepts a single value per filter, not arrays. Run separate calls for the other values, or use a curated tool that paginates over them.`,
+            `${label} dialect: dropped filter '${key}' — this server does not honor it. Adjust the query or omit the filter.`,
           );
+          continue;
         }
-      } else {
-        out[target] = value;
+        const target = mapping[key];
+        if (!target) {
+          out[key] = value;
+          continue;
+        }
+        if (Array.isArray(value)) {
+          if (value.length === 0) continue;
+          out[target] = value[0];
+          if (value.length > 1) {
+            warnings.push(
+              `${label} dialect: '${key}' downcast to '${target}'; only the first value (${JSON.stringify(value[0])}) was sent — this server's GET /${endpoint} accepts a single value per filter, not arrays. Run separate calls for the other values, or use a curated tool that paginates over them.`,
+            );
+          }
+        } else {
+          out[target] = value;
+        }
       }
-    }
 
-    return { filters: out, warnings };
-  },
-};
+      return { filters: out, warnings };
+    },
+  };
+}
+
+export const cassavabaseDialect = createSgnFamilyDialect('cassavabase', 'CassavaBase');
+
+export const breedbaseDialect = createSgnFamilyDialect('breedbase', 'Breedbase/SGN');

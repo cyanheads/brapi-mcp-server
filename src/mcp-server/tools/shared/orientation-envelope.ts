@@ -99,6 +99,9 @@ export const OrientationDialectSchema = z
       .describe(
         'POST /search nouns the active dialect treats as known-dead. Tools using these routes will refuse with a recovery hint.',
       ),
+    notes: z
+      .array(z.string().describe('Verified compatibility note exposed by the active dialect.'))
+      .describe('Dialect-level compatibility notes for this server family.'),
   })
   .describe('Active dialect summary — agents can plan around quirks declared here.');
 
@@ -184,6 +187,9 @@ export async function buildOrientationEnvelope(
   const notableGaps = COMMON_FLOOR.filter((svc) => !supportedSet.has(svc));
 
   const notes: string[] = [];
+  if (profile.warnings?.length) {
+    notes.push(...profile.warnings);
+  }
   if (supportedServices.length === 0) {
     notes.push(
       'Server did not advertise any calls via /serverinfo or /calls — downstream tools will fail until the capability profile populates.',
@@ -245,6 +251,7 @@ function buildDialectSummary(
     disabledSearchEndpoints: dialect.disabledSearchEndpoints
       ? Array.from(dialect.disabledSearchEndpoints).sort()
       : [],
+    notes: dialect.notes ? [...dialect.notes] : [],
   };
 }
 
@@ -341,6 +348,9 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
     lines.push(
       `- **POST /search routes routed around:** ${envelope.dialect.disabledSearchEndpoints.join(', ')}`,
     );
+  }
+  if (envelope.dialect.notes.length > 0) {
+    for (const note of envelope.dialect.notes) lines.push(`- ${note}`);
   }
 
   lines.push('');

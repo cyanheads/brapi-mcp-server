@@ -142,6 +142,7 @@ describe('brapi_connect tool', () => {
     expect(result.dialect.source).toBe('fallback');
     expect(result.dialect.envVar).toBe('BRAPI_DEFAULT_DIALECT');
     expect(result.dialect.disabledSearchEndpoints).toEqual([]);
+    expect(result.dialect.notes).toEqual([]);
   });
 
   it('surfaces the cassavabase dialect with disabled-search nouns when /serverinfo names CassavaBase', async () => {
@@ -167,6 +168,7 @@ describe('brapi_connect tool', () => {
     expect(result.dialect.disabledSearchEndpoints).toContain('germplasm');
     expect(result.dialect.disabledSearchEndpoints).toContain('studies');
     expect(result.dialect.disabledSearchEndpoints).not.toContain('calls');
+    expect(result.dialect.notes.some((note) => note.includes('SGN/Breedbase'))).toBe(true);
   });
 
   it('honors BRAPI_<ALIAS>_DIALECT env override and reflects source=env-override', async () => {
@@ -191,6 +193,7 @@ describe('brapi_connect tool', () => {
     expect(result.dialect.id).toBe('spec');
     expect(result.dialect.source).toBe('env-override');
     expect(result.dialect.disabledSearchEndpoints).toEqual([]);
+    expect(result.dialect.notes).toEqual([]);
   });
 
   it('attaches the bearer header on the upstream /serverinfo call', async () => {
@@ -343,6 +346,7 @@ describe('brapi_connect tool', () => {
         source: 'fallback' as const,
         envVar: 'BRAPI_DEFAULT_DIALECT',
         disabledSearchEndpoints: [],
+        notes: [],
       },
       content: { crops: ['Cassava'], studyCount: 42 },
       notes: ['Test note'],

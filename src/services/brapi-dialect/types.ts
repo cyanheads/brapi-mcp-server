@@ -56,4 +56,10 @@ export interface BrapiDialect {
    */
   readonly disabledSearchEndpoints?: ReadonlySet<string>;
   readonly id: string;
+  /**
+   * Human-readable compatibility notes surfaced in brapi_connect /
+   * brapi_server_info. Use this for verified quirks that are handled outside
+   * `adaptGetFilters` (for example coordinate-axis recovery).
+   */
+  readonly notes?: readonly string[];
 }

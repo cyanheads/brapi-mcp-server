@@ -263,7 +263,11 @@ export class BrapiClient {
     ctx: Context,
     options: BrapiRequestOptions = {},
   ): Promise<BrapiEnvelope<T>> {
-    const url = this.buildUrl(baseUrl, `/search/${noun}/${encodeURIComponent(searchResultsDbId)}`);
+    const url = this.buildUrl(
+      baseUrl,
+      `/search/${noun}/${encodeURIComponent(searchResultsDbId)}`,
+      options.params,
+    );
     const pollTimeoutMs = this.serverConfig.searchPollTimeoutMs;
     const pollIntervalMs = this.serverConfig.searchPollIntervalMs;
     const startedAt = Date.now();

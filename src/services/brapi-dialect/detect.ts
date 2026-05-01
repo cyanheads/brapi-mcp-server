@@ -4,7 +4,8 @@
  * override (`BRAPI_<ALIAS>_DIALECT`). Pure functions; the async lookup that
  * pulls the profile lives in `index.ts → resolveDialect`.
  *
- * Supported override values match registered dialect ids: `spec`, `cassavabase`.
+ * Supported override values match registered dialect ids: `spec`,
+ * `brapi-test`, `breedbase`, `cassavabase`.
  * `auto` (or unset) triggers detection from the profile.
  *
  * @module services/brapi-dialect/detect
@@ -60,8 +61,9 @@ export function readDialectOverride(
 /**
  * Pattern-match a server name (or organization name) to a registered dialect
  * id. Falls back to `spec` when nothing matches. Match is case-insensitive
- * and substring-based — `CassavaBase`, `Sweetpotatobase`, etc. all share the
- * SGN BrAPI implementation and resolve to the `cassavabase` dialect.
+ * and substring-based — `CassavaBase` keeps its historical `cassavabase`
+ * dialect id, while sister SGN / Breedbase deployments resolve to the broader
+ * `breedbase` dialect.
  *
  * Returns both the matched id and which field triggered the match so callers
  * can surface that provenance to the agent.
@@ -73,16 +75,25 @@ export function detectDialectFromName(
   const lowerName = (name ?? '').toLowerCase();
   const lowerOrg = (organizationName ?? '').toLowerCase();
   if (!lowerName.trim() && !lowerOrg.trim()) return { id: 'spec', source: 'fallback' };
-  const isSgnHost = (haystack: string) =>
-    haystack.includes('cassavabase') ||
+  const isCassavaBase = (haystack: string) => haystack.includes('cassavabase');
+  const isBreedbaseHost = (haystack: string) =>
     haystack.includes('sweetpotatobase') ||
     haystack.includes('yambase') ||
     haystack.includes('musabase') ||
     haystack.includes('bananabase') ||
+    haystack.includes('breedbase') ||
+    haystack.includes('sol genomics') ||
+    haystack.includes('solgenomics') ||
     // Catches "BTI" / "Boyce Thompson Institute" hosts running the same SGN stack.
     haystack.includes('boyce thompson');
-  if (isSgnHost(lowerName)) return { id: 'cassavabase', source: 'server-name' };
-  if (isSgnHost(lowerOrg)) return { id: 'cassavabase', source: 'organization-name' };
+  const isBrapiTestHost = (haystack: string) =>
+    haystack.includes('brapi test') || haystack.includes('community test server');
+  if (isCassavaBase(lowerName)) return { id: 'cassavabase', source: 'server-name' };
+  if (isCassavaBase(lowerOrg)) return { id: 'cassavabase', source: 'organization-name' };
+  if (isBreedbaseHost(lowerName)) return { id: 'breedbase', source: 'server-name' };
+  if (isBreedbaseHost(lowerOrg)) return { id: 'breedbase', source: 'organization-name' };
+  if (isBrapiTestHost(lowerName)) return { id: 'brapi-test', source: 'server-name' };
+  if (isBrapiTestHost(lowerOrg)) return { id: 'brapi-test', source: 'organization-name' };
   return { id: 'spec', source: 'fallback' };
 }
 

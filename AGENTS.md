@@ -1,10 +1,10 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.4.4
+**Version:** 0.4.5
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
-> **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/AGENTS.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
+> **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
 ---
 
@@ -205,7 +205,7 @@ import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 throw new McpError(JsonRpcErrorCode.DatabaseError, 'Connection failed', { pool: 'primary' });
 ```
 
-Available factories include `notFound`, `validationError`, `forbidden`, `unauthorized`, `serviceUnavailable`, `rateLimited`, `timeout`, `conflict`, `internalError`, `serializationError`, `databaseError`, `configurationError`, `invalidParams`, `invalidRequest`. See framework AGENTS.md for the full auto-classification table and the `api-errors` skill for contract patterns.
+Available factories include `notFound`, `validationError`, `forbidden`, `unauthorized`, `serviceUnavailable`, `rateLimited`, `timeout`, `conflict`, `internalError`, `serializationError`, `databaseError`, `configurationError`, `invalidParams`, `invalidRequest`. See framework CLAUDE.md for the full auto-classification table and the `api-errors` skill for contract patterns.
 
 ---
 
@@ -284,7 +284,7 @@ src/
 
 Skills are modular instructions in `skills/` at the project root. Read them directly when a task matches — e.g., `skills/add-tool/SKILL.md` when adding a tool.
 
-**Agent skill directory:** Copy skills into the directory your agent discovers (Codex: `.Codex/skills/`, others: equivalent). This makes skills available as context without needing to reference `skills/` paths manually. After framework updates, run the `maintenance` skill — it re-syncs the agent directory automatically (Phase B).
+**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, Codex: `.codex/skills/`, shared: `.agents/skills/`, others: equivalent). This makes skills available as context without needing to reference `skills/` paths manually. After framework updates, run the `maintenance` skill — it re-syncs the agent directory automatically (Phase B).
 
 Available skills:
 

@@ -27,13 +27,14 @@ import {
   ExtraFiltersInput,
   fkMatchCheck,
   LoadLimitInput,
-  loadInitialPage,
+  loadInitialFindPage,
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
   renderFindHeader,
+  resolveFindRoute,
 } from '../shared/find-helpers.js';
 
 const ObservationRowSchema = z
@@ -211,12 +212,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
-    await capabilities.ensure(
-      connection.baseUrl,
-      { service: 'observations', method: 'GET' },
-      ctx,
-      capabilityLookup,
-    );
+    const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
 
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
@@ -240,17 +236,18 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     );
 
     const filters = applyDialectFilters(dialect, 'observations', merged, warnings);
+    const route = resolveFindRoute({
+      profile,
+      dialect,
+      endpoint: 'observations',
+      filters,
+      searchBody: merged,
+      warnings,
+    });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
     const loadObservations = (pageSize: number) =>
-      loadInitialPage<Record<string, unknown>>(
-        client,
-        connection,
-        '/observations',
-        filters,
-        pageSize,
-        ctx,
-      );
+      loadInitialFindPage<Record<string, unknown>>(client, connection, route, pageSize, ctx);
 
     /**
      * Danger pattern: querying /observations by germplasm with no anchoring
@@ -294,6 +291,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
           connection,
           path: '/observations',
           filters,
+          route,
           source: 'find_observations',
           loadLimit,
           ctx,
@@ -349,7 +347,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       hasMore: firstPage.hasMore,
       distributions,
       warnings,
-      appliedFilters: filters,
+      appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
     if (datasetMeta) result.dataset = datasetMeta;

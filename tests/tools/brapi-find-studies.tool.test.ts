@@ -35,14 +35,20 @@ function studyRow(dbId: string, extra: Record<string, unknown> = {}): Record<str
   };
 }
 
-async function connect(fetcher: MockFetcher, calls = ['studies'], serverName = 'Test') {
+type TestCall = string | { methods?: ('GET' | 'POST')[]; service: string };
+
+async function connect(fetcher: MockFetcher, calls: TestCall[] = ['studies'], serverName = 'Test') {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
           serverName,
-          calls: calls.map((service) => ({ service, methods: ['GET'], versions: ['2.1'] })),
+          calls: calls.map((call) =>
+            typeof call === 'string'
+              ? { service: call, methods: ['GET'], versions: ['2.1'] }
+              : { ...call, methods: call.methods ?? ['GET'], versions: ['2.1'] },
+          ),
         }),
       );
     }
@@ -116,6 +122,29 @@ describe('brapi_find_studies tool', () => {
     expect(url.searchParams.getAll('seasonDbIds')).toEqual(['2022', '2023']);
     expect(url.searchParams.getAll('programDbIds')).toEqual(['prog-1']);
     expect(url.searchParams.get('pageSize')).toBe('10');
+  });
+
+  it('falls back to POST /search/studies when GET /studies is not advertised', async () => {
+    const ctx = await connect(fetcher, [{ service: 'search/studies', methods: ['POST'] }]);
+    const rows = [studyRow('s1')];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+
+    const result = await brapiFindStudies.handler(
+      brapiFindStudies.input.parse({ crop: 'Cassava', loadLimit: 10 }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    const options = fetcher.mock.calls[0]![3] as { body: string; method: string };
+    expect(url.pathname).toBe('/brapi/v2/search/studies');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toMatchObject({
+      commonCropNames: ['Cassava'],
+      page: 0,
+      pageSize: 10,
+    });
+    expect(result.appliedFilters.commonCropNames).toEqual(['Cassava']);
+    expect(result.warnings.some((w) => w.includes('POST /search/studies'))).toBe(true);
   });
 
   it('merges extraFilters with named params and warns on overrides', async () => {

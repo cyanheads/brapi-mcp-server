@@ -116,10 +116,7 @@ export class ServerRegistry {
       case 'sgn':
         return await this.exchangeSgnToken(auth, baseUrl, ctx);
       case 'oauth2':
-        throw validationError(
-          'OAuth2 auth is not yet implemented. Use mode="bearer" with a pre-obtained access token for now.',
-          { mode: 'oauth2' },
-        );
+        return await this.exchangeOAuth2Token(auth, baseUrl, ctx);
       default: {
         const _exhaustive: never = auth;
         throw validationError('Unknown auth mode', { received: _exhaustive });
@@ -157,6 +154,47 @@ export class ServerRegistry {
     const resolved: ResolvedAuth = {
       headerName: 'Authorization',
       headerValue: `Bearer ${payload.access_token}`,
+    };
+    if (payload.expires_in && Number.isFinite(payload.expires_in)) {
+      resolved.expiresAt = new Date(Date.now() + payload.expires_in * 1000).toISOString();
+    }
+    return resolved;
+  }
+
+  private async exchangeOAuth2Token(
+    auth: Extract<ConnectAuth, { mode: 'oauth2' }>,
+    baseUrl: string,
+    ctx: Context,
+  ): Promise<ResolvedAuth> {
+    const tokenUrl = auth.tokenUrl ?? joinUrl(baseUrl, '/token');
+    const payload = await this.tokenFetcher(
+      tokenUrl,
+      {
+        client_id: auth.clientId,
+        client_secret: auth.clientSecret,
+        grant_type: 'client_credentials',
+      },
+      ctx,
+      {
+        timeoutMs: this.serverConfig.requestTimeoutMs,
+        rejectPrivateIPs: !this.serverConfig.allowPrivateIps,
+      },
+    );
+    if (!payload.access_token) {
+      throw forbidden('OAuth2 token exchange returned no access_token', {
+        tokenUrl,
+        payloadKeys: Object.keys(payload),
+        reason: 'auth_no_access_token',
+        ...ctx.recoveryFor('auth_no_access_token'),
+      });
+    }
+    const tokenType =
+      typeof payload.token_type === 'string' && payload.token_type.trim()
+        ? payload.token_type.trim()
+        : 'Bearer';
+    const resolved: ResolvedAuth = {
+      headerName: 'Authorization',
+      headerValue: `${tokenType} ${payload.access_token}`,
     };
     if (payload.expires_in && Number.isFinite(payload.expires_in)) {
       resolved.expiresAt = new Date(Date.now() + payload.expires_in * 1000).toISOString();

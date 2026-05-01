@@ -31,13 +31,14 @@ import {
   DatasetHandleSchema,
   ExtraFiltersInput,
   LoadLimitInput,
-  loadInitialPage,
+  loadInitialFindPage,
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
   renderFindHeader,
+  resolveFindRoute,
 } from '../shared/find-helpers.js';
 
 const VariableRowSchema = z
@@ -225,13 +226,6 @@ export const brapiFindVariables = tool('brapi_find_variables', {
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
-    await capabilities.ensure(
-      connection.baseUrl,
-      { service: 'variables', method: 'GET' },
-      ctx,
-      capabilityLookup,
-    );
-
     const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
     const hasOntologyEndpoint = Boolean(profile.supported.ontologies);
 
@@ -255,6 +249,14 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     );
 
     const filters = applyDialectFilters(dialect, 'variables', merged, warnings);
+    const route = resolveFindRoute({
+      profile,
+      dialect,
+      endpoint: 'variables',
+      filters,
+      searchBody: merged,
+      warnings,
+    });
 
     if ((input.studies?.length ?? 0) > 1) {
       warnings.push(
@@ -268,11 +270,10 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     }
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
-    const firstPage = await loadInitialPage<Record<string, unknown>>(
+    const firstPage = await loadInitialFindPage<Record<string, unknown>>(
       client,
       connection,
-      '/variables',
-      filters,
+      route,
       loadLimit,
       ctx,
     );
@@ -283,6 +284,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       connection,
       path: '/variables',
       filters,
+      route,
       source: 'find_variables',
       loadLimit,
       ctx,
@@ -371,7 +373,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       distributions,
       ontologyCandidates: candidates,
       warnings,
-      appliedFilters: filters,
+      appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
     if (datasetMeta) result.dataset = datasetMeta;

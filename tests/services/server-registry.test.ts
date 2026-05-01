@@ -119,14 +119,55 @@ describe('ServerRegistry', () => {
       ).rejects.toMatchObject({ code: JsonRpcErrorCode.Forbidden });
     });
 
-    it('throws ValidationError for oauth2 (not yet implemented)', async () => {
+    it('exchanges OAuth2 client credentials for a bearer token', async () => {
+      tokenFetcher.mockResolvedValue({
+        access_token: 'oauth-access',
+        expires_in: 7200,
+        token_type: 'Bearer',
+      });
       const ctx = createMockContext({ tenantId: 't1' });
+      const registered = await registry.register(ctx, {
+        baseUrl: BASE_URL,
+        auth: { mode: 'oauth2', clientId: 'client-1', clientSecret: 'secret-1' },
+      });
+
+      expect(tokenFetcher).toHaveBeenCalledTimes(1);
+      expect(tokenFetcher.mock.calls[0]?.[0]).toBe(`${BASE_URL}/token`);
+      expect(tokenFetcher.mock.calls[0]?.[1]).toEqual({
+        client_id: 'client-1',
+        client_secret: 'secret-1',
+        grant_type: 'client_credentials',
+      });
+      expect(registered.resolvedAuth?.headerValue).toBe('Bearer oauth-access');
+      expect(registered.resolvedAuth?.expiresAt).toBeDefined();
+    });
+
+    it('honors a custom OAuth2 tokenUrl', async () => {
+      tokenFetcher.mockResolvedValue({ access_token: 'oauth-access' });
+      const ctx = createMockContext({ tenantId: 't1' });
+      await registry.register(ctx, {
+        baseUrl: BASE_URL,
+        auth: {
+          mode: 'oauth2',
+          clientId: 'client-1',
+          clientSecret: 'secret-1',
+          tokenUrl: 'https://auth.example.org/oauth/token',
+        },
+      });
+
+      expect(tokenFetcher.mock.calls[0]?.[0]).toBe('https://auth.example.org/oauth/token');
+    });
+
+    it('rejects OAuth2 token exchange that omits access_token', async () => {
+      tokenFetcher.mockResolvedValue({ error: 'invalid_client' });
+      const ctx = createMockContext({ tenantId: 't1' });
+
       await expect(
         registry.register(ctx, {
           baseUrl: BASE_URL,
-          auth: { mode: 'oauth2', clientId: 'c', clientSecret: 's' },
+          auth: { mode: 'oauth2', clientId: 'client-1', clientSecret: 'bad' },
         }),
-      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.Forbidden });
     });
 
     it('rejects aliases with unsupported characters', async () => {

@@ -59,6 +59,12 @@ export interface CapabilityProfile {
    * segment (e.g. "studies", "search/observations") per BrAPI convention.
    */
   supported: Record<string, CallDescriptor>;
+  /**
+   * Non-fatal discovery degradations encountered while building this profile.
+   * These are surfaced in the orientation envelope so callers know when the
+   * profile was assembled from fallbacks instead of a complete /serverinfo.
+   */
+  warnings?: string[];
 }
 
 /**

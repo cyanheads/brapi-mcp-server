@@ -26,13 +26,14 @@ import {
   ExtraFiltersInput,
   fkMatchCheck,
   LoadLimitInput,
-  loadInitialPage,
+  loadInitialFindPage,
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
   renderFindHeader,
+  resolveFindRoute,
 } from '../shared/find-helpers.js';
 
 const ImageRowSchema = z
@@ -165,12 +166,7 @@ export const brapiFindImages = tool('brapi_find_images', {
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
-    await capabilities.ensure(
-      connection.baseUrl,
-      { service: 'images', method: 'GET' },
-      ctx,
-      capabilityLookup,
-    );
+    const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
 
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
@@ -190,13 +186,20 @@ export const brapiFindImages = tool('brapi_find_images', {
     );
 
     const filters = applyDialectFilters(dialect, 'images', merged, warnings);
+    const route = resolveFindRoute({
+      profile,
+      dialect,
+      endpoint: 'images',
+      filters,
+      searchBody: merged,
+      warnings,
+    });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
-    const firstPage = await loadInitialPage<Record<string, unknown>>(
+    const firstPage = await loadInitialFindPage<Record<string, unknown>>(
       client,
       connection,
-      '/images',
-      filters,
+      route,
       loadLimit,
       ctx,
     );
@@ -207,6 +210,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       connection,
       path: '/images',
       filters,
+      route,
       source: 'find_images',
       loadLimit,
       ctx,
@@ -261,7 +265,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       hasMore: firstPage.hasMore,
       distributions,
       warnings,
-      appliedFilters: filters,
+      appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
     if (datasetMeta) result.dataset = datasetMeta;

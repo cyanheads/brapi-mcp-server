@@ -70,23 +70,31 @@ describe('detectDialectFromName', () => {
   });
 
   it('detects sister SGN deployments', () => {
-    expect(detectDialectFromName('Sweetpotatobase').id).toBe('cassavabase');
-    expect(detectDialectFromName('Yambase').id).toBe('cassavabase');
-    expect(detectDialectFromName('Musabase').id).toBe('cassavabase');
-    expect(detectDialectFromName('BananaBase').id).toBe('cassavabase');
+    expect(detectDialectFromName('Sweetpotatobase').id).toBe('breedbase');
+    expect(detectDialectFromName('Yambase').id).toBe('breedbase');
+    expect(detectDialectFromName('Musabase').id).toBe('breedbase');
+    expect(detectDialectFromName('BananaBase').id).toBe('breedbase');
+    expect(detectDialectFromName('Breedbase Demo').id).toBe('breedbase');
   });
 
   it('detects via organizationName when serverName is generic with source=organization-name', () => {
     expect(detectDialectFromName('BrAPI Server', 'Boyce Thompson Institute')).toEqual({
-      id: 'cassavabase',
+      id: 'breedbase',
       source: 'organization-name',
+    });
+  });
+
+  it('detects the BrAPI Community Test Server', () => {
+    expect(detectDialectFromName('BrAPI Test Server')).toEqual({
+      id: 'brapi-test',
+      source: 'server-name',
     });
   });
 
   it('falls back to spec for unknown names with source=fallback', () => {
     expect(detectDialectFromName('BMS')).toEqual({ id: 'spec', source: 'fallback' });
     expect(detectDialectFromName('GnpIS').id).toBe('spec');
-    expect(detectDialectFromName('BrAPI Test Server').id).toBe('spec');
+    expect(detectDialectFromName('Totally Unknown Server').id).toBe('spec');
   });
 
   it('falls back to spec when both fields are empty', () => {
@@ -117,6 +125,6 @@ describe('detectDialectId', () => {
 
   it('detects from profile when no override is set', () => {
     expect(detectDialectId('cassava', profile('CassavaBase'), {}).id).toBe('cassavabase');
-    expect(detectDialectId('default', profile('BrAPI Test Server'), {}).id).toBe('spec');
+    expect(detectDialectId('default', profile('BrAPI Test Server'), {}).id).toBe('brapi-test');
   });
 });

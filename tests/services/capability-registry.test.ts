@@ -117,6 +117,26 @@ describe('CapabilityRegistry', () => {
       expect(profile.server.brapiVersion).toBe('2.1');
     });
 
+    it('builds a partial profile from /calls when /serverinfo is unavailable', async () => {
+      client.get.mockImplementation(async (_base, path: string) => {
+        if (path === '/serverinfo') throw serviceUnavailable('503 maintenance');
+        if (path === '/calls') {
+          return envelope({
+            data: [{ service: 'studies', methods: ['GET'], versions: ['2.1'] }],
+          });
+        }
+        if (path === '/commoncropnames') return envelope({ data: [] });
+        throw new Error(`Unexpected path: ${path}`);
+      });
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+      const profile = await registry.profile(BASE_URL, ctx);
+
+      expect(profile.supported.studies?.methods).toContain('GET');
+      expect(profile.server.brapiVersion).toBe('2.1');
+      expect(profile.warnings?.some((w) => w.includes('/serverinfo was unavailable'))).toBe(true);
+    });
+
     it('degrades gracefully when /commoncropnames is unavailable', async () => {
       client.get.mockImplementation(async (_base, path: string) => {
         if (path === '/serverinfo') {
@@ -130,6 +150,7 @@ describe('CapabilityRegistry', () => {
       const profile = await registry.profile(BASE_URL, ctx);
       expect(profile.crops).toEqual([]);
       expect(profile.supported.studies).toBeDefined();
+      expect(profile.warnings?.some((w) => w.includes('/commoncropnames'))).toBe(true);
     });
 
     it('degrades gracefully when the /calls fallback also fails', async () => {
@@ -144,6 +165,7 @@ describe('CapabilityRegistry', () => {
       const profile = await registry.profile(BASE_URL, ctx);
       expect(Object.keys(profile.supported)).toHaveLength(0);
       expect(profile.crops).toEqual([]);
+      expect(profile.warnings?.some((w) => w.includes('/calls'))).toBe(true);
     });
 
     it('caches profiles on the first fetch and reuses them on subsequent calls', async () => {

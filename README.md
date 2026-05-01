@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.4.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.4.5-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
@@ -70,7 +70,7 @@ Nineteen tools grouped by shape — connection tools bootstrap a session, `find_
 Session bootstrap. Authenticates to a BrAPI v2 server, registers the connection under a named alias, loads the capability profile via `CapabilityRegistry`, and inlines the full orientation envelope in the response. One call fully orients the agent.
 
 - `baseUrl` and `auth` are optional — when omitted they fall back to `BRAPI_<ALIAS>_*`, then `BRAPI_DEFAULT_*` env vars. Agents can call `brapi_connect({ alias: 'cassava' })` with nothing else and credentials never enter the LLM context (see [Per-alias credentials](#per-alias-credentials))
-- Tagged-union auth input: `none`, `sgn` (session-token exchange), `oauth2` (accepted at schema level, rejected at runtime pending client-credentials flow), `bearer`, `api_key`
+- Tagged-union auth input: `none`, `sgn` (session-token exchange), `oauth2` (client-credentials exchange), `bearer`, `api_key`
 - Multiple concurrent connections per session via distinct aliases
 - Forces a fresh capability load on every connect — the agent expects current state
 - Returns the same envelope as `brapi_server_info` — server identity, auth status, capability profile (supported/missing calls), content summary, server-specific notes
@@ -310,13 +310,16 @@ BrAPI-specific:
 
 - **Multi-server session** — `ServerRegistry` maps aliases to live BrAPI connections, so one agent session can span Breedbase, T3, and Sweetpotatobase in parallel
 - **Capability-aware calls** — `CapabilityRegistry` caches the `/serverinfo` profile per connection and guards every tool call against unsupported endpoints before they hit the wire
+- **Tolerant capability discovery** — if `/serverinfo` is unavailable or sparse, discovery falls back to `/calls` and returns a partial orientation envelope with explicit notes
+- **Find-route planning** — curated `find_*` tools prefer GET list endpoints, then fall back to POST `/search/{noun}` when only search is advertised
 - **Dataset spillover** — `find_*` tools cap in-context rows at `loadLimit` and transparently persist larger unions (up to 50k rows / 50 pages) as handles in `DatasetStore`; `brapi_manage_dataset` pages / projects / deletes them
 - **Async-search transparency** — `brapi_find_genotype_calls` and `brapi_raw_search` handle the `POST /search/{noun}` → `GET /search/{noun}/{id}` 202-retry pattern without the agent needing to know
 - **Pedigree DAG walks** — `brapi_walk_pedigree` BFS-traverses ancestry or descendancy with cycle detection, depth limits, and traversal stats — BrAPI only exposes one generation per call
 - **Image content** — `brapi_get_image` fetches image bytes inline as MCP `type: image` blocks, preferring `/images/{id}/imagecontent` and falling back to the metadata `imageURL` field
 - **Free-text variable ranking** — `OntologyResolver` scores variable records against a query (PUI / name / synonym / trait-class) so `find_variables text:"..."` returns ranked candidates even when the server has no `/ontologies` endpoint
 - **Dynamic filter discovery** — static v2.1 filter catalog plus an `extraFilters` passthrough lets agents drive any server-specific filter without schema churn
-- **Auth variants in one schema** — tagged-union connection auth covers none / bearer / api-key / SGN session-token exchange in a single input shape
+- **Auth variants in one schema** — tagged-union connection auth covers none / bearer / api-key / SGN session-token exchange / OAuth2 client-credentials exchange in a single input shape
+- **Compatibility matrix** — live server probes are tracked in [docs/compatibility.md](./docs/compatibility.md)
 - **Typed error contracts** — every declared failure mode carries a stable `data.reason`, an HTTP-style `code`, and a `recovery.hint` mirrored onto the wire, so agent clients can route errors deterministically (e.g. `unknown_alias` → re-run `brapi_connect`, `dataset_not_found` → drop the stale handle)
 - **Last-resort escape hatches** — `brapi_raw_get` and `brapi_raw_search` pass through to any endpoint with routing nudges pointing at the curated tool when one exists
 
@@ -487,6 +490,12 @@ BRAPI_CASSAVA_PASSWORD=...
 BRAPI_PROD_BASE_URL=https://my-brapi.example.com/brapi/v2
 BRAPI_PROD_API_KEY=...
 BRAPI_PROD_API_KEY_HEADER=X-API-Key
+
+# Register an OAuth2 client-credentials server as alias 'secure'
+BRAPI_SECURE_BASE_URL=https://my-oauth-brapi.example.com/brapi/v2
+BRAPI_SECURE_OAUTH_CLIENT_ID=...
+BRAPI_SECURE_OAUTH_CLIENT_SECRET=...
+BRAPI_SECURE_OAUTH_TOKEN_URL=https://auth.example.com/oauth/token
 ```
 
 Then the agent calls `brapi_connect({ alias: 'cassava' })` — no `baseUrl`, no `auth`, no secrets in the prompt.

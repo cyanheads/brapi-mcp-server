@@ -280,6 +280,20 @@ describe('BrapiClient', () => {
       expect(result.result.data[0]?.observationDbId).toBe('o1');
     });
 
+    it('includes query params when polling paged async search results', async () => {
+      fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] })));
+      const ctx = createMockContext();
+
+      await client.getSearchResults(BASE_URL, 'calls', 'abc123', ctx, {
+        params: { page: 2, pageSize: 1000 },
+      });
+
+      const calledUrl = new URL(String(fetcher.mock.calls[0]![0]));
+      expect(calledUrl.pathname).toBe('/brapi/v2/search/calls/abc123');
+      expect(calledUrl.searchParams.get('page')).toBe('2');
+      expect(calledUrl.searchParams.get('pageSize')).toBe('1000');
+    });
+
     it('polls past 202 responses until 200', async () => {
       fetcher
         .mockResolvedValueOnce(

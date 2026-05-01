@@ -17,7 +17,8 @@ import { detectDialectId } from './detect.js';
 import { getDialectById } from './registry.js';
 import type { BrapiDialect } from './types.js';
 
-export { cassavabaseDialect } from './cassavabase-dialect.js';
+export { brapiTestDialect } from './brapi-test-dialect.js';
+export { breedbaseDialect, cassavabaseDialect } from './cassavabase-dialect.js';
 export {
   type DialectDetection,
   type DialectDetectionSource,

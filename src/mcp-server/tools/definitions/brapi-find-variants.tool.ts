@@ -24,13 +24,14 @@ import {
   DatasetHandleSchema,
   ExtraFiltersInput,
   LoadLimitInput,
-  loadInitialPage,
+  loadInitialFindPage,
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
   renderFindHeader,
+  resolveFindRoute,
 } from '../shared/find-helpers.js';
 
 const VariantRowSchema = z
@@ -161,12 +162,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
-    await capabilities.ensure(
-      connection.baseUrl,
-      { service: 'variants', method: 'GET' },
-      ctx,
-      capabilityLookup,
-    );
+    const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
 
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
@@ -188,13 +184,20 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     );
 
     const filters = applyDialectFilters(dialect, 'variants', merged, warnings);
+    const route = resolveFindRoute({
+      profile,
+      dialect,
+      endpoint: 'variants',
+      filters,
+      searchBody: merged,
+      warnings,
+    });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
-    const firstPage = await loadInitialPage<Record<string, unknown>>(
+    const firstPage = await loadInitialFindPage<Record<string, unknown>>(
       client,
       connection,
-      '/variants',
-      filters,
+      route,
       loadLimit,
       ctx,
     );
@@ -205,6 +208,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       connection,
       path: '/variants',
       filters,
+      route,
       source: 'find_variants',
       loadLimit,
       ctx,
@@ -230,7 +234,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       hasMore: firstPage.hasMore,
       distributions,
       warnings,
-      appliedFilters: filters,
+      appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
     if (datasetMeta) result.dataset = datasetMeta;

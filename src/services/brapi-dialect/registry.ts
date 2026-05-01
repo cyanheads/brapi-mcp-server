@@ -8,7 +8,8 @@
  * @module services/brapi-dialect/registry
  */
 
-import { cassavabaseDialect } from './cassavabase-dialect.js';
+import { brapiTestDialect } from './brapi-test-dialect.js';
+import { breedbaseDialect, cassavabaseDialect } from './cassavabase-dialect.js';
 import { specDialect } from './spec-dialect.js';
 import type { BrapiDialect } from './types.js';
 
@@ -32,6 +33,8 @@ export function getDialectById(id: string): BrapiDialect {
 export function initBrapiDialectRegistry(): void {
   REGISTRY.clear();
   registerDialect(specDialect);
+  registerDialect(brapiTestDialect);
+  registerDialect(breedbaseDialect);
   registerDialect(cassavabaseDialect);
 }
 

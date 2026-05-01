@@ -28,13 +28,14 @@ import {
   ExtraFiltersInput,
   fkMatchCheck,
   LoadLimitInput,
-  loadInitialPage,
+  loadInitialFindPage,
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
   renderFindHeader,
+  resolveFindRoute,
 } from '../shared/find-helpers.js';
 
 const StudyRowSchema = z
@@ -164,12 +165,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
-    await capabilities.ensure(
-      connection.baseUrl,
-      { service: 'studies', method: 'GET' },
-      ctx,
-      capabilityLookup,
-    );
+    const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
 
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
@@ -190,13 +186,20 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     );
 
     const filters = applyDialectFilters(dialect, 'studies', merged, warnings);
+    const route = resolveFindRoute({
+      profile,
+      dialect,
+      endpoint: 'studies',
+      filters,
+      searchBody: merged,
+      warnings,
+    });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
-    const firstPage = await loadInitialPage<Record<string, unknown>>(
+    const firstPage = await loadInitialFindPage<Record<string, unknown>>(
       client,
       connection,
-      '/studies',
-      filters,
+      route,
       loadLimit,
       ctx,
     );
@@ -207,6 +210,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       connection,
       path: '/studies',
       filters,
+      route,
       source: 'find_studies',
       loadLimit,
       ctx,
@@ -269,7 +273,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       hasMore: firstPage.hasMore,
       distributions,
       warnings,
-      appliedFilters: filters,
+      appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
     if (datasetMeta) result.dataset = datasetMeta;

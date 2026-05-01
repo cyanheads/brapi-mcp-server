@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-05-01 19:36:16
+Generated on: 2026-05-01 19:55:35
 
 ```text
 brapi-mcp-server/
@@ -21,6 +21,7 @@ brapi-mcp-server/
 │   ├── 0.4.x/
 │   └── template.md
 ├── docs/
+│   ├── compatibility.md
 │   └── design.md
 ├── scripts/
 │   ├── build-changelog.ts
@@ -147,6 +148,7 @@ brapi-mcp-server/
 │   │   │   ├── index.ts
 │   │   │   └── types.ts
 │   │   ├── brapi-dialect/
+│   │   │   ├── brapi-test-dialect.ts
 │   │   │   ├── cassavabase-dialect.ts
 │   │   │   ├── detect.ts
 │   │   │   ├── index.ts

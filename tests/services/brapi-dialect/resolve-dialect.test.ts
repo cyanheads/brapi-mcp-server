@@ -109,7 +109,7 @@ describe('resolveDialect', () => {
     const ctx = createMockContext({ tenantId: 't1' });
     await ctx.state.set(CACHE_KEY, profile('BrAPI Server', 'Boyce Thompson Institute'));
     const dialect = await resolveDialect(connection('default'), ctx);
-    expect(dialect.id).toBe('cassavabase');
+    expect(dialect.id).toBe('breedbase');
   });
 
   it('uses the per-alias env var (BRAPI_<ALIAS>_DIALECT)', async () => {

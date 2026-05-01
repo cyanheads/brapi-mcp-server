@@ -29,13 +29,14 @@ import {
   extractCoordinates,
   hasPointGeometry,
   LoadLimitInput,
-  loadInitialPage,
+  loadInitialFindPage,
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
   renderDatasetHandle,
   renderDistributions,
   renderFindHeader,
+  resolveFindRoute,
 } from '../shared/find-helpers.js';
 
 const LocationRowSchema = z
@@ -202,12 +203,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
-    await capabilities.ensure(
-      connection.baseUrl,
-      { service: 'locations', method: 'GET' },
-      ctx,
-      capabilityLookup,
-    );
+    const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
 
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
@@ -225,13 +221,20 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     );
 
     const filters = applyDialectFilters(dialect, 'locations', merged, warnings);
+    const route = resolveFindRoute({
+      profile,
+      dialect,
+      endpoint: 'locations',
+      filters,
+      searchBody: merged,
+      warnings,
+    });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
-    const firstPage = await loadInitialPage<Record<string, unknown>>(
+    const firstPage = await loadInitialFindPage<Record<string, unknown>>(
       client,
       connection,
-      '/locations',
-      filters,
+      route,
       loadLimit,
       ctx,
     );
@@ -242,6 +245,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       connection,
       path: '/locations',
       filters,
+      route,
       source: 'find_locations',
       loadLimit,
       ctx,
@@ -324,7 +328,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       hasMore: firstPage.hasMore,
       distributions,
       warnings,
-      appliedFilters: filters,
+      appliedFilters: route.kind === 'search' ? route.searchBody : filters,
       coordinateAxisOrder,
     };
     if (refinementHint) result.refinementHint = refinementHint;

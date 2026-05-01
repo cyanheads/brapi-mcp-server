@@ -9,7 +9,7 @@
  */
 
 import { type Context, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
 import type {
   BrapiClient,
@@ -19,6 +19,7 @@ import type {
   ResolvedAuth,
 } from '@/services/brapi-client/index.js';
 import type { BrapiDialect } from '@/services/brapi-dialect/index.js';
+import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 import type {
   CreateDatasetInput,
   DatasetMetadata,
@@ -101,6 +102,98 @@ export function applyDialectFilters(
   const adapted = dialect.adaptGetFilters(endpoint, filters);
   warnings.push(...adapted.warnings);
   return adapted.filters;
+}
+
+export type FindRoute =
+  | {
+      filters: Record<string, unknown>;
+      kind: 'get';
+      path: string;
+      service: string;
+    }
+  | {
+      kind: 'search';
+      noun: string;
+      searchBody: Record<string, unknown>;
+      service: string;
+    };
+
+export interface ResolveFindRouteInput {
+  dialect: BrapiDialect;
+  endpoint: string;
+  filters: Record<string, unknown>;
+  profile: CapabilityProfile;
+  searchBody: Record<string, unknown>;
+  searchNoun?: string;
+  service?: string;
+  warnings: string[];
+}
+
+/**
+ * Select the transport for a curated find tool from the advertised capability
+ * profile. GET stays the default because it has the widest real-world support
+ * and can run through dialect-specific query-string adapters. When a server
+ * exposes only POST `/search/{noun}`, the same semantic filters are sent as a
+ * search body instead.
+ */
+export function resolveFindRoute(input: ResolveFindRouteInput): FindRoute {
+  const service = input.service ?? input.endpoint;
+  const path = `/${input.endpoint}`;
+  const searchNoun = input.searchNoun ?? input.endpoint;
+  const searchService = `search/${searchNoun}`;
+  const getDescriptor = input.profile.supported[service];
+  const searchDescriptor = input.profile.supported[searchService];
+  const getSupported = supportsMethod(getDescriptor, 'GET');
+  const searchSupported = supportsMethod(searchDescriptor, 'POST');
+  const searchDisabled = Boolean(input.dialect.disabledSearchEndpoints?.has(searchNoun));
+
+  if (getSupported) {
+    return { kind: 'get', service, path, filters: input.filters };
+  }
+
+  if (searchSupported && !searchDisabled) {
+    input.warnings.push(
+      `Route selected: POST /search/${searchNoun} because GET ${path} was not advertised by this server.`,
+    );
+    return {
+      kind: 'search',
+      service: searchService,
+      noun: searchNoun,
+      searchBody: pruneUndefined(input.searchBody),
+    };
+  }
+
+  if (searchSupported && searchDisabled) {
+    throw validationError(
+      `BrAPI server advertises POST /search/${searchNoun}, but the active '${input.dialect.id}' dialect marks that route as known-dead.`,
+      {
+        service,
+        searchService,
+        dialectId: input.dialect.id,
+        reason: 'search_endpoint_disabled',
+      },
+    );
+  }
+
+  throw validationError(
+    `BrAPI server does not advertise a usable route for '${service}'. Expected GET ${path} or POST /search/${searchNoun}. Check brapi_server_info for the full capability list.`,
+    {
+      service,
+      searchService,
+      supportedCount: Object.keys(input.profile.supported).length,
+      reason: 'missing_find_route',
+    },
+  );
+}
+
+function supportsMethod(
+  descriptor: { methods?: readonly string[] } | undefined,
+  method: string,
+): boolean {
+  if (!descriptor) return false;
+  return (
+    !descriptor.methods || descriptor.methods.length === 0 || descriptor.methods.includes(method)
+  );
 }
 
 function pruneUndefined(record: Record<string, unknown>): Record<string, unknown> {
@@ -234,19 +327,24 @@ export async function loadInitialPage<T>(
   loadLimit: number,
   ctx: Context,
 ): Promise<LoadedRows<T>> {
-  const params: BrapiRequestOptions['params'] = {
-    ...(filters as Record<
-      string,
-      string | number | boolean | readonly (string | number)[] | undefined
-    >),
-  };
-  params.pageSize = loadLimit;
-  const envelope = await client.get<BrapiListResult<T>>(
-    connection.baseUrl,
-    path,
+  return await loadInitialFindPage<T>(
+    client,
+    connection,
+    getRouteForPath(path, filters),
+    loadLimit,
     ctx,
-    buildRequestOptions(connection, params),
   );
+}
+
+/** Pull the first page for either a GET list endpoint or POST /search route. */
+export async function loadInitialFindPage<T>(
+  client: BrapiClient,
+  connection: RegisteredServer,
+  route: FindRoute,
+  loadLimit: number,
+  ctx: Context,
+): Promise<LoadedRows<T>> {
+  const envelope = await fetchFindRoutePage<T>(client, connection, route, loadLimit, 0, ctx);
   const rows = extractRows<T>(envelope.result);
   const pagination = envelope.metadata?.pagination;
   const totalCount = pagination?.totalCount;
@@ -254,6 +352,49 @@ export async function loadInitialPage<T>(
   const result: LoadedRows<T> = { rows, hasMore, pagesFetched: 1 };
   if (totalCount !== undefined) result.totalCount = totalCount;
   return result;
+}
+
+async function fetchFindRoutePage<T>(
+  client: BrapiClient,
+  connection: RegisteredServer,
+  route: FindRoute,
+  pageSize: number,
+  page: number,
+  ctx: Context,
+): Promise<BrapiEnvelope<BrapiListResult<T> | T[]>> {
+  if (route.kind === 'get') {
+    const params: BrapiRequestOptions['params'] = {
+      ...(route.filters as Record<
+        string,
+        string | number | boolean | readonly (string | number)[] | undefined
+      >),
+    };
+    params.pageSize = pageSize;
+    if (page > 0) params.page = page;
+    return await client.get<BrapiListResult<T> | T[]>(
+      connection.baseUrl,
+      route.path,
+      ctx,
+      buildRequestOptions(connection, params),
+    );
+  }
+
+  const body = { ...route.searchBody, pageSize, page };
+  const response = await client.postSearch<BrapiListResult<T> | T[]>(
+    connection.baseUrl,
+    route.noun,
+    body,
+    ctx,
+    buildRequestOptions(connection),
+  );
+  if (response.kind === 'sync') return response.envelope;
+  return await client.getSearchResults<BrapiListResult<T> | T[]>(
+    connection.baseUrl,
+    route.noun,
+    response.searchResultsDbId,
+    ctx,
+    buildRequestOptions(connection, { pageSize, page }),
+  );
 }
 
 export interface SpillInput<T> {
@@ -265,6 +406,8 @@ export interface SpillInput<T> {
   firstPage: T[];
   loadLimit: number;
   path: string;
+  /** Optional route selected by resolveFindRoute; defaults to GET path + filters. */
+  route?: FindRoute;
   /**
    * Optional client-side predicate applied to every row (first-page + spilled)
    * before persistence. When present, only rows that pass are persisted to
@@ -378,6 +521,7 @@ export interface MaybeSpillInput<T> {
   firstPage: LoadedRows<T>;
   loadLimit: number;
   path: string;
+  route?: FindRoute;
   /**
    * Optional client-side predicate applied to every row before persistence.
    * Forwarded to `spillToDataset`. When present and no spillover happens, the
@@ -425,6 +569,7 @@ export async function maybeSpill<T extends Record<string, unknown>>(
     totalCount: firstPage.totalCount,
   };
   if (rowFilter) spillInput.rowFilter = rowFilter;
+  if (input.route) spillInput.route = input.route;
   const spill = await spillToDataset(spillInput);
   return {
     fullRows: spill.fullRows,
@@ -451,19 +596,14 @@ export async function spillToDataset<T extends Record<string, unknown>>(
   for (let page = 1; page < totalPages; page++) {
     if (rows.length >= remainingTarget) break;
     if (input.ctx.signal.aborted) break;
-    const params: BrapiRequestOptions['params'] = {
-      ...(input.filters as Record<
-        string,
-        string | number | boolean | readonly (string | number)[] | undefined
-      >),
-    };
-    params.pageSize = pageSize;
-    params.page = page;
-    const envelope = await input.client.get<BrapiListResult<T>>(
-      input.connection.baseUrl,
-      input.path,
+    const route = input.route ?? getRouteForPath(input.path, input.filters);
+    const envelope = await fetchFindRoutePage<T>(
+      input.client,
+      input.connection,
+      route,
+      pageSize,
+      page,
       input.ctx,
-      buildRequestOptions(input.connection, params),
     );
     const pageRows = extractRows<T>(envelope.result);
     rows.push(...pageRows);
@@ -490,6 +630,15 @@ export async function spillToDataset<T extends Record<string, unknown>>(
   const dataset = await input.store.create(input.ctx, createInput);
 
   return { dataset, fullRows: persistedRows, pagesFetched };
+}
+
+function getRouteForPath(path: string, filters: Record<string, unknown>): FindRoute {
+  return {
+    kind: 'get',
+    path,
+    service: path.replace(/^\/+/, ''),
+    filters,
+  };
 }
 
 /** BrAPI list endpoints return `{data: T[], ...}`. Some omit the wrapper. */

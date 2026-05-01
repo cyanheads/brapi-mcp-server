@@ -6,7 +6,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cassavabaseDialect } from '@/services/brapi-dialect/cassavabase-dialect.js';
+import { brapiTestDialect } from '@/services/brapi-dialect/brapi-test-dialect.js';
+import {
+  breedbaseDialect,
+  cassavabaseDialect,
+} from '@/services/brapi-dialect/cassavabase-dialect.js';
 import {
   getDialectById,
   initBrapiDialectRegistry,
@@ -28,8 +32,10 @@ describe('dialect registry', () => {
 
   it('initBrapiDialectRegistry registers the built-ins', () => {
     initBrapiDialectRegistry();
-    expect(listRegisteredDialectIds()).toEqual(['cassavabase', 'spec']);
+    expect(listRegisteredDialectIds()).toEqual(['brapi-test', 'breedbase', 'cassavabase', 'spec']);
     expect(getDialectById('spec')).toBe(specDialect);
+    expect(getDialectById('brapi-test')).toBe(brapiTestDialect);
+    expect(getDialectById('breedbase')).toBe(breedbaseDialect);
     expect(getDialectById('cassavabase')).toBe(cassavabaseDialect);
   });
 
@@ -67,6 +73,6 @@ describe('dialect registry', () => {
   it('initBrapiDialectRegistry is idempotent', () => {
     initBrapiDialectRegistry();
     initBrapiDialectRegistry();
-    expect(listRegisteredDialectIds()).toEqual(['cassavabase', 'spec']);
+    expect(listRegisteredDialectIds()).toEqual(['brapi-test', 'breedbase', 'cassavabase', 'spec']);
   });
 });

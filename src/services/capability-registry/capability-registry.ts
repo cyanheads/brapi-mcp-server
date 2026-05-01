@@ -110,31 +110,47 @@ export class CapabilityRegistry {
   ): Promise<CapabilityProfile> {
     const client = this.client();
     const requestOptions = buildRequestOptions(options.auth);
+    const warnings: string[] = [];
 
-    const serverInfoEnv = await client.get<ServerInfoPayload>(
-      baseUrl,
-      '/serverinfo',
-      ctx,
-      requestOptions,
-    );
+    let serverInfo: ServerInfoPayload | undefined;
+    try {
+      const serverInfoEnv = await client.get<ServerInfoPayload>(
+        baseUrl,
+        '/serverinfo',
+        ctx,
+        requestOptions,
+      );
+      serverInfo = serverInfoEnv.result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      ctx.log.warning('Failed to fetch /serverinfo; falling back to /calls-only profile', {
+        baseUrl,
+        error: message,
+      });
+      warnings.push(
+        `/serverinfo was unavailable or malformed (${message}); capability discovery fell back to /calls.`,
+      );
+    }
 
-    const embeddedCalls = serverInfoEnv.result?.calls;
+    const embeddedCalls = serverInfo?.calls;
     const calls = embeddedCalls?.length
       ? embeddedCalls
-      : await this.fetchCallsFallback(baseUrl, ctx, options.auth);
+      : await this.fetchCallsFallback(baseUrl, ctx, options.auth, warnings);
 
-    const crops = await this.fetchCrops(baseUrl, ctx, options.auth);
+    const crops = await this.fetchCrops(baseUrl, ctx, options.auth, warnings);
 
     const supported = indexCalls(calls);
-    const server = normalizeIdentity(serverInfoEnv.result, calls);
+    const server = normalizeIdentity(serverInfo, calls);
 
-    return {
+    const profile: CapabilityProfile = {
       baseUrl,
       server,
       supported,
       crops,
       fetchedAt: new Date().toISOString(),
     };
+    if (warnings.length > 0) profile.warnings = warnings;
+    return profile;
   }
 
   /**
@@ -147,6 +163,7 @@ export class CapabilityRegistry {
     baseUrl: string,
     ctx: Context,
     auth: CapabilityLookupOptions['auth'],
+    warnings: string[],
   ): Promise<CallDescriptor[]> {
     try {
       const env = await this.client().get<CallDescriptor[] | { data: CallDescriptor[] }>(
@@ -157,10 +174,14 @@ export class CapabilityRegistry {
       );
       return extractDataArray<CallDescriptor>(env) ?? [];
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       ctx.log.warning('Failed to fetch /calls fallback', {
         baseUrl,
-        error: err instanceof Error ? err.message : String(err),
+        error: message,
       });
+      warnings.push(
+        `/calls was unavailable or malformed (${message}); no capability list is known.`,
+      );
       return [];
     }
   }
@@ -169,6 +190,7 @@ export class CapabilityRegistry {
     baseUrl: string,
     ctx: Context,
     auth: CapabilityLookupOptions['auth'],
+    warnings: string[],
   ): Promise<string[]> {
     try {
       const env = await this.client().get<string[] | { data: string[] }>(
@@ -179,10 +201,14 @@ export class CapabilityRegistry {
       );
       return extractDataArray<string>(env) ?? [];
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       ctx.log.warning('Failed to fetch /commoncropnames', {
         baseUrl,
-        error: err instanceof Error ? err.message : String(err),
+        error: message,
       });
+      warnings.push(
+        `/commoncropnames was unavailable or malformed (${message}); crop list omitted.`,
+      );
       return [];
     }
   }

@@ -25,7 +25,7 @@ import {
   DatasetHandleSchema,
   ExtraFiltersInput,
   LoadLimitInput,
-  loadInitialPage,
+  loadInitialFindPage,
   type MaybeSpillInput,
   maybeSpill,
   mergeFilters,
@@ -33,6 +33,7 @@ import {
   renderDatasetHandle,
   renderDistributions,
   renderFindHeader,
+  resolveFindRoute,
 } from '../shared/find-helpers.js';
 
 const GermplasmRowSchema = z
@@ -187,12 +188,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
-    await capabilities.ensure(
-      connection.baseUrl,
-      { service: 'germplasm', method: 'GET' },
-      ctx,
-      capabilityLookup,
-    );
+    const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
 
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
@@ -214,13 +210,20 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     );
 
     const filters = applyDialectFilters(dialect, 'germplasm', merged, warnings);
+    const route = resolveFindRoute({
+      profile,
+      dialect,
+      endpoint: 'germplasm',
+      filters,
+      searchBody: merged,
+      warnings,
+    });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
-    const firstPage = await loadInitialPage<Record<string, unknown>>(
+    const firstPage = await loadInitialFindPage<Record<string, unknown>>(
       client,
       connection,
-      '/germplasm',
-      filters,
+      route,
       loadLimit,
       ctx,
     );
@@ -250,6 +253,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       connection,
       path: '/germplasm',
       filters,
+      route,
       source: 'find_germplasm',
       loadLimit,
       ctx,
@@ -340,7 +344,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       hasMore: firstPage.hasMore,
       distributions,
       warnings,
-      appliedFilters: filters,
+      appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
     if (datasetMeta) result.dataset = datasetMeta;

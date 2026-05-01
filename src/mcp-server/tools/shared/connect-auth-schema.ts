@@ -42,7 +42,9 @@ export const ConnectAuthSchema = z
       .object({
         mode: z
           .literal('oauth2')
-          .describe('OAuth2 client-credentials flow. Not yet implemented — use mode="bearer".'),
+          .describe(
+            'OAuth2 client-credentials flow; exchanged for an access token at connect time.',
+          ),
         clientId: z.string().min(1).describe('OAuth2 client ID.'),
         clientSecret: z.string().min(1).describe('OAuth2 client secret.'),
         tokenUrl: z
@@ -51,9 +53,7 @@ export const ConnectAuthSchema = z
           .optional()
           .describe('OAuth2 token endpoint URL. Defaults derived from the base URL when omitted.'),
       })
-      .describe(
-        'OAuth2 client-credentials variant (accepted at schema level, rejected at runtime).',
-      ),
+      .describe('OAuth2 client-credentials variant.'),
   ])
   .describe(
     'Connection auth configuration. Discriminated by `mode`. Omit the entire `auth` field for no-auth servers.',
