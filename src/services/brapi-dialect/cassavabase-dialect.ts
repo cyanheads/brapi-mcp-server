@@ -18,13 +18,14 @@
  *      we invented this earlier; not in the BrAPI v2.1 spec, no SGN-family
  *      server honors it).
  *
- * Future capabilities (search-body translation, output normalization) attach
- * here as optional methods on the same dialect.
+ * Translation engine lives in `singularizing-dialect.ts`; this module supplies
+ * SGN-specific data only.
  *
  * @module services/brapi-dialect/cassavabase-dialect
  */
 
-import type { BrapiDialect, DialectAdaptation } from './types.js';
+import { createSingularizingDialect } from './singularizing-dialect.js';
+import type { BrapiDialect } from './types.js';
 
 /**
  * Plural BrAPI v2.1 filter key → singular form CassavaBase honors. Keyed by
@@ -137,8 +138,6 @@ const DROPPED_FILTERS: Record<string, ReadonlySet<string>> = {
   germplasm: new Set(['searchText']),
 };
 
-const EMPTY_DROP_SET: ReadonlySet<string> = new Set();
-
 /**
  * POST `/search/{noun}` routes CassavaBase advertises in `/calls` but does not
  * actually serve. Probing them in practice yields hangs, 5xx responses, or
@@ -165,49 +164,20 @@ const DISABLED_SEARCH_ENDPOINTS: ReadonlySet<string> = new Set([
   'callsets',
 ]);
 
+const SGN_NOTES = [
+  'SGN/Breedbase-style GET filters use singular names for many fields; this dialect translates plural BrAPI v2.1 filters before sending requests.',
+  'Several advertised POST /search routes are treated as unavailable because SGN-family deployments often expose them in /calls while serving broken or hanging responses.',
+] as const;
+
 function createSgnFamilyDialect(id: string, label: string): BrapiDialect {
-  return {
+  return createSingularizingDialect({
     id,
+    label,
+    pluralToSingular: PLURAL_TO_SINGULAR,
+    droppedFilters: DROPPED_FILTERS,
     disabledSearchEndpoints: DISABLED_SEARCH_ENDPOINTS,
-    notes: [
-      'SGN/Breedbase-style GET filters use singular names for many fields; this dialect translates plural BrAPI v2.1 filters before sending requests.',
-      'Several advertised POST /search routes are treated as unavailable because SGN-family deployments often expose them in /calls while serving broken or hanging responses.',
-    ],
-    adaptGetFilters(endpoint, filters): DialectAdaptation {
-      const mapping = PLURAL_TO_SINGULAR[endpoint] ?? {};
-      const dropped = DROPPED_FILTERS[endpoint] ?? EMPTY_DROP_SET;
-      const out: Record<string, unknown> = {};
-      const warnings: string[] = [];
-
-      for (const [key, value] of Object.entries(filters)) {
-        if (value === undefined) continue;
-        if (dropped.has(key)) {
-          warnings.push(
-            `${label} dialect: dropped filter '${key}' — this server does not honor it. Adjust the query or omit the filter.`,
-          );
-          continue;
-        }
-        const target = mapping[key];
-        if (!target) {
-          out[key] = value;
-          continue;
-        }
-        if (Array.isArray(value)) {
-          if (value.length === 0) continue;
-          out[target] = value[0];
-          if (value.length > 1) {
-            warnings.push(
-              `${label} dialect: '${key}' downcast to '${target}'; only the first value (${JSON.stringify(value[0])}) was sent — this server's GET /${endpoint} accepts a single value per filter, not arrays. Run separate calls for the other values, or use a curated tool that paginates over them.`,
-            );
-          }
-        } else {
-          out[target] = value;
-        }
-      }
-
-      return { filters: out, warnings };
-    },
-  };
+    notes: SGN_NOTES,
+  });
 }
 
 export const cassavabaseDialect = createSgnFamilyDialect('cassavabase', 'CassavaBase');

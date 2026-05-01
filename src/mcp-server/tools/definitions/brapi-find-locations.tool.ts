@@ -9,6 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
@@ -17,7 +18,7 @@ import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
-  applyDialectFilters,
+  applyDialectFiltersOrFail,
   asString,
   buildRefinementHint,
   type CoordinateAxisOrder,
@@ -146,6 +147,15 @@ export const brapiFindLocations = tool('brapi_find_locations', {
   description:
     'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Optional bbox parameter restricts rows to a latitude/longitude window. When the spec-correct GeoJSON [lon, lat, alt] reading produces zero matches and at least one row carries a Point geometry, the bbox filter retries once with axes swapped (handles non-conformant servers that store [lat, lon, alt]) and surfaces a warning + `coordinateAxisOrder: "swapped"`. Returns a dataset handle when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  errors: [
+    {
+      reason: 'all_filters_dropped',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The active dialect dropped every filter the agent supplied — the upstream server does not honor any of the requested scope filters on this endpoint, so the call would silently widen to the unfiltered baseline.',
+      recovery:
+        'Drop the unsupported filters and rescope by locations, locationNames, countryCodes, locationTypes, abbreviations, or bbox — these filter paths are honored on the active dialect.',
+    },
+  ] as const,
   input: z.object({
     alias: AliasInput,
     locations: z.array(z.string()).optional().describe('Filter by locationDbIds.'),
@@ -220,7 +230,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       warnings,
     );
 
-    const filters = applyDialectFilters(dialect, 'locations', merged, warnings);
+    const filters = applyDialectFiltersOrFail(ctx, dialect, 'locations', merged, warnings);
     const route = resolveFindRoute({
       profile,
       dialect,

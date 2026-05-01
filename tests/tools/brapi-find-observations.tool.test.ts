@@ -51,7 +51,7 @@ async function connect(fetcher: MockFetcher, calls = ['observations'], serverNam
     if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
     return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
   });
-  const ctx = createMockContext({ tenantId: 't1' });
+  const ctx = createMockContext({ tenantId: 't1', errors: brapiFindObservations.errors });
   await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
   fetcher.mockReset();
   return ctx;
@@ -198,6 +198,76 @@ describe('brapi_find_observations tool', () => {
     expect(url.searchParams.has('studyDbIds')).toBe(false);
     expect(url.searchParams.has('germplasmDbIds')).toBe(false);
     expect(url.searchParams.has('observationVariableDbIds')).toBe(false);
+  });
+
+  // The BrAPI Community Test Server's GET /observations honors only the v2.0
+  // singular filter names for germplasm / variable / observationUnit; the
+  // v2.1 plurals are silently ignored. studyDbId(s) is broken in BOTH forms
+  // (singular returns 0 unconditionally, plural is ignored), so the dialect
+  // drops it entirely. Locks in the Issue 1 fix.
+  it('downcasts germplasm/variable/unit plurals to singular and drops studies on the BrAPI Test Server', async () => {
+    const ctx = await connect(fetcher, ['observations'], 'BrAPI Community Test Server');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({
+        studies: ['study2'],
+        germplasm: ['germplasm1'],
+        variables: ['variable1'],
+      }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('germplasmDbId')).toEqual(['germplasm1']);
+    expect(url.searchParams.getAll('observationVariableDbId')).toEqual(['variable1']);
+    expect(url.searchParams.has('studyDbId')).toBe(false);
+    expect(url.searchParams.has('studyDbIds')).toBe(false);
+    expect(url.searchParams.has('germplasmDbIds')).toBe(false);
+    expect(url.searchParams.has('observationVariableDbIds')).toBe(false);
+    expect(result.warnings.some((w) => /dropped filter 'studyDbIds'/.test(w))).toBe(true);
+  });
+
+  // Issue 1 follow-up: when *all* agent-provided filters get dropped by the
+  // dialect, fail with `all_filters_dropped` rather than silently widening
+  // the query to the unfiltered baseline. The agent gets a typed error with
+  // a recovery hint instead of an unfiltered result + warning that's easy
+  // to miss.
+  it('throws all_filters_dropped when every agent filter is dropped by the dialect', async () => {
+    const ctx = await connect(fetcher, ['observations'], 'BrAPI Community Test Server');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await expect(
+      brapiFindObservations.handler(
+        brapiFindObservations.input.parse({ studies: ['study2'] }),
+        ctx,
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'all_filters_dropped', dropped: ['studyDbIds'], dialect: 'brapi-test' },
+    });
+  });
+
+  it('drops observationLevels on the BrAPI Test Server (server silently ignores it)', async () => {
+    const ctx = await connect(fetcher, ['observations'], 'BrAPI Community Test Server');
+    // Anchor with observationUnits so the preflight skip path is taken (a
+    // bare germplasm scope triggers the unscoped-query preflight which
+    // double-fetches).
+    fetcher.mockImplementation(async () => jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({
+        observationUnits: ['observation_unit1'],
+        observationLevels: ['plot'],
+      }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('observationUnitDbId')).toEqual(['observation_unit1']);
+    expect(url.searchParams.has('observationLevels')).toBe(false);
+    expect(url.searchParams.has('observationLevel')).toBe(false);
+    expect(result.warnings.some((w) => /dropped filter 'observationLevels'/.test(w))).toBe(true);
   });
 
   it('preflights unscoped germplasm queries and skips bulk pull above threshold', async () => {

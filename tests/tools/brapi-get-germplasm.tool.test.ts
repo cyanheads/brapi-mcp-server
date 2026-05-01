@@ -21,12 +21,13 @@ import {
   resetTestServices,
 } from './_tool-test-helpers.js';
 
-async function connect(fetcher: MockFetcher) {
+async function connect(fetcher: MockFetcher, serverName?: string) {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
+          ...(serverName ? { serverName } : {}),
           calls: [
             { service: 'germplasm', methods: ['GET'], versions: ['2.1'] },
             { service: 'germplasm/{germplasmDbId}/pedigree', methods: ['GET'], versions: ['2.1'] },
@@ -121,6 +122,52 @@ describe('brapi_get_germplasm tool', () => {
     expect(result.studyCount).toBe(7);
     expect(result.directDescendantCount).toBe(14);
     expect(result.warnings).toEqual([]);
+  });
+
+  // The BrAPI Community Test Server's /studies?germplasmDbIds= is silently
+  // ignored — the singular germplasmDbId works. The brapi-test dialect
+  // translates plural → singular before the studyCount probe goes out.
+  // Locks in the Issue 2 fix.
+  it('uses singular germplasmDbId on the studyCount probe when connected to the BrAPI Test Server', async () => {
+    const ctx = await connect(fetcher, 'BrAPI Community Test Server');
+
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const path = u.pathname;
+      if (path.endsWith('/germplasm/germplasm1')) {
+        return jsonResponse(envelope({ germplasmDbId: 'germplasm1', germplasmName: 'g1' }));
+      }
+      if (path.endsWith('/germplasm/germplasm1/pedigree'))
+        return jsonResponse(envelope({ parents: [] }));
+      if (path.endsWith('/germplasm/germplasm1/attributes'))
+        return jsonResponse(envelope({ data: [] }));
+      if (path.endsWith('/studies')) {
+        // Singular form filters → 1; plural would have been ignored and
+        // returned the unfiltered baseline of 3.
+        const isFilteredSingular = u.searchParams.has('germplasmDbId');
+        return jsonResponse(envelope({ data: [] }, { totalCount: isFilteredSingular ? 1 : 3 }));
+      }
+      if (path.endsWith('/germplasm/germplasm1/progeny')) {
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiGetGermplasm.handler(
+      brapiGetGermplasm.input.parse({ germplasmDbId: 'germplasm1' }),
+      ctx,
+    );
+
+    // Studies probe must have used the singular key (verified by hitting the
+    // mock branch above) — and the count survived the filtered≠baseline check.
+    const studiesCalls = fetcher.mock.calls
+      .map((c) => new URL(String(c[0])))
+      .filter((u) => u.pathname.endsWith('/studies'));
+    const filteredCalls = studiesCalls.filter((u) => u.searchParams.has('germplasmDbId'));
+    const pluralCalls = studiesCalls.filter((u) => u.searchParams.has('germplasmDbIds'));
+    expect(filteredCalls).toHaveLength(1);
+    expect(pluralCalls).toHaveLength(0);
+    expect(result.studyCount).toBe(1);
   });
 
   it('drops studyCount when the upstream silently ignores the germplasm filter', async () => {

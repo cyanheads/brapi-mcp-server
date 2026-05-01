@@ -9,6 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
@@ -17,7 +18,7 @@ import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
-  applyDialectFilters,
+  applyDialectFiltersOrFail,
   asString,
   asStringArray,
   buildRefinementHint,
@@ -136,6 +137,15 @@ export const brapiFindStudies = tool('brapi_find_studies', {
   description:
     'Locate studies matching crop, trial type, season, location, or program. Results are enriched with program/trial/location context in one call. Returns a dataset handle when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  errors: [
+    {
+      reason: 'all_filters_dropped',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The active dialect dropped every filter the agent supplied — the upstream server does not honor any of the requested scope filters on this endpoint, so the call would silently widen to the unfiltered baseline.',
+      recovery:
+        'Drop the unsupported filters and rescope by crop, trialTypes, seasons, programs, trials, studyNames, or active — these filter paths are honored on the active dialect.',
+    },
+  ] as const,
   input: z.object({
     alias: AliasInput,
     crop: z.string().optional().describe('Filter by common crop name (single value).'),
@@ -185,7 +195,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       warnings,
     );
 
-    const filters = applyDialectFilters(dialect, 'studies', merged, warnings);
+    const filters = applyDialectFiltersOrFail(ctx, dialect, 'studies', merged, warnings);
     const route = resolveFindRoute({
       profile,
       dialect,

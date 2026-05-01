@@ -8,7 +8,7 @@
  * @module mcp-server/tools/shared/find-helpers
  */
 
-import { type Context, z } from '@cyanheads/mcp-ts-core';
+import { type Context, type HandlerContext, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
 import type {
@@ -88,12 +88,17 @@ export function mergeFilters(
 }
 
 /**
- * Apply the dialect's GET-filter adapter and append any warnings to the
- * caller's collector. Returns the wire-shape filter map. Mirrors the
- * `(input, …, warnings) → Record` shape of `mergeFilters` so find_* call
- * sites stay readable.
+ * Apply the dialect's GET-filter adapter, append warnings, and fail with a
+ * typed `all_filters_dropped` error when the dialect dropped every supplied
+ * filter — the call would otherwise silently widen to the unfiltered baseline.
+ * Tools that call this MUST declare `'all_filters_dropped'` in their `errors[]`
+ * contract; the helper looks up the recovery hint via `ctx.recoveryFor` and
+ * spreads it into `data` so the wire-level shape stays consistent across the
+ * find_* surface. The bare-baseline call (no filters supplied) is exempt:
+ * `dropped` is empty so the all-dropped predicate is false.
  */
-export function applyDialectFilters(
+export function applyDialectFiltersOrFail(
+  ctx: HandlerContext<'all_filters_dropped'>,
   dialect: BrapiDialect,
   endpoint: string,
   filters: Readonly<Record<string, unknown>>,
@@ -101,6 +106,17 @@ export function applyDialectFilters(
 ): Record<string, unknown> {
   const adapted = dialect.adaptGetFilters(endpoint, filters);
   warnings.push(...adapted.warnings);
+  if (adapted.dropped.length > 0 && Object.keys(adapted.filters).length === 0) {
+    throw ctx.fail(
+      'all_filters_dropped',
+      `Every filter you supplied was dropped by the ${dialect.id} dialect (${adapted.dropped.join(', ')}); the call would silently widen to the unfiltered baseline.`,
+      {
+        ...ctx.recoveryFor('all_filters_dropped'),
+        dropped: adapted.dropped,
+        dialect: dialect.id,
+      },
+    );
+  }
   return adapted.filters;
 }
 

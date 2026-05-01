@@ -19,9 +19,18 @@
  * Result of adapting a filter map for a specific endpoint. `filters` is the
  * wire-shape map (what gets serialized into the URL); `warnings` are
  * operator-facing notes about lossy conversions (multi-value array downcast,
- * filters dropped because the server doesn't honor them, etc.).
+ * filters dropped because the server doesn't honor them, etc.). `dropped` is
+ * the structured list of input keys that were removed entirely so callers can
+ * detect "agent intended to scope, dialect couldn't honor it" without parsing
+ * warning strings.
  */
 export interface DialectAdaptation {
+  /**
+   * Input filter keys the dialect dropped entirely (server doesn't honor them
+   * in any form). Each dropped key also produces a human-readable entry in
+   * `warnings`. Empty when nothing was dropped.
+   */
+  dropped: readonly string[];
   filters: Record<string, unknown>;
   warnings: string[];
 }
