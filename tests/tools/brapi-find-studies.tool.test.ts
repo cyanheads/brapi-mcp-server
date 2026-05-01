@@ -232,6 +232,52 @@ describe('brapi_find_studies tool', () => {
     );
   });
 
+  it('warns when locations / programs / trials filter requested but no rows match', async () => {
+    const ctx = await connect(fetcher);
+    // Server returns rows with locationDbIds the agent didn't ask for —
+    // simulating the CassavaBase pattern where the filter is silently ignored.
+    fetcher.mockResolvedValue(
+      jsonResponse(
+        envelope(
+          {
+            data: [
+              {
+                studyDbId: 's-1',
+                studyName: 'Study One',
+                locationDbId: '23',
+                locationName: 'Mokwa',
+                programDbId: '7',
+                trialDbId: '4',
+              },
+              {
+                studyDbId: 's-2',
+                studyName: 'Study Two',
+                locationDbId: '45',
+                locationName: 'Zaria',
+                programDbId: '7',
+                trialDbId: '4',
+              },
+            ],
+          },
+          { totalCount: 2 },
+        ),
+      ),
+    );
+
+    const result = await brapiFindStudies.handler(
+      brapiFindStudies.input.parse({ locations: ['3'], programs: ['99'], trials: ['88'] }),
+      ctx,
+    );
+
+    expect(result.warnings.some((w) => /Filter 'locations' requested .*\["3"\]/.test(w))).toBe(
+      true,
+    );
+    expect(result.warnings.some((w) => /Filter 'programs' requested .*\["99"\]/.test(w))).toBe(
+      true,
+    );
+    expect(result.warnings.some((w) => /Filter 'trials' requested .*\["88"\]/.test(w))).toBe(true);
+  });
+
   // Cassavabase returns null for many optional string fields rather than
   // omitting them. Schemas use .nullish() so the handler accepts both shapes.
   it('tolerates null values on optional string fields (Cassavabase shape)', async () => {

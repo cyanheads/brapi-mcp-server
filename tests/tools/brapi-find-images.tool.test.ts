@@ -115,6 +115,41 @@ describe('brapi_find_images tool', () => {
     expect(Object.keys(result.distributions.descriptiveOntologyTerms)).toHaveLength(0);
   });
 
+  it('accepts upstream rows with explicit null fields (sparse-server shape)', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(
+      jsonResponse(
+        envelope(
+          {
+            data: [
+              {
+                imageDbId: 'img-1',
+                imageName: null,
+                imageFileName: null,
+                imageFileSize: null,
+                imageHeight: null,
+                imageWidth: null,
+                mimeType: null,
+                imageTimeStamp: null,
+                imageURL: null,
+                observationUnitDbId: null,
+                observationDbIds: null,
+                studyDbId: null,
+                copyright: null,
+                description: null,
+              },
+            ],
+          },
+          { totalCount: 1 },
+        ),
+      ),
+    );
+    const result = await brapiFindImages.handler(brapiFindImages.input.parse({}), ctx);
+    expect(result.returnedCount).toBe(1);
+    expect(result.results[0]?.imageDbId).toBe('img-1');
+    expect(result.results[0]?.imageTimeStamp).toBeNull();
+  });
+
   it('downcasts plural filters to singular when connected to a CassavaBase server', async () => {
     const ctx = await connect(fetcher, ['images'], 'CassavaBase');
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));

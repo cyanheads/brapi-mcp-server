@@ -46,7 +46,6 @@ const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
     programNames: 'programName',
     trialDbIds: 'trialDbId', // observed: works
     trialNames: 'trialName',
-    locationDbIds: 'locationDbId',
     locationNames: 'locationName',
     seasonDbIds: 'seasonDbId', // observed: works
     studyDbIds: 'studyDbId',
@@ -127,10 +126,14 @@ const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
  * Filters CassavaBase silently ignores entirely — drop them from the wire and
  * surface a warning so the agent stops trusting the response as if the filter
  * were honored. `searchText` is a non-spec extension we invented earlier;
- * no SGN-family server recognizes it.
+ * no SGN-family server recognizes it. `locationDbIds` (and the singular
+ * `locationDbId`) on `/studies` was empirically verified to leak: requesting
+ * `locationDbId=3` still returned studies for other locations (Mokwa, Zaria).
+ * Until we have a working alternative, narrow location-wise post-fetch via
+ * `locationName` distribution or a follow-up `brapi_get_study` call.
  */
 const DROPPED_FILTERS: Record<string, ReadonlySet<string>> = {
-  studies: new Set(['searchText']),
+  studies: new Set(['searchText', 'locationDbIds', 'locationDbId']),
   germplasm: new Set(['searchText']),
 };
 

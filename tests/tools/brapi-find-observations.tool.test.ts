@@ -111,6 +111,43 @@ describe('brapi_find_observations tool', () => {
     expect(Object.keys(result.distributions.observationVariableName)).toHaveLength(0);
   });
 
+  it('accepts upstream rows with explicit null fields (CassavaBase shape)', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(
+      jsonResponse(
+        envelope(
+          {
+            data: [
+              {
+                observationDbId: 'obs-1',
+                observationUnitDbId: null,
+                observationVariableDbId: 'var-1',
+                observationVariableName: 'Dry Matter %',
+                studyDbId: 's-1',
+                studyName: null,
+                germplasmDbId: 'g-1',
+                germplasmName: null,
+                observationLevel: null,
+                season: null,
+                value: '32.4',
+                observationTimeStamp: null,
+                collector: null,
+                uploadedBy: null,
+              },
+            ],
+          },
+          { totalCount: 1 },
+        ),
+      ),
+    );
+
+    const result = await brapiFindObservations.handler(brapiFindObservations.input.parse({}), ctx);
+
+    expect(result.returnedCount).toBe(1);
+    expect(result.results[0]?.observationTimeStamp).toBeNull();
+    expect(result.results[0]?.season).toBeNull();
+  });
+
   it('spills to DatasetStore when totalCount exceeds loadLimit', async () => {
     const ctx = await connect(fetcher);
     const all = Array.from({ length: 25 }, (_, i) =>

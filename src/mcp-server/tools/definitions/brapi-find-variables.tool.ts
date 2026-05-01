@@ -205,7 +205,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       .string()
       .optional()
       .describe(
-        'Free-text query. Ranked client-side against variable names, synonyms, and descriptions.',
+        'Free-text query. **Re-ranks (does not subset)** the returned rows client-side — matched rows are promoted to the top, unmatched rows still appear below. Use exact filters (`variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`) to actually narrow the result set. Differs from `brapi_find_germplasm.text`, which subsets client-side.',
       ),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,

@@ -25,6 +25,7 @@ import {
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
+  fkMatchCheck,
   LoadLimitInput,
   loadInitialPage,
   maybeSpill,
@@ -233,6 +234,9 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         distribution: distributions.commonCropName,
         caseInsensitive: true,
       },
+      fkMatchCheck('locations', input.locations, fullRows, 'locationDbId'),
+      fkMatchCheck('programs', input.programs, fullRows, 'programDbId'),
+      fkMatchCheck('trials', input.trials, fullRows, 'trialDbId'),
     ]);
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;

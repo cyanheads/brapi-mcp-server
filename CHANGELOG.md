@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-04-30
+
+Row schemas accept null fields from sparse upstreams. FK match-rate checks across find_studies / find_observations / find_images surface silently-ignored filters as warnings. CassavaBase locationDbIds dropped on /studies.
+
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-04-30
 
 Dialects declare known-dead POST /search routes — raw_search and find_genotype_calls refuse with a typed error before hitting the upstream. Orientation envelope surfaces the active dialect so agents can plan around quirks.

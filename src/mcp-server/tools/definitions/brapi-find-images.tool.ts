@@ -23,6 +23,7 @@ import {
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
+  fkMatchCheck,
   LoadLimitInput,
   loadInitialPage,
   maybeSpill,
@@ -36,34 +37,34 @@ import {
 const ImageRowSchema = z
   .object({
     imageDbId: z.string().describe('Server-side identifier for the image.'),
-    imageName: z.string().optional().describe('Display name.'),
-    imageFileName: z.string().optional().describe('Original uploaded filename.'),
-    imageFileSize: z.number().optional().describe('File size in bytes.'),
-    imageHeight: z.number().optional().describe('Pixel height.'),
-    imageWidth: z.number().optional().describe('Pixel width.'),
-    mimeType: z.string().optional().describe('MIME type (e.g. "image/jpeg").'),
-    imageTimeStamp: z.string().optional().describe('ISO 8601 capture timestamp.'),
+    imageName: z.string().nullish().describe('Display name.'),
+    imageFileName: z.string().nullish().describe('Original uploaded filename.'),
+    imageFileSize: z.number().nullish().describe('File size in bytes.'),
+    imageHeight: z.number().nullish().describe('Pixel height.'),
+    imageWidth: z.number().nullish().describe('Pixel width.'),
+    mimeType: z.string().nullish().describe('MIME type (e.g. "image/jpeg").'),
+    imageTimeStamp: z.string().nullish().describe('ISO 8601 capture timestamp.'),
     imageURL: z
       .string()
-      .optional()
+      .nullish()
       .describe('URL where the bytes live (may be relative to baseUrl or absolute).'),
     observationUnitDbId: z
       .string()
-      .optional()
+      .nullish()
       .describe('FK to the observation unit this image depicts.'),
-    observationUnitName: z.string().optional().describe('Display name of the observation unit.'),
+    observationUnitName: z.string().nullish().describe('Display name of the observation unit.'),
     observationDbIds: z
       .array(z.string().describe('Observation identifier.'))
-      .optional()
+      .nullish()
       .describe('FKs to observations this image is evidence for.'),
-    studyDbId: z.string().optional().describe('FK to the study the image belongs to.'),
-    studyName: z.string().optional().describe('Display name of the study.'),
+    studyDbId: z.string().nullish().describe('FK to the study the image belongs to.'),
+    studyName: z.string().nullish().describe('Display name of the study.'),
     descriptiveOntologyTerms: z
       .array(z.string().describe('Ontology term ID or label.'))
-      .optional()
+      .nullish()
       .describe('Descriptive ontology tags (e.g. "CO_334:plot").'),
-    copyright: z.string().optional().describe('Copyright or rights notice.'),
-    description: z.string().optional().describe('Free-text description.'),
+    copyright: z.string().nullish().describe('Copyright or rights notice.'),
+    description: z.string().nullish().describe('Free-text description.'),
   })
   .passthrough()
   .describe('One BrAPI image metadata record.');
@@ -234,6 +235,8 @@ export const brapiFindImages = tool('brapi_find_images', {
         requestedValues: input.descriptiveOntologyTerms,
         distribution: distributions.descriptiveOntologyTerms,
       },
+      fkMatchCheck('studies', input.studies, fullRows, 'studyDbId'),
+      fkMatchCheck('observationUnits', input.observationUnits, fullRows, 'observationUnitDbId'),
     ]);
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;

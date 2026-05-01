@@ -40,33 +40,33 @@ const CallRowSchema = z
   .object({
     callSetDbId: z
       .string()
-      .optional()
+      .nullish()
       .describe('FK to the call set (one germplasm × one variant set = one call set).'),
-    callSetName: z.string().optional().describe('Display name of the call set.'),
-    variantDbId: z.string().optional().describe('FK to the variant being called.'),
-    variantName: z.string().optional().describe('Display name / alias of the variant.'),
-    variantSetDbId: z.string().optional().describe('FK to the variant set the call belongs to.'),
+    callSetName: z.string().nullish().describe('Display name of the call set.'),
+    variantDbId: z.string().nullish().describe('FK to the variant being called.'),
+    variantName: z.string().nullish().describe('Display name / alias of the variant.'),
+    variantSetDbId: z.string().nullish().describe('FK to the variant set the call belongs to.'),
     genotype: z
       .object({
         values: z
           .array(z.string().describe('Per-allele value string.'))
-          .optional()
+          .nullish()
           .describe('Encoded allele values — interpret using top-level `callFormatting`.'),
       })
       .passthrough()
-      .optional()
+      .nullish()
       .describe(
         'Structured genotype payload (array of allele values plus server-specific fields).',
       ),
     genotypeValue: z
       .string()
-      .optional()
+      .nullish()
       .describe(
         'Legacy flat string form of the call (provided by some servers instead of `genotype`).',
       ),
     phaseSet: z
       .string()
-      .optional()
+      .nullish()
       .describe('Phase-set identifier linking calls that share a haplotype phase.'),
   })
   .passthrough()
@@ -88,19 +88,19 @@ const OutputSchema = z.object({
     .object({
       expandHomozygotes: z
         .boolean()
-        .optional()
+        .nullish()
         .describe('When true, homozygous calls are expanded to both alleles.'),
       unknownString: z
         .string()
-        .optional()
+        .nullish()
         .describe('String used for unknown / missing calls (often "." or "N").'),
       sepPhased: z
         .string()
-        .optional()
+        .nullish()
         .describe('Separator between phased allele values (typically "|").'),
       sepUnphased: z
         .string()
-        .optional()
+        .nullish()
         .describe('Separator between unphased allele values (typically "/").'),
     })
     .describe('Genotype-encoding hints echoed by the server.'),

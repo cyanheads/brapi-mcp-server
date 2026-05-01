@@ -595,6 +595,26 @@ export function checkFilterMatchRates(
   }
 }
 
+/**
+ * Build a `FilterMatchCheck` for an FK identifier filter — the user's input
+ * values are compared against a fresh distribution computed over `fieldName`
+ * on the returned rows. Surfaces silently-ignored FK filters as warnings
+ * without polluting the public `result.distributions` shape with raw DbId
+ * frequencies (which carry no semantic meaning to the agent).
+ */
+export function fkMatchCheck(
+  paramName: string,
+  requestedValues: readonly (string | number | boolean)[] | undefined,
+  rows: readonly Record<string, unknown>[],
+  fieldName: string,
+): FilterMatchCheck {
+  return {
+    paramName,
+    requestedValues,
+    distribution: computeDistribution(rows, (r) => asString(r[fieldName])),
+  };
+}
+
 export interface RefinementHintOptions {
   /**
    * Filter parameter names available on the calling tool. Used to suggest

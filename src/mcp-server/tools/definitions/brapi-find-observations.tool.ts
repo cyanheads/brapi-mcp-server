@@ -24,6 +24,7 @@ import {
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
+  fkMatchCheck,
   LoadLimitInput,
   loadInitialPage,
   maybeSpill,
@@ -36,61 +37,61 @@ import {
 
 const ObservationRowSchema = z
   .object({
-    observationDbId: z.string().optional().describe('Server-side identifier for the observation.'),
+    observationDbId: z.string().nullish().describe('Server-side identifier for the observation.'),
     observationUnitDbId: z
       .string()
-      .optional()
+      .nullish()
       .describe('FK to the observation unit (plot / plant / sample) that carries the measurement.'),
-    observationUnitName: z.string().optional().describe('Display name of the observation unit.'),
+    observationUnitName: z.string().nullish().describe('Display name of the observation unit.'),
     observationVariableDbId: z
       .string()
-      .optional()
+      .nullish()
       .describe('FK to the observation variable (trait) measured.'),
     observationVariableName: z
       .string()
-      .optional()
+      .nullish()
       .describe('Display name of the observation variable.'),
-    studyDbId: z.string().optional().describe('FK to the study the observation belongs to.'),
-    studyName: z.string().optional().describe('Display name of the study.'),
+    studyDbId: z.string().nullish().describe('FK to the study the observation belongs to.'),
+    studyName: z.string().nullish().describe('Display name of the study.'),
     germplasmDbId: z
       .string()
-      .optional()
+      .nullish()
       .describe('FK to the germplasm the observation was taken on.'),
-    germplasmName: z.string().optional().describe('Display name of the germplasm.'),
-    observationLevel: z.string().optional().describe('Unit level — e.g. "plot", "plant", "field".'),
+    germplasmName: z.string().nullish().describe('Display name of the germplasm.'),
+    observationLevel: z.string().nullish().describe('Unit level — e.g. "plot", "plant", "field".'),
     season: z
       .union([
         z.string().describe('Season identifier as a flat string (older BrAPI servers).'),
         z
           .object({
-            seasonDbId: z.string().optional().describe('Server-side season identifier.'),
+            seasonDbId: z.string().nullish().describe('Server-side season identifier.'),
             year: z
               .union([
                 z.string().describe('Calendar year as a string (e.g. "2024").'),
                 z.number().describe('Calendar year as an integer (e.g. 2024).'),
               ])
-              .optional()
+              .nullish()
               .describe('Calendar year — accepts string or numeric form depending on server.'),
-            season: z.string().optional().describe('Season label (e.g. "wet", "dry", "Q1").'),
+            season: z.string().nullish().describe('Season label (e.g. "wet", "dry", "Q1").'),
             seasonName: z
               .string()
-              .optional()
+              .nullish()
               .describe('Season display name (BrAPI v2.1 alternate field).'),
           })
           .passthrough()
           .describe('Structured season block per BrAPI v2.1.'),
       ])
-      .optional()
+      .nullish()
       .describe(
         'Season — either a flat string or a structured `{seasonDbId, year, season}` object depending on the server.',
       ),
     value: z
       .string()
-      .optional()
+      .nullish()
       .describe('Recorded measurement value (stringified per BrAPI spec).'),
-    observationTimeStamp: z.string().optional().describe('ISO 8601 timestamp of the observation.'),
-    collector: z.string().optional().describe('Name or ID of the person who collected the value.'),
-    uploadedBy: z.string().optional().describe('Name or ID of the user who uploaded the record.'),
+    observationTimeStamp: z.string().nullish().describe('ISO 8601 timestamp of the observation.'),
+    collector: z.string().nullish().describe('Name or ID of the person who collected the value.'),
+    uploadedBy: z.string().nullish().describe('Name or ID of the user who uploaded the record.'),
   })
   .passthrough()
   .describe('One BrAPI observation record.');
@@ -271,6 +272,10 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         distribution: distributions.observationLevel,
         caseInsensitive: true,
       },
+      fkMatchCheck('studies', input.studies, fullRows, 'studyDbId'),
+      fkMatchCheck('germplasm', input.germplasm, fullRows, 'germplasmDbId'),
+      fkMatchCheck('variables', input.variables, fullRows, 'observationVariableDbId'),
+      fkMatchCheck('observationUnits', input.observationUnits, fullRows, 'observationUnitDbId'),
     ]);
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;

@@ -38,6 +38,30 @@ describe('cassavabaseDialect', () => {
       expect(result.warnings[0]).toMatch(/dropped filter 'searchText'/);
     });
 
+    // CassavaBase ignores locationDbId on /studies even in singular form
+    // (verified against the live server). Drop with a warning rather than
+    // silently translating to a parameter that still leaks unrelated rows.
+    it('drops locationDbIds on /studies (server ignores it even in singular)', () => {
+      const resultPlural = cassavabaseDialect.adaptGetFilters('studies', {
+        commonCropNames: ['Cassava'],
+        locationDbIds: ['3'],
+      });
+      expect(resultPlural.filters).toEqual({ commonCropName: 'Cassava' });
+      expect(resultPlural.filters.locationDbId).toBeUndefined();
+      expect(resultPlural.warnings.some((w) => /dropped filter 'locationDbIds'/.test(w))).toBe(
+        true,
+      );
+
+      const resultSingular = cassavabaseDialect.adaptGetFilters('studies', {
+        commonCropNames: ['Cassava'],
+        locationDbId: '3',
+      });
+      expect(resultSingular.filters).toEqual({ commonCropName: 'Cassava' });
+      expect(resultSingular.warnings.some((w) => /dropped filter 'locationDbId'/.test(w))).toBe(
+        true,
+      );
+    });
+
     it('downcasts multi-value arrays to first value with loud warning', () => {
       const result = cassavabaseDialect.adaptGetFilters('studies', {
         seasonDbIds: ['2022', '2023', '2024'],

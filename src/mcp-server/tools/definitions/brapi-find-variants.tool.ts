@@ -37,7 +37,7 @@ const VariantRowSchema = z
     variantDbId: z.string().describe('Server-side identifier for the variant.'),
     variantNames: z
       .array(z.string().describe('Variant name or alias.'))
-      .optional()
+      .nullish()
       .describe('Known names / aliases for this variant.'),
     variantSetDbId: z
       .union([
@@ -46,13 +46,13 @@ const VariantRowSchema = z
           .array(z.string().describe('One variant-set FK.'))
           .describe('Variant-set FK array — a variant may belong to multiple sets.'),
       ])
-      .optional()
+      .nullish()
       .describe(
         'FK to the variant set(s) this variant belongs to. May be a string or string[] depending on server.',
       ),
     variantSetDbIds: z
       .array(z.string().describe('Variant-set FK.'))
-      .optional()
+      .nullish()
       .describe('Plural-form FK array per BrAPI v2.1 spec, when the server uses it.'),
     variantType: z.string().nullish().describe('Variant type (e.g. "SNP", "INDEL", "DUP").'),
     referenceBases: z
