@@ -11,10 +11,12 @@
 
 import { type Context, z } from '@cyanheads/mcp-ts-core';
 import type { BrapiClient, BrapiRequestOptions } from '@/services/brapi-client/index.js';
+import { detectDialectId, dialectEnvVar, getDialectById } from '@/services/brapi-dialect/index.js';
 import type {
   CapabilityLookupOptions,
   CapabilityRegistry,
 } from '@/services/capability-registry/index.js';
+import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 
 /**
@@ -75,6 +77,31 @@ export const OrientationCapabilitiesSchema = z
   })
   .describe('Capability profile summary. Downstream tools pre-flight against `supported`.');
 
+export const OrientationDialectSchema = z
+  .object({
+    id: z
+      .string()
+      .describe(
+        'Active dialect id (e.g. "spec", "cassavabase"). Names a registered adapter that translates outbound filters and declares known-dead routes.',
+      ),
+    source: z
+      .enum(['env-override', 'server-name', 'organization-name', 'fallback'])
+      .describe(
+        'Where the dialect id came from: pinned via BRAPI_<ALIAS>_DIALECT, matched on /serverinfo serverName / organizationName, or fell through to the spec passthrough.',
+      ),
+    envVar: z
+      .string()
+      .describe(
+        'The env var an operator sets to pin the dialect for this alias (e.g. BRAPI_DEFAULT_DIALECT). Surfaced so agents can guide operators when detection misfires.',
+      ),
+    disabledSearchEndpoints: z
+      .array(z.string().describe('A POST /search/{noun} route the dialect routes around.'))
+      .describe(
+        'POST /search nouns the active dialect treats as known-dead. Tools using these routes will refuse with a recovery hint.',
+      ),
+  })
+  .describe('Active dialect summary — agents can plan around quirks declared here.');
+
 export const OrientationContentSchema = z
   .object({
     crops: z
@@ -114,6 +141,9 @@ export const OrientationEnvelopeSchema = z.object({
   auth: OrientationAuthSchema.describe('Auth summary for the active connection.'),
   capabilities: OrientationCapabilitiesSchema.describe(
     'Capability profile derived from /serverinfo.',
+  ),
+  dialect: OrientationDialectSchema.describe(
+    'Active dialect adapter — translates outbound filters and declares known-dead routes for this server.',
   ),
   content: OrientationContentSchema.describe('Content summary (crops + optional totals).'),
   notes: z
@@ -183,6 +213,8 @@ export async function buildOrientationEnvelope(
   if (connection.resolvedAuth?.headerName) auth.headerName = connection.resolvedAuth.headerName;
   if (connection.resolvedAuth?.expiresAt) auth.expiresAt = connection.resolvedAuth.expiresAt;
 
+  const dialect = buildDialectSummary(connection, profile);
+
   return {
     alias: connection.alias,
     baseUrl: connection.baseUrl,
@@ -193,9 +225,26 @@ export async function buildOrientationEnvelope(
       supported: supportedServices,
       notableGaps,
     },
+    dialect,
     content,
     notes,
     fetchedAt: new Date().toISOString(),
+  };
+}
+
+function buildDialectSummary(
+  connection: RegisteredServer,
+  profile: CapabilityProfile,
+): OrientationEnvelope['dialect'] {
+  const detection = detectDialectId(connection.alias, profile);
+  const dialect = getDialectById(detection.id);
+  return {
+    id: detection.id,
+    source: detection.source,
+    envVar: dialectEnvVar(connection.alias),
+    disabledSearchEndpoints: dialect.disabledSearchEndpoints
+      ? Array.from(dialect.disabledSearchEndpoints).sort()
+      : [],
   };
 }
 
@@ -281,6 +330,16 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
   if (envelope.capabilities.notableGaps.length > 0) {
     lines.push(
       `- Notable gaps (missing from the common floor): ${envelope.capabilities.notableGaps.join(', ')}`,
+    );
+  }
+
+  lines.push('');
+  lines.push('## Dialect');
+  lines.push(`- **Active:** \`${envelope.dialect.id}\` (detected from ${envelope.dialect.source})`);
+  lines.push(`- **Pin override:** \`${envelope.dialect.envVar}\``);
+  if (envelope.dialect.disabledSearchEndpoints.length > 0) {
+    lines.push(
+      `- **POST /search routes routed around:** ${envelope.dialect.disabledSearchEndpoints.join(', ')}`,
     );
   }
 

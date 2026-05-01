@@ -10,11 +10,13 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
+  applyDialectFilters,
   asString,
   buildRefinementHint,
   checkFilterMatchRates,
@@ -108,6 +110,7 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 const SERVER_TO_USER: Record<string, string> = {
+  // Plurals — BrAPI v2.1 spec.
   imageDbIds: 'images',
   observationUnitDbIds: 'observationUnits',
   observationDbIds: 'observations',
@@ -115,6 +118,14 @@ const SERVER_TO_USER: Record<string, string> = {
   imageFileNames: 'imageFileNames',
   mimeTypes: 'mimeTypes',
   descriptiveOntologyTerms: 'descriptiveOntologyTerms',
+  // Singulars — SGN-family dialects.
+  imageDbId: 'images',
+  observationUnitDbId: 'observationUnits',
+  observationDbId: 'observations',
+  studyDbId: 'studies',
+  imageFileName: 'imageFileNames',
+  mimeType: 'mimeTypes',
+  descriptiveOntologyTerm: 'descriptiveOntologyTerms',
 };
 
 export const brapiFindImages = tool('brapi_find_images', {
@@ -159,8 +170,10 @@ export const brapiFindImages = tool('brapi_find_images', {
       capabilityLookup,
     );
 
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
     const warnings: string[] = [];
-    const filters = mergeFilters(
+    const merged = mergeFilters(
       {
         imageDbIds: input.images,
         observationUnitDbIds: input.observationUnits,
@@ -173,6 +186,8 @@ export const brapiFindImages = tool('brapi_find_images', {
       input.extraFilters,
       warnings,
     );
+
+    const filters = applyDialectFilters(dialect, 'images', merged, warnings);
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
     const firstPage = await loadInitialPage<Record<string, unknown>>(

@@ -10,6 +10,7 @@
 import { createApp } from '@cyanheads/mcp-ts-core';
 import { getServerConfig } from '@/config/server-config.js';
 import { initBrapiClient } from '@/services/brapi-client/index.js';
+import { initBrapiDialectRegistry } from '@/services/brapi-dialect/index.js';
 import { initCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { initDatasetStore } from '@/services/dataset-store/index.js';
 import { initOntologyResolver } from '@/services/ontology-resolver/index.js';
@@ -48,6 +49,7 @@ await createApp({
   setup() {
     initBrapiClient(serverConfig);
     initCapabilityRegistry(serverConfig);
+    initBrapiDialectRegistry();
     initReferenceDataCache(serverConfig);
     initDatasetStore(serverConfig);
     initServerRegistry(serverConfig);

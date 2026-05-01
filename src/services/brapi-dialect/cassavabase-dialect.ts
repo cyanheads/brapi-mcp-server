@@ -1,0 +1,202 @@
+/**
+ * @fileoverview Dialect for CassavaBase (and other CXGN / SGN-derived BrAPI
+ * deployments — Sweetpotatobase, Yambase, Musabase, BananaBase, etc.). These
+ * servers run the SGN BrAPI implementation, which predates the BrAPI v2.1
+ * filter-name normalization and only honors the older **singular** query
+ * parameters on GET list endpoints. Sending `commonCropNames=Cassava` is
+ * silently ignored upstream — the singular `commonCropName=Cassava` works.
+ * Empirically verified against `https://cassavabase.org/brapi/v2` on
+ * 2026-04-30.
+ *
+ * The dialect:
+ *   1. Translates plural filter keys to their singular equivalents per
+ *      endpoint, downcasting array values to the first element with a loud
+ *      warning when more than one value was supplied (the GET surface can't
+ *      express multi-value filters; the spec-defined POST `/search/{noun}`
+ *      route is advertised but unresponsive in practice).
+ *   2. Drops filters that the server doesn't honor at all (`searchText` —
+ *      we invented this earlier; not in the BrAPI v2.1 spec, no SGN-family
+ *      server honors it).
+ *
+ * Future capabilities (search-body translation, output normalization) attach
+ * here as optional methods on the same dialect.
+ *
+ * @module services/brapi-dialect/cassavabase-dialect
+ */
+
+import type { BrapiDialect, DialectAdaptation } from './types.js';
+
+/**
+ * Plural BrAPI v2.1 filter key → singular form CassavaBase honors. Keyed by
+ * endpoint resource segment (matches the path's first segment, no leading
+ * slash). Endpoints not listed here pass through with zero translation.
+ *
+ * Mappings reflect what's empirically verified to filter; entries marked
+ * `// observed: works` were narrowed against a live CassavaBase deployment.
+ * Other singulars follow the same naming pattern but haven't been
+ * independently verified — the post-fetch `checkFilterMatchRates` heuristic
+ * in `find-helpers` will surface a warning when a translation doesn't reduce
+ * the result set as expected.
+ */
+const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
+  studies: {
+    commonCropNames: 'commonCropName', // observed: works
+    studyTypes: 'studyType',
+    programDbIds: 'programDbId', // observed: works
+    programNames: 'programName',
+    trialDbIds: 'trialDbId', // observed: works
+    trialNames: 'trialName',
+    locationDbIds: 'locationDbId',
+    locationNames: 'locationName',
+    seasonDbIds: 'seasonDbId', // observed: works
+    studyDbIds: 'studyDbId',
+    studyNames: 'studyName',
+    studyCodes: 'studyCode',
+    studyPUIs: 'studyPUI',
+    externalReferenceIds: 'externalReferenceId',
+    externalReferenceSources: 'externalReferenceSource',
+  },
+  germplasm: {
+    commonCropNames: 'commonCropName',
+    germplasmDbIds: 'germplasmDbId',
+    germplasmNames: 'germplasmName',
+    germplasmPUIs: 'germplasmPUI',
+    accessionNumbers: 'accessionNumber',
+    collections: 'collection',
+    synonyms: 'synonym',
+    programDbIds: 'programDbId',
+    trialDbIds: 'trialDbId',
+    studyDbIds: 'studyDbId',
+    externalReferenceIds: 'externalReferenceId',
+  },
+  observations: {
+    studyDbIds: 'studyDbId', // observed: works
+    germplasmDbIds: 'germplasmDbId',
+    observationVariableDbIds: 'observationVariableDbId',
+    observationUnitDbIds: 'observationUnitDbId',
+    observationDbIds: 'observationDbId',
+    seasonDbIds: 'seasonDbId',
+    programDbIds: 'programDbId',
+    trialDbIds: 'trialDbId',
+    observationLevels: 'observationLevel',
+  },
+  locations: {
+    locationDbIds: 'locationDbId',
+    locationNames: 'locationName',
+    countryCodes: 'countryCode',
+    locationTypes: 'locationType',
+    abbreviations: 'abbreviation',
+  },
+  variables: {
+    observationVariableDbIds: 'observationVariableDbId',
+    observationVariableNames: 'observationVariableName',
+    observationVariablePUIs: 'observationVariablePUI',
+    traitClasses: 'traitClass',
+    methodDbIds: 'methodDbId',
+    scaleDbIds: 'scaleDbId',
+    ontologyDbIds: 'ontologyDbId',
+  },
+  images: {
+    imageDbIds: 'imageDbId',
+    observationUnitDbIds: 'observationUnitDbId',
+    observationDbIds: 'observationDbId',
+    studyDbIds: 'studyDbId',
+    imageFileNames: 'imageFileName',
+    mimeTypes: 'mimeType',
+    descriptiveOntologyTerms: 'descriptiveOntologyTerm',
+  },
+  variants: {
+    variantSetDbIds: 'variantSetDbId',
+    variantDbIds: 'variantDbId',
+    referenceDbIds: 'referenceDbId',
+  },
+  trials: {
+    commonCropNames: 'commonCropName',
+    programDbIds: 'programDbId',
+    trialDbIds: 'trialDbId',
+    trialNames: 'trialName',
+  },
+  programs: {
+    commonCropNames: 'commonCropName',
+    programDbIds: 'programDbId',
+    programNames: 'programName',
+  },
+};
+
+/**
+ * Filters CassavaBase silently ignores entirely — drop them from the wire and
+ * surface a warning so the agent stops trusting the response as if the filter
+ * were honored. `searchText` is a non-spec extension we invented earlier;
+ * no SGN-family server recognizes it.
+ */
+const DROPPED_FILTERS: Record<string, ReadonlySet<string>> = {
+  studies: new Set(['searchText']),
+  germplasm: new Set(['searchText']),
+};
+
+const EMPTY_DROP_SET: ReadonlySet<string> = new Set();
+
+/**
+ * POST `/search/{noun}` routes CassavaBase advertises in `/calls` but does not
+ * actually serve. Probing them in practice yields hangs, 5xx responses, or
+ * empty envelopes that look successful but never carry data. Curated GET
+ * tools (which the dialect already adapts to singular filters) cover the
+ * same surface, so we route agents away from these dead endpoints with a
+ * clear recovery hint instead of letting the request hang.
+ *
+ * Read endpoints we have curated GET tools for are listed; `calls` (genotype
+ * data) is intentionally absent — async POST is the only realistic delivery
+ * for bulk variant calls and we have no contrary evidence that route is dead.
+ */
+const DISABLED_SEARCH_ENDPOINTS: ReadonlySet<string> = new Set([
+  'germplasm',
+  'studies',
+  'observations',
+  'observationunits',
+  'locations',
+  'variables',
+  'images',
+  'variants',
+  'variantsets',
+  'samples',
+  'callsets',
+]);
+
+export const cassavabaseDialect: BrapiDialect = {
+  id: 'cassavabase',
+  disabledSearchEndpoints: DISABLED_SEARCH_ENDPOINTS,
+  adaptGetFilters(endpoint, filters): DialectAdaptation {
+    const mapping = PLURAL_TO_SINGULAR[endpoint] ?? {};
+    const dropped = DROPPED_FILTERS[endpoint] ?? EMPTY_DROP_SET;
+    const out: Record<string, unknown> = {};
+    const warnings: string[] = [];
+
+    for (const [key, value] of Object.entries(filters)) {
+      if (value === undefined) continue;
+      if (dropped.has(key)) {
+        warnings.push(
+          `Cassavabase dialect: dropped filter '${key}' — this server does not honor it. Adjust the query or omit the filter.`,
+        );
+        continue;
+      }
+      const target = mapping[key];
+      if (!target) {
+        out[key] = value;
+        continue;
+      }
+      if (Array.isArray(value)) {
+        if (value.length === 0) continue;
+        out[target] = value[0];
+        if (value.length > 1) {
+          warnings.push(
+            `Cassavabase dialect: '${key}' downcast to '${target}'; only the first value (${JSON.stringify(value[0])}) was sent — Cassavabase's GET /${endpoint} accepts a single value per filter, not arrays. Run separate calls for the other values, or use a curated tool that paginates over them.`,
+          );
+        }
+      } else {
+        out[target] = value;
+      }
+    }
+
+    return { filters: out, warnings };
+  },
+};

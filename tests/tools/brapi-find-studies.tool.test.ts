@@ -35,13 +35,13 @@ function studyRow(dbId: string, extra: Record<string, unknown> = {}): Record<str
   };
 }
 
-async function connect(fetcher: MockFetcher, calls = ['studies']) {
+async function connect(fetcher: MockFetcher, calls = ['studies'], serverName = 'Test') {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
-          serverName: 'Test',
+          serverName,
           calls: calls.map((service) => ({ service, methods: ['GET'], versions: ['2.1'] })),
         }),
       );
@@ -185,6 +185,51 @@ describe('brapi_find_studies tool', () => {
         ctx,
       ),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+  });
+
+  it('downcasts plural filters to singular when connected to a CassavaBase server', async () => {
+    const ctx = await connect(fetcher, ['studies'], 'CassavaBase');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    const result = await brapiFindStudies.handler(
+      brapiFindStudies.input.parse({
+        crop: 'Cassava',
+        seasons: ['2022'],
+        programs: ['162'],
+      }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('commonCropName')).toEqual(['Cassava']);
+    expect(url.searchParams.getAll('seasonDbId')).toEqual(['2022']);
+    expect(url.searchParams.getAll('programDbId')).toEqual(['162']);
+    expect(url.searchParams.has('commonCropNames')).toBe(false);
+    expect(url.searchParams.has('seasonDbIds')).toBe(false);
+    expect(url.searchParams.has('programDbIds')).toBe(false);
+    expect(result.appliedFilters).toEqual({
+      commonCropName: 'Cassava',
+      seasonDbId: '2022',
+      programDbId: '162',
+    });
+  });
+
+  it('warns when CassavaBase dialect downcasts a multi-value array', async () => {
+    const ctx = await connect(fetcher, ['studies'], 'CassavaBase');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    const result = await brapiFindStudies.handler(
+      brapiFindStudies.input.parse({
+        seasons: ['2022', '2023', '2024'],
+      }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('seasonDbId')).toEqual(['2022']);
+    expect(result.warnings.some((w) => /'seasonDbIds' downcast to 'seasonDbId'/.test(w))).toBe(
+      true,
+    );
   });
 
   // Cassavabase returns null for many optional string fields rather than

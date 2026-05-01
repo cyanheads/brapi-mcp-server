@@ -11,6 +11,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getDatasetStore } from '@/services/dataset-store/index.js';
 import {
@@ -21,6 +22,7 @@ import {
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
+  applyDialectFilters,
   asString,
   buildRefinementHint,
   checkFilterMatchRates,
@@ -160,14 +162,24 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 const SERVER_TO_USER: Record<string, string> = {
+  // Plurals — BrAPI v2.1 spec.
   observationVariableDbIds: 'variables',
   observationVariableNames: 'variableNames',
   observationVariablePUIs: 'variablePUIs',
   traitClasses: 'traitClasses',
   ontologyDbIds: 'ontologies',
-  studyDbId: 'studies',
   methodDbIds: 'methods',
   scaleDbIds: 'scales',
+  // Singulars — SGN-family dialects + BrAPI's already-singular variable filters.
+  observationVariableDbId: 'variables',
+  observationVariableName: 'variableNames',
+  observationVariablePUI: 'variablePUIs',
+  traitClass: 'traitClasses',
+  ontologyDbId: 'ontologies',
+  methodDbId: 'methods',
+  scaleDbId: 'scales',
+  // Already-singular per BrAPI spec — same on the wire either way.
+  studyDbId: 'studies',
   commonCropName: 'crop',
 };
 
@@ -222,8 +234,10 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
     const hasOntologyEndpoint = Boolean(profile.supported.ontologies);
 
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
     const warnings: string[] = [];
-    const filters = mergeFilters(
+    const merged = mergeFilters(
       {
         observationVariableDbIds: input.variables,
         observationVariableNames: input.variableNames,
@@ -238,6 +252,8 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       input.extraFilters,
       warnings,
     );
+
+    const filters = applyDialectFilters(dialect, 'variables', merged, warnings);
 
     if ((input.studies?.length ?? 0) > 1) {
       warnings.push(

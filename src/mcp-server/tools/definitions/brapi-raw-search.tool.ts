@@ -8,11 +8,13 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   type BrapiPagination,
   type BrapiRequestOptions,
   getBrapiClient,
 } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import { AliasInput, buildRequestOptions } from '../shared/find-helpers.js';
 import { suggestForSearch } from '../shared/raw-routing-hints.js';
@@ -57,6 +59,15 @@ export const brapiRawSearch = tool('brapi_raw_search', {
   description:
     'Passthrough to any BrAPI POST /search/{noun} endpoint, returning the resolved envelope (async polling resolved upstream). Raw passthrough — no distributions, foreign-key resolution, or dataset spillover applied.',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  errors: [
+    {
+      reason: 'search_endpoint_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The active dialect declares this POST /search/{noun} route as known-dead on this server',
+      recovery:
+        'Use the curated find_* tool for this noun (it routes through GET filters instead) or pin a different dialect via BRAPI_<ALIAS>_DIALECT.',
+    },
+  ] as const,
   input: z.object({
     alias: AliasInput,
     noun: z
@@ -78,6 +89,20 @@ export const brapiRawSearch = tool('brapi_raw_search', {
 
     const requestOptions: BrapiRequestOptions = {};
     if (connection.resolvedAuth) requestOptions.auth = connection.resolvedAuth;
+
+    const dialect = await resolveDialect(connection, ctx, requestOptions);
+    if (dialect.disabledSearchEndpoints?.has(input.noun)) {
+      const nudge = suggestForSearch(input.noun);
+      throw ctx.fail(
+        'search_endpoint_disabled',
+        `Dialect '${dialect.id}' marks POST /search/${input.noun} as known-dead on this server (advertised in /calls but unresponsive in practice).${nudge ? ` ${nudge}` : ''}`,
+        {
+          dialectId: dialect.id,
+          noun: input.noun,
+          ...ctx.recoveryFor('search_endpoint_disabled'),
+        },
+      );
+    }
 
     const response = await client.postSearch<unknown>(
       connection.baseUrl,

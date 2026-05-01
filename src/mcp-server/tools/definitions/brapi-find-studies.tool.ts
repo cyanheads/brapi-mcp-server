@@ -11,11 +11,13 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
+  applyDialectFilters,
   asString,
   asStringArray,
   buildRefinementHint,
@@ -103,8 +105,11 @@ type Output = z.infer<typeof OutputSchema>;
 
 /** Server-side filter key → user-facing tool param name. Used in format() to
  * render `Applied filters` so the user can correlate what they typed with
- * what got sent upstream. */
+ * what got sent upstream. Both plural (BrAPI v2.1 spec) and singular forms
+ * are listed because dialect adapters may downcast to singular before the
+ * call; the rendered map should still trace back to the user's param. */
 const SERVER_TO_USER: Record<string, string> = {
+  // Plurals — BrAPI v2.1 spec, used by the `spec` dialect.
   commonCropNames: 'crop',
   studyTypes: 'trialTypes',
   seasonDbIds: 'seasons',
@@ -112,13 +117,21 @@ const SERVER_TO_USER: Record<string, string> = {
   programDbIds: 'programs',
   trialDbIds: 'trials',
   studyNames: 'studyNames',
+  // Singulars — emitted by SGN-family dialects (cassavabase, etc.).
+  commonCropName: 'crop',
+  studyType: 'trialTypes',
+  seasonDbId: 'seasons',
+  locationDbId: 'locations',
+  programDbId: 'programs',
+  trialDbId: 'trials',
+  studyName: 'studyNames',
+  // Scalars — same on the wire either way.
   active: 'active',
-  searchText: 'text',
 };
 
 export const brapiFindStudies = tool('brapi_find_studies', {
   description:
-    'Locate studies matching crop, trial type, season, location, program, or free-text criteria. Results are enriched with program/trial/location context in one call. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Locate studies matching crop, trial type, season, location, or program. Results are enriched with program/trial/location context in one call. Returns a dataset handle when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     alias: AliasInput,
@@ -133,10 +146,6 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     trials: z.array(z.string()).optional().describe('Filter by trialDbIds.'),
     studyNames: z.array(z.string()).optional().describe('Filter by study display name.'),
     active: z.boolean().optional().describe('Restrict to active / inactive studies.'),
-    text: z
-      .string()
-      .optional()
-      .describe('Free-text search across study fields (server-supported subset).'),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
@@ -160,8 +169,10 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       capabilityLookup,
     );
 
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
     const warnings: string[] = [];
-    const filters = mergeFilters(
+    const merged = mergeFilters(
       {
         commonCropNames: input.crop !== undefined ? [input.crop] : undefined,
         studyTypes: input.trialTypes,
@@ -171,11 +182,12 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         trialDbIds: input.trials,
         studyNames: input.studyNames,
         active: input.active,
-        searchText: input.text,
       },
       input.extraFilters,
       warnings,
     );
+
+    const filters = applyDialectFilters(dialect, 'studies', merged, warnings);
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
     const firstPage = await loadInitialPage<Record<string, unknown>>(
@@ -234,7 +246,6 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         'trials',
         'studyNames',
         'active',
-        'text',
       ],
     });
 

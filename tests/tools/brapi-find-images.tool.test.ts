@@ -38,13 +38,13 @@ function imgRow(extra: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-async function connect(fetcher: MockFetcher, calls = ['images']) {
+async function connect(fetcher: MockFetcher, calls = ['images'], serverName = 'Test') {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
-          serverName: 'Test',
+          serverName,
           calls: calls.map((service) => ({ service, methods: ['GET'], versions: ['2.1'] })),
         }),
       );
@@ -113,6 +113,25 @@ describe('brapi_find_images tool', () => {
     const result = await brapiFindImages.handler(brapiFindImages.input.parse({}), ctx);
     expect(result.returnedCount).toBe(1);
     expect(Object.keys(result.distributions.descriptiveOntologyTerms)).toHaveLength(0);
+  });
+
+  it('downcasts plural filters to singular when connected to a CassavaBase server', async () => {
+    const ctx = await connect(fetcher, ['images'], 'CassavaBase');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await brapiFindImages.handler(
+      brapiFindImages.input.parse({
+        studies: ['s-1'],
+        mimeTypes: ['image/jpeg'],
+      }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('studyDbId')).toEqual(['s-1']);
+    expect(url.searchParams.getAll('mimeType')).toEqual(['image/jpeg']);
+    expect(url.searchParams.has('studyDbIds')).toBe(false);
+    expect(url.searchParams.has('mimeTypes')).toBe(false);
   });
 
   it('format() renders image metadata including mime, dims, study', async () => {

@@ -10,11 +10,13 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
+  applyDialectFilters,
   asString,
   buildRefinementHint,
   checkFilterMatchRates,
@@ -122,6 +124,7 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 const SERVER_TO_USER: Record<string, string> = {
+  // Plurals — BrAPI v2.1 spec, used by the `spec` dialect.
   germplasmNames: 'names',
   germplasmDbIds: 'germplasmDbIds',
   germplasmPUIs: 'germplasmPUIs',
@@ -129,9 +132,17 @@ const SERVER_TO_USER: Record<string, string> = {
   commonCropNames: 'crops',
   synonyms: 'synonyms',
   collections: 'collections',
+  // Singulars — emitted by SGN-family dialects (cassavabase, etc.).
+  germplasmName: 'names',
+  germplasmDbId: 'germplasmDbIds',
+  germplasmPUI: 'germplasmPUIs',
+  accessionNumber: 'accessionNumbers',
+  commonCropName: 'crops',
+  synonym: 'synonyms',
+  collection: 'collections',
+  // Scalars — same on the wire either way.
   genus: 'genus',
   species: 'species',
-  searchText: 'text',
 };
 
 export const brapiFindGermplasm = tool('brapi_find_germplasm', {
@@ -152,7 +163,12 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     collections: z.array(z.string()).optional().describe('Filter by germplasm collection names.'),
     genus: z.string().optional().describe('Botanical genus.'),
     species: z.string().optional().describe('Botanical species.'),
-    text: z.string().optional().describe('Free-text query. Server-supported subset.'),
+    text: z
+      .string()
+      .optional()
+      .describe(
+        'Free-text query. Applied client-side as a substring match on returned rows (germplasmName, accessionNumber, defaultDisplayName, registered synonyms) — no BrAPI server reliably supports a server-side free-text filter, so combine with `crops` / `genus` / etc. to narrow the upstream pull first.',
+      ),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
@@ -176,8 +192,10 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       capabilityLookup,
     );
 
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
     const warnings: string[] = [];
-    const filters = mergeFilters(
+    const merged = mergeFilters(
       {
         germplasmNames: input.names,
         germplasmDbIds: input.germplasmDbIds,
@@ -188,11 +206,12 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
         collections: input.collections,
         genus: input.genus,
         species: input.species,
-        searchText: input.text,
       },
       input.extraFilters,
       warnings,
     );
+
+    const filters = applyDialectFilters(dialect, 'germplasm', merged, warnings);
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
     const firstPage = await loadInitialPage<Record<string, unknown>>(
@@ -267,25 +286,34 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       ],
     });
 
-    // Heuristic: if the user asked for a text filter and the upstream returned
-    // every row that matches all the *other* filters (i.e. the text didn't
-    // narrow anything), the server probably doesn't honor the filter.
-    if (
-      input.text &&
-      totalCount > 0 &&
-      firstPage.totalCount !== undefined &&
-      firstPage.rows.length === firstPage.totalCount &&
-      !hasRowsMatchingText(firstPage.rows, input.text)
-    ) {
-      warnings.push(
-        `Free-text filter '${input.text}' may not be honored by this server — none of the returned rows obviously match the query string.`,
-      );
+    // Free-text matching is client-side. No BrAPI server reliably honors a
+    // free-text query parameter on /germplasm — earlier versions of this tool
+    // sent `searchText`, which CassavaBase and the Test Server both silently
+    // ignore. Filter the in-context rows here so the agent gets a useful
+    // narrowing; the dataset (if any) still carries the full upstream set so
+    // a follow-up `brapi_manage_dataset` call can re-query without losing
+    // rows. Distributions come from the un-filtered fullRows so the agent can
+    // still see the real spread of crops / genus / etc.
+    let inContextRows = firstPage.rows;
+    const text = input.text;
+    if (text) {
+      const matched = firstPage.rows.filter((row) => rowMatchesText(row, text));
+      if (firstPage.rows.length > 0 && matched.length === 0) {
+        warnings.push(
+          `Free-text '${text}' matched 0 of ${firstPage.rows.length} returned rows. Combine with \`crops\` / \`genus\` / \`accessionNumbers\` to narrow the upstream pull first, or check spelling.`,
+        );
+      } else if (matched.length < firstPage.rows.length) {
+        warnings.push(
+          `Free-text '${text}' narrowed in-context view to ${matched.length} of ${firstPage.rows.length} returned rows. ${datasetMeta ? 'Full set retained in the dataset for follow-up.' : 'No dataset spillover — un-matched rows are not retained.'}`,
+        );
+      }
+      inContextRows = matched;
     }
 
     const result: Output = {
       alias: connection.alias,
-      results: firstPage.rows as z.infer<typeof GermplasmRowSchema>[],
-      returnedCount: firstPage.rows.length,
+      results: inContextRows as z.infer<typeof GermplasmRowSchema>[],
+      returnedCount: inContextRows.length,
       totalCount,
       hasMore: firstPage.hasMore,
       distributions,
@@ -372,29 +400,26 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   },
 });
 
-function hasRowsMatchingText(rows: readonly Record<string, unknown>[], text: string): boolean {
+function rowMatchesText(row: Record<string, unknown>, text: string): boolean {
   const needle = text.toLowerCase();
   const containsNeedle = (value: unknown): boolean =>
     typeof value === 'string' && value.toLowerCase().includes(needle);
-
-  for (const row of rows) {
-    if (
-      containsNeedle(row.germplasmName) ||
-      containsNeedle(row.germplasmPUI) ||
-      containsNeedle(row.accessionNumber) ||
-      containsNeedle(row.defaultDisplayName)
-    ) {
-      return true;
-    }
-    if (Array.isArray(row.synonyms)) {
-      for (const entry of row.synonyms) {
-        if (
-          entry &&
-          typeof entry === 'object' &&
-          containsNeedle((entry as Record<string, unknown>).synonym)
-        ) {
-          return true;
-        }
+  if (
+    containsNeedle(row.germplasmName) ||
+    containsNeedle(row.germplasmPUI) ||
+    containsNeedle(row.accessionNumber) ||
+    containsNeedle(row.defaultDisplayName)
+  ) {
+    return true;
+  }
+  if (Array.isArray(row.synonyms)) {
+    for (const entry of row.synonyms) {
+      if (
+        entry &&
+        typeof entry === 'object' &&
+        containsNeedle((entry as Record<string, unknown>).synonym)
+      ) {
+        return true;
       }
     }
   }

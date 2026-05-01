@@ -15,6 +15,10 @@ import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.
 import { brapiServerInfo } from '@/mcp-server/tools/definitions/brapi-server-info.tool.js';
 import { type Fetcher, initBrapiClient, resetBrapiClient } from '@/services/brapi-client/index.js';
 import {
+  initBrapiDialectRegistry,
+  resetBrapiDialectRegistry,
+} from '@/services/brapi-dialect/index.js';
+import {
   initCapabilityRegistry,
   resetCapabilityRegistry,
 } from '@/services/capability-registry/index.js';
@@ -57,12 +61,14 @@ describe('brapi_server_info tool', () => {
     );
     initBrapiClient(baseConfig, fetcher as unknown as Fetcher);
     initCapabilityRegistry(baseConfig);
+    initBrapiDialectRegistry();
     initServerRegistry(baseConfig);
   });
 
   afterEach(() => {
     resetBrapiClient();
     resetCapabilityRegistry();
+    resetBrapiDialectRegistry();
     resetServerRegistry();
   });
 

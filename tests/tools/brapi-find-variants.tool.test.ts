@@ -36,13 +36,13 @@ function variantRow(extra: Record<string, unknown> = {}): Record<string, unknown
   };
 }
 
-async function connect(fetcher: MockFetcher, calls = ['variants']) {
+async function connect(fetcher: MockFetcher, calls = ['variants'], serverName = 'Test') {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
-          serverName: 'Test',
+          serverName,
           calls: calls.map((service) => ({ service, methods: ['GET'], versions: ['2.1'] })),
         }),
       );
@@ -120,6 +120,28 @@ describe('brapi_find_variants tool', () => {
     await expect(
       brapiFindVariants.handler(brapiFindVariants.input.parse({}), ctx),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+  });
+
+  it('downcasts plural filters to singular when connected to a CassavaBase server', async () => {
+    const ctx = await connect(fetcher, ['variants'], 'CassavaBase');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await brapiFindVariants.handler(
+      brapiFindVariants.input.parse({
+        variantSets: ['vset-1'],
+        variants: ['v-1'],
+        references: ['ref-1'],
+      }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('variantSetDbId')).toEqual(['vset-1']);
+    expect(url.searchParams.getAll('variantDbId')).toEqual(['v-1']);
+    expect(url.searchParams.getAll('referenceDbId')).toEqual(['ref-1']);
+    expect(url.searchParams.has('variantSetDbIds')).toBe(false);
+    expect(url.searchParams.has('variantDbIds')).toBe(false);
+    expect(url.searchParams.has('referenceDbIds')).toBe(false);
   });
 
   it('format() includes variant IDs, type, position, and ref/alt bases', async () => {

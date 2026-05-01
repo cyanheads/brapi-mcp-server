@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.3.9
+**Version:** 0.4.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -172,7 +172,7 @@ Handlers receive a unified `ctx` object. Currently used surface:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated); to surface it on the wire, spread `...ctx.recoveryFor('reason')` into `data` or pass an explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Live across the BrAPI surface today: `brapi_connect`, `brapi_describe_filters`, `brapi_find_genotype_calls`, `brapi_get_germplasm`, `brapi_get_image`, `brapi_get_study`, `brapi_manage_dataset`, `brapi_raw_get`, `brapi_submit_observations`, plus the `brapi://study/{studyDbId}`, `brapi://germplasm/{germplasmDbId}`, and `brapi://filters/{endpoint}` resources.
+**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated); to surface it on the wire, spread `...ctx.recoveryFor('reason')` into `data` or pass an explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Live across the BrAPI surface today: `brapi_connect`, `brapi_describe_filters`, `brapi_find_genotype_calls`, `brapi_get_germplasm`, `brapi_get_image`, `brapi_get_study`, `brapi_manage_dataset`, `brapi_raw_get`, `brapi_raw_search`, `brapi_submit_observations`, plus the `brapi://study/{studyDbId}`, `brapi://germplasm/{germplasmDbId}`, and `brapi://filters/{endpoint}` resources.
 
 ```ts
 errors: [
@@ -219,6 +219,7 @@ src/
     alias-credentials.ts                  # Per-alias env-var resolution (BRAPI_<ALIAS>_*) for brapi_connect
   services/
     brapi-client/                         # HTTP client — retry, concurrency cap, async-search poll, private-IP guard, binary fetch, POST/PUT
+    brapi-dialect/                        # Per-server filter / payload adapters (spec, cassavabase) — translates plural→singular, drops searchText, declares known-dead POST /search routes; envelope surfaces id + source + disabled-search nouns
     brapi-filters/                        # Static v2.1 filter catalog
     capability-registry/                  # Per-connection /serverinfo cache + call guard
     dataset-store/                        # Tenant-scoped handles for spilled find_* results

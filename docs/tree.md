@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-04-30 05:46:21
+Generated on: 2026-05-01 03:05:40
 
 ```text
 brapi-mcp-server/
@@ -17,6 +17,7 @@ brapi-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -144,6 +145,13 @@ brapi-mcp-server/
 │   │   │   ├── brapi-client.ts
 │   │   │   ├── index.ts
 │   │   │   └── types.ts
+│   │   ├── brapi-dialect/
+│   │   │   ├── cassavabase-dialect.ts
+│   │   │   ├── detect.ts
+│   │   │   ├── index.ts
+│   │   │   ├── registry.ts
+│   │   │   ├── spec-dialect.ts
+│   │   │   └── types.ts
 │   │   ├── brapi-filters/
 │   │   │   ├── catalog.ts
 │   │   │   ├── index.ts
@@ -183,6 +191,12 @@ brapi-mcp-server/
 │   │   ├── brapi-server-info.resource.test.ts
 │   │   └── brapi-study.resource.test.ts
 │   ├── services/
+│   │   ├── brapi-dialect/
+│   │   │   ├── cassavabase-dialect.test.ts
+│   │   │   ├── detect.test.ts
+│   │   │   ├── registry.test.ts
+│   │   │   ├── resolve-dialect.test.ts
+│   │   │   └── spec-dialect.test.ts
 │   │   ├── brapi-client.test.ts
 │   │   ├── capability-registry.test.ts
 │   │   ├── dataset-store.test.ts

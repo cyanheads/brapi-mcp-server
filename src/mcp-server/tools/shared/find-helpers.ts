@@ -18,6 +18,7 @@ import type {
   BrapiRequestOptions,
   ResolvedAuth,
 } from '@/services/brapi-client/index.js';
+import type { BrapiDialect } from '@/services/brapi-dialect/index.js';
 import type {
   CreateDatasetInput,
   DatasetMetadata,
@@ -83,6 +84,23 @@ export function mergeFilters(
     merged[key] = value;
   }
   return merged;
+}
+
+/**
+ * Apply the dialect's GET-filter adapter and append any warnings to the
+ * caller's collector. Returns the wire-shape filter map. Mirrors the
+ * `(input, …, warnings) → Record` shape of `mergeFilters` so find_* call
+ * sites stay readable.
+ */
+export function applyDialectFilters(
+  dialect: BrapiDialect,
+  endpoint: string,
+  filters: Readonly<Record<string, unknown>>,
+  warnings: string[],
+): Record<string, unknown> {
+  const adapted = dialect.adaptGetFilters(endpoint, filters);
+  warnings.push(...adapted.warnings);
+  return adapted.filters;
 }
 
 function pruneUndefined(record: Record<string, unknown>): Record<string, unknown> {

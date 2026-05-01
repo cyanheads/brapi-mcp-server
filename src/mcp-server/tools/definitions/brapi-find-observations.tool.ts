@@ -11,11 +11,13 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
+  applyDialectFilters,
   asString,
   buildRefinementHint,
   checkFilterMatchRates,
@@ -138,6 +140,7 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 const SERVER_TO_USER: Record<string, string> = {
+  // Plurals — BrAPI v2.1 spec, used by the `spec` dialect.
   studyDbIds: 'studies',
   germplasmDbIds: 'germplasm',
   observationVariableDbIds: 'variables',
@@ -147,6 +150,17 @@ const SERVER_TO_USER: Record<string, string> = {
   programDbIds: 'programs',
   trialDbIds: 'trials',
   observationLevels: 'observationLevels',
+  // Singulars — emitted by SGN-family dialects (cassavabase, etc.).
+  studyDbId: 'studies',
+  germplasmDbId: 'germplasm',
+  observationVariableDbId: 'variables',
+  observationUnitDbId: 'observationUnits',
+  observationDbId: 'observations',
+  seasonDbId: 'seasons',
+  programDbId: 'programs',
+  trialDbId: 'trials',
+  observationLevel: 'observationLevels',
+  // Range scalars — same on the wire either way.
   observationTimeStampRangeStart: 'timestampFrom',
   observationTimeStampRangeEnd: 'timestampTo',
 };
@@ -194,8 +208,10 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       capabilityLookup,
     );
 
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
     const warnings: string[] = [];
-    const filters = mergeFilters(
+    const merged = mergeFilters(
       {
         studyDbIds: input.studies,
         germplasmDbIds: input.germplasm,
@@ -212,6 +228,8 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       input.extraFilters,
       warnings,
     );
+
+    const filters = applyDialectFilters(dialect, 'observations', merged, warnings);
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
     const firstPage = await loadInitialPage<Record<string, unknown>>(

@@ -37,13 +37,13 @@ function obsRow(extra: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-async function connect(fetcher: MockFetcher, calls = ['observations']) {
+async function connect(fetcher: MockFetcher, calls = ['observations'], serverName = 'Test') {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
-          serverName: 'Test',
+          serverName,
           calls: calls.map((service) => ({ service, methods: ['GET'], versions: ['2.1'] })),
         }),
       );
@@ -139,6 +139,28 @@ describe('brapi_find_observations tool', () => {
     await expect(
       brapiFindObservations.handler(brapiFindObservations.input.parse({}), ctx),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+  });
+
+  it('downcasts plural filters to singular when connected to a CassavaBase server', async () => {
+    const ctx = await connect(fetcher, ['observations'], 'CassavaBase');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({
+        studies: ['s-1'],
+        germplasm: ['g-1'],
+        variables: ['var-1'],
+      }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('studyDbId')).toEqual(['s-1']);
+    expect(url.searchParams.getAll('germplasmDbId')).toEqual(['g-1']);
+    expect(url.searchParams.getAll('observationVariableDbId')).toEqual(['var-1']);
+    expect(url.searchParams.has('studyDbIds')).toBe(false);
+    expect(url.searchParams.has('germplasmDbIds')).toBe(false);
+    expect(url.searchParams.has('observationVariableDbIds')).toBe(false);
   });
 
   it('format() renders observation IDs and study/variable names', async () => {

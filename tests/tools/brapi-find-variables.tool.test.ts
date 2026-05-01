@@ -37,13 +37,17 @@ function varRow(extra: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-async function connect(fetcher: MockFetcher, calls: string[] = ['variables', 'ontologies']) {
+async function connect(
+  fetcher: MockFetcher,
+  calls: string[] = ['variables', 'ontologies'],
+  serverName = 'Test',
+) {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
-          serverName: 'Test',
+          serverName,
           calls: calls.map((service) => ({ service, methods: ['GET'], versions: ['2.1'] })),
         }),
       );
@@ -224,6 +228,28 @@ describe('brapi_find_variables tool', () => {
     await expect(
       brapiFindVariables.handler(brapiFindVariables.input.parse({}), ctx),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+  });
+
+  it('downcasts plural filters to singular when connected to a CassavaBase server', async () => {
+    const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await brapiFindVariables.handler(
+      brapiFindVariables.input.parse({
+        variables: ['var-1'],
+        ontologies: ['CO_334'],
+        traitClasses: ['Agronomic'],
+      }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('observationVariableDbId')).toEqual(['var-1']);
+    expect(url.searchParams.getAll('ontologyDbId')).toEqual(['CO_334']);
+    expect(url.searchParams.getAll('traitClass')).toEqual(['Agronomic']);
+    expect(url.searchParams.has('observationVariableDbIds')).toBe(false);
+    expect(url.searchParams.has('ontologyDbIds')).toBe(false);
+    expect(url.searchParams.has('traitClasses')).toBe(false);
   });
 
   it('tolerates null values on nested trait/scale/method fields (Cassavabase shape)', async () => {

@@ -33,13 +33,13 @@ function locRow(extra: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
-async function connect(fetcher: MockFetcher, calls = ['locations']) {
+async function connect(fetcher: MockFetcher, calls = ['locations'], serverName = 'Test') {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
-          serverName: 'Test',
+          serverName,
           calls: calls.map((service) => ({ service, methods: ['GET'], versions: ['2.1'] })),
         }),
       );
@@ -123,6 +123,25 @@ describe('brapi_find_locations tool', () => {
     await expect(
       brapiFindLocations.handler(brapiFindLocations.input.parse({}), ctx),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+  });
+
+  it('downcasts plural filters to singular when connected to a CassavaBase server', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'CassavaBase');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({
+        countryCodes: ['NGA'],
+        locationTypes: ['Field'],
+      }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('countryCode')).toEqual(['NGA']);
+    expect(url.searchParams.getAll('locationType')).toEqual(['Field']);
+    expect(url.searchParams.has('countryCodes')).toBe(false);
+    expect(url.searchParams.has('locationTypes')).toBe(false);
   });
 
   it('format() includes the location name, country, and coordinates', async () => {

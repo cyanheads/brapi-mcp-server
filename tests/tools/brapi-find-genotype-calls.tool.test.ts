@@ -8,9 +8,10 @@
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindGenotypeCalls } from '@/mcp-server/tools/definitions/brapi-find-genotype-calls.tool.js';
+import { registerDialect } from '@/services/brapi-dialect/registry.js';
 import {
   BASE_URL,
   envelope,
@@ -62,6 +63,7 @@ describe('brapi_find_genotype_calls tool', () => {
 
   afterEach(() => {
     resetTestServices();
+    vi.unstubAllEnvs();
   });
 
   it('rejects unfiltered pulls with ValidationError', async () => {
@@ -125,6 +127,28 @@ describe('brapi_find_genotype_calls tool', () => {
     expect(result.totalCount).toBe(25);
     expect(result.returnedCount).toBe(10);
     expect(result.dataset?.rowCount).toBe(25);
+  });
+
+  it('throws ValidationError when the active dialect disables /search/calls', async () => {
+    // Register a one-off test dialect that disables `calls`, then pin it via
+    // env override. CassavaBase intentionally leaves `calls` enabled, so we
+    // need a dedicated dialect to exercise this code path.
+    registerDialect({
+      id: 'test-disabled-calls',
+      disabledSearchEndpoints: new Set(['calls']),
+      adaptGetFilters: (_endpoint, filters) => ({ filters: { ...filters }, warnings: [] }),
+    });
+    vi.stubEnv('BRAPI_DEFAULT_DIALECT', 'test-disabled-calls');
+    const ctx = await connect(fetcher);
+    await expect(
+      brapiFindGenotypeCalls.handler(
+        brapiFindGenotypeCalls.input.parse({ variantSetDbId: 'vset-1' }),
+        ctx,
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'search_endpoint_disabled', dialectId: 'test-disabled-calls' },
+    });
   });
 
   it('throws ValidationError when /search/calls is not advertised', async () => {

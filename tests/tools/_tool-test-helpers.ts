@@ -12,6 +12,10 @@ import type { ServerConfig } from '@/config/server-config.js';
 import type { Fetcher } from '@/services/brapi-client/index.js';
 import { initBrapiClient, resetBrapiClient } from '@/services/brapi-client/index.js';
 import {
+  initBrapiDialectRegistry,
+  resetBrapiDialectRegistry,
+} from '@/services/brapi-dialect/index.js';
+import {
   initCapabilityRegistry,
   resetCapabilityRegistry,
 } from '@/services/capability-registry/index.js';
@@ -59,6 +63,7 @@ export function initTestServices(config: ServerConfig = TEST_CONFIG): MockFetche
   const fetcher = vi.fn() as MockFetcher;
   initBrapiClient(config, fetcher as unknown as Fetcher);
   initCapabilityRegistry(config);
+  initBrapiDialectRegistry();
   initReferenceDataCache(config);
   initDatasetStore(config);
   initServerRegistry(config);
@@ -68,6 +73,7 @@ export function initTestServices(config: ServerConfig = TEST_CONFIG): MockFetche
 export function resetTestServices(): void {
   resetBrapiClient();
   resetCapabilityRegistry();
+  resetBrapiDialectRegistry();
   resetReferenceDataCache();
   resetDatasetStore();
   resetServerRegistry();

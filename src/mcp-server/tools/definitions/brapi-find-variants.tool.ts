@@ -10,11 +10,13 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
+  applyDialectFilters,
   asString,
   buildRefinementHint,
   computeDistribution,
@@ -116,9 +118,15 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 const SERVER_TO_USER: Record<string, string> = {
+  // Plurals — BrAPI v2.1 spec.
   variantSetDbIds: 'variantSets',
   variantDbIds: 'variants',
   referenceDbIds: 'references',
+  // Singulars — SGN-family dialects.
+  variantSetDbId: 'variantSets',
+  variantDbId: 'variants',
+  referenceDbId: 'references',
+  // Scalars — same on the wire either way.
   referenceName: 'referenceName',
   start: 'start',
   end: 'end',
@@ -159,11 +167,13 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       capabilityLookup,
     );
 
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
     const warnings: string[] = [];
     if (input.start !== undefined && input.end !== undefined && input.start >= input.end) {
       warnings.push('start >= end; upstream will likely return an empty result set.');
     }
-    const filters = mergeFilters(
+    const merged = mergeFilters(
       {
         variantSetDbIds: input.variantSets,
         variantDbIds: input.variants,
@@ -175,6 +185,8 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       input.extraFilters,
       warnings,
     );
+
+    const filters = applyDialectFilters(dialect, 'variants', merged, warnings);
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
     const firstPage = await loadInitialPage<Record<string, unknown>>(

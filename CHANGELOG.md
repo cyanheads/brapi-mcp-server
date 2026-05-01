@@ -2,6 +2,14 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-04-30
+
+Dialects declare known-dead POST /search routes — raw_search and find_genotype_calls refuse with a typed error before hitting the upstream. Orientation envelope surfaces the active dialect so agents can plan around quirks.
+
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-04-30
+
+Per-server dialect adapters route around upstream filter quirks. CassavaBase and SGN-family deployments now receive the singular filter forms they actually honor; `searchText` (the fictional non-spec query param earlier versions sent) is dropped.
+
 ## [0.3.9](changelog/0.3.x/0.3.9.md) — 2026-04-29
 
 Resolver field-name fix for BrAPI v2.1 trait subobjects + bbox swap-on-zero detection for non-conformant GeoJSON deployments.

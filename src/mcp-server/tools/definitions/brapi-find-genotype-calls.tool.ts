@@ -11,6 +11,7 @@
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import {
   type CreateDatasetInput,
@@ -142,6 +143,13 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       recovery:
         'Provide variantSetDbId or germplasmDbIds before retrying — unfiltered pulls are too expensive.',
     },
+    {
+      reason: 'search_endpoint_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The active dialect declares POST /search/calls as known-dead on this server',
+      recovery:
+        'Pin BRAPI_<ALIAS>_DIALECT=spec to bypass the dialect, or query a different server that exposes a working /search/calls route.',
+    },
   ] as const,
   input: z.object({
     alias: AliasInput,
@@ -197,6 +205,15 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       ctx,
       capabilityLookup,
     );
+
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+    if (dialect.disabledSearchEndpoints?.has('calls')) {
+      throw ctx.fail(
+        'search_endpoint_disabled',
+        `Dialect '${dialect.id}' marks POST /search/calls as known-dead on this server. Genotype-call workflows are not viable here without bypassing the dialect.`,
+        { dialectId: dialect.id, ...ctx.recoveryFor('search_endpoint_disabled') },
+      );
+    }
 
     const maxCalls = Math.min(input.maxCalls ?? DEFAULT_MAX_CALLS, HARD_MAX_CALLS);
     const loadLimit = input.loadLimit ?? 200;

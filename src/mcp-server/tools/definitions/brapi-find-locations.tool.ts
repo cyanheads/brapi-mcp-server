@@ -11,11 +11,13 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
+  applyDialectFilters,
   asString,
   buildRefinementHint,
   type CoordinateAxisOrder,
@@ -124,11 +126,18 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 const SERVER_TO_USER: Record<string, string> = {
+  // Plurals — BrAPI v2.1 spec.
   locationDbIds: 'locations',
   locationNames: 'locationNames',
   countryCodes: 'countryCodes',
   locationTypes: 'locationTypes',
   abbreviations: 'abbreviations',
+  // Singulars — SGN-family dialects.
+  locationDbId: 'locations',
+  locationName: 'locationNames',
+  countryCode: 'countryCodes',
+  locationType: 'locationTypes',
+  abbreviation: 'abbreviations',
 };
 
 export const brapiFindLocations = tool('brapi_find_locations', {
@@ -199,8 +208,10 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       capabilityLookup,
     );
 
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
     const warnings: string[] = [];
-    const filters = mergeFilters(
+    const merged = mergeFilters(
       {
         locationDbIds: input.locations,
         locationNames: input.locationNames,
@@ -211,6 +222,8 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       input.extraFilters,
       warnings,
     );
+
+    const filters = applyDialectFilters(dialect, 'locations', merged, warnings);
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
     const firstPage = await loadInitialPage<Record<string, unknown>>(

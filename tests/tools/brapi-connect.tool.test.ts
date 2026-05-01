@@ -14,6 +14,10 @@ import type { ServerConfig } from '@/config/server-config.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { type Fetcher, initBrapiClient, resetBrapiClient } from '@/services/brapi-client/index.js';
 import {
+  initBrapiDialectRegistry,
+  resetBrapiDialectRegistry,
+} from '@/services/brapi-dialect/index.js';
+import {
   initCapabilityRegistry,
   resetCapabilityRegistry,
 } from '@/services/capability-registry/index.js';
@@ -57,6 +61,7 @@ describe('brapi_connect tool', () => {
     fetcher = vi.fn();
     initBrapiClient(baseConfig, fetcher as unknown as Fetcher);
     initCapabilityRegistry(baseConfig);
+    initBrapiDialectRegistry();
     initServerRegistry(baseConfig);
     // Bun auto-loads .env, which can leak BRAPI_* vars into tests. Clear the
     // ones any test in this suite might unintentionally pick up.
@@ -82,6 +87,7 @@ describe('brapi_connect tool', () => {
   afterEach(() => {
     resetBrapiClient();
     resetCapabilityRegistry();
+    resetBrapiDialectRegistry();
     resetServerRegistry();
     vi.unstubAllEnvs();
   });
@@ -131,6 +137,60 @@ describe('brapi_connect tool', () => {
     expect(result.content.studyCount).toBe(42);
     expect(result.content.germplasmCount).toBe(312);
     expect(result.content.programCount).toBeUndefined(); // programs not in /calls
+    // Spec dialect (no quirks) for a generic test server.
+    expect(result.dialect.id).toBe('spec');
+    expect(result.dialect.source).toBe('fallback');
+    expect(result.dialect.envVar).toBe('BRAPI_DEFAULT_DIALECT');
+    expect(result.dialect.disabledSearchEndpoints).toEqual([]);
+  });
+
+  it('surfaces the cassavabase dialect with disabled-search nouns when /serverinfo names CassavaBase', async () => {
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname.endsWith('/serverinfo')) {
+        return jsonResponse(
+          envelope({
+            serverName: 'CassavaBase',
+            calls: [{ service: 'studies', methods: ['GET'], versions: ['2.1'] }],
+          }),
+        );
+      }
+      if (u.pathname.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const ctx = createMockContext({ tenantId: 't1' });
+    const result = await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
+
+    expect(result.dialect.id).toBe('cassavabase');
+    expect(result.dialect.source).toBe('server-name');
+    expect(result.dialect.disabledSearchEndpoints).toContain('germplasm');
+    expect(result.dialect.disabledSearchEndpoints).toContain('studies');
+    expect(result.dialect.disabledSearchEndpoints).not.toContain('calls');
+  });
+
+  it('honors BRAPI_<ALIAS>_DIALECT env override and reflects source=env-override', async () => {
+    vi.stubEnv('BRAPI_DEFAULT_DIALECT', 'spec');
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname.endsWith('/serverinfo')) {
+        return jsonResponse(
+          envelope({
+            serverName: 'CassavaBase', // would otherwise resolve to cassavabase
+            calls: [{ service: 'studies', methods: ['GET'], versions: ['2.1'] }],
+          }),
+        );
+      }
+      if (u.pathname.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const ctx = createMockContext({ tenantId: 't1' });
+    const result = await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
+
+    expect(result.dialect.id).toBe('spec');
+    expect(result.dialect.source).toBe('env-override');
+    expect(result.dialect.disabledSearchEndpoints).toEqual([]);
   });
 
   it('attaches the bearer header on the upstream /serverinfo call', async () => {
@@ -278,6 +338,12 @@ describe('brapi_connect tool', () => {
         supported: ['germplasm', 'search/studies', 'studies'],
         notableGaps: ['observations', 'locations'],
       },
+      dialect: {
+        id: 'spec',
+        source: 'fallback' as const,
+        envVar: 'BRAPI_DEFAULT_DIALECT',
+        disabledSearchEndpoints: [],
+      },
       content: { crops: ['Cassava'], studyCount: 42 },
       notes: ['Test note'],
       fetchedAt: '2026-04-23T00:00:00.000Z',
@@ -290,5 +356,9 @@ describe('brapi_connect tool', () => {
     expect(text).toContain('42');
     expect(text).toContain('observations, locations');
     expect(text).toContain('Test note');
+    // Dialect block surfaces id, source, and pin override.
+    expect(text).toContain('spec');
+    expect(text).toContain('fallback');
+    expect(text).toContain('BRAPI_DEFAULT_DIALECT');
   });
 });
