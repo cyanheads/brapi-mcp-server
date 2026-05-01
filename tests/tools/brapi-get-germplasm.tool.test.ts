@@ -98,7 +98,10 @@ describe('brapi_get_germplasm tool', () => {
         );
       }
       if (path.endsWith('/studies')) {
-        return jsonResponse(envelope({ data: [] }, { totalCount: 7 }));
+        // Filtered probe (germplasmDbIds=g1) → 7; unfiltered baseline → 42.
+        // Distinct totals confirm the upstream honored the germplasm filter.
+        const isFiltered = u.searchParams.has('germplasmDbIds');
+        return jsonResponse(envelope({ data: [] }, { totalCount: isFiltered ? 7 : 42 }));
       }
       if (path.endsWith('/germplasm/g1/progeny')) {
         return jsonResponse(envelope({ data: [] }, { totalCount: 14 }));
@@ -118,6 +121,38 @@ describe('brapi_get_germplasm tool', () => {
     expect(result.studyCount).toBe(7);
     expect(result.directDescendantCount).toBe(14);
     expect(result.warnings).toEqual([]);
+  });
+
+  it('drops studyCount when the upstream silently ignores the germplasm filter', async () => {
+    const ctx = await connect(fetcher);
+
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const path = u.pathname;
+      if (path.endsWith('/germplasm/g1')) {
+        return jsonResponse(envelope({ germplasmDbId: 'g1', germplasmName: 'TME419' }));
+      }
+      if (path.endsWith('/germplasm/g1/pedigree')) return jsonResponse(envelope({ parents: [] }));
+      if (path.endsWith('/germplasm/g1/attributes')) return jsonResponse(envelope({ data: [] }));
+      if (path.endsWith('/studies')) {
+        // Both probes return the same total → upstream silently dropped the filter.
+        return jsonResponse(envelope({ data: [] }, { totalCount: 8340 }));
+      }
+      if (path.endsWith('/germplasm/g1/progeny')) {
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiGetGermplasm.handler(
+      brapiGetGermplasm.input.parse({ germplasmDbId: 'g1' }),
+      ctx,
+    );
+
+    expect(result.studyCount).toBeUndefined();
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.stringMatching(/studyCount omitted.*8340/)]),
+    );
   });
 
   it('handles missing pedigree and attribute endpoints gracefully', async () => {

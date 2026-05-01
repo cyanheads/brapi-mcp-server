@@ -165,10 +165,11 @@ export function renderFindHeader(opts: {
   alias: string;
   returnedCount: number;
   totalCount: number;
-  dataset?: { rowCount: number } | undefined;
+  dataset?: { rowCount: number; expiresAt?: string } | undefined;
 }): string {
   if (opts.dataset) {
-    return `# ${opts.returnedCount} returned · ${opts.dataset.rowCount} in dataset · ${opts.totalCount} total ${opts.noun} — \`${opts.alias}\``;
+    const expiry = opts.dataset.expiresAt ? ` (${formatExpiresIn(opts.dataset.expiresAt)})` : '';
+    return `# ${opts.returnedCount} returned · ${opts.dataset.rowCount} in dataset${expiry} · ${opts.totalCount} total ${opts.noun} — \`${opts.alias}\``;
   }
   return `# ${opts.returnedCount} of ${opts.totalCount} ${opts.noun} — \`${opts.alias}\``;
 }
@@ -264,6 +265,14 @@ export interface SpillInput<T> {
   firstPage: T[];
   loadLimit: number;
   path: string;
+  /**
+   * Optional client-side predicate applied to every row (first-page + spilled)
+   * before persistence. When present, only rows that pass are persisted to
+   * DatasetStore and returned in `fullRows`. The unfiltered upstream total is
+   * preserved separately on the LoadedRows envelope so distributions and
+   * headers can still report the true upstream size.
+   */
+  rowFilter?: (row: T) => boolean;
   source: string;
   store: DatasetStore;
   /** Total reported by the server on the first page. */
@@ -272,7 +281,7 @@ export interface SpillInput<T> {
 
 export interface SpillResult<T> {
   dataset: DatasetMetadata;
-  /** All rows that were persisted — used for distributions. */
+  /** Rows that were persisted (post-filter when `rowFilter` was supplied). */
   fullRows: T[];
   pagesFetched: number;
 }
@@ -308,6 +317,8 @@ export type DatasetHandle = z.infer<typeof DatasetHandleSchema>;
 /**
  * Render a DatasetHandle as bullet lines, matching the existing find_* tool
  * format. Centralized so the truncated/maxRows fields surface consistently.
+ * `expiresAt` is paired with a human-readable `expires in Xh / Xd` so the
+ * agent doesn't have to subtract dates to know when the handle goes stale.
  */
 export function renderDatasetHandle(handle: DatasetHandle): string[] {
   const lines = [
@@ -316,11 +327,32 @@ export function renderDatasetHandle(handle: DatasetHandle): string[] {
     `- sizeBytes: ${handle.sizeBytes}`,
     `- columns: ${handle.columns.join(', ')}`,
     `- createdAt: ${handle.createdAt}`,
-    `- expiresAt: ${handle.expiresAt}`,
+    `- expiresAt: ${handle.expiresAt} (${formatExpiresIn(handle.expiresAt)})`,
   ];
   if (handle.truncated) lines.push(`- truncated: true`);
   if (typeof handle.maxRows === 'number') lines.push(`- maxRows: ${handle.maxRows}`);
   return lines;
+}
+
+/**
+ * Render an absolute `expiresAt` timestamp as a relative human label
+ * (`expires in 24h`, `expires in 30m`, `expired 5m ago`). Coarsens to the
+ * most useful unit so the value reads at a glance.
+ */
+export function formatExpiresIn(expiresAt: string, now: Date = new Date()): string {
+  const expiry = Date.parse(expiresAt);
+  if (Number.isNaN(expiry)) return 'expiry unknown';
+  const deltaMs = expiry - now.getTime();
+  const absMs = Math.abs(deltaMs);
+  const minutes = Math.round(absMs / 60_000);
+  const hours = Math.round(absMs / 3_600_000);
+  const days = Math.round(absMs / 86_400_000);
+  let label: string;
+  if (absMs < 60_000) label = '<1m';
+  else if (minutes < 60) label = `${minutes}m`;
+  else if (hours < 48) label = `${hours}h`;
+  else label = `${days}d`;
+  return deltaMs >= 0 ? `expires in ${label}` : `expired ${label} ago`;
 }
 
 /** Project a `DatasetMetadata` to the in-context handle shape. */
@@ -346,13 +378,19 @@ export interface MaybeSpillInput<T> {
   firstPage: LoadedRows<T>;
   loadLimit: number;
   path: string;
+  /**
+   * Optional client-side predicate applied to every row before persistence.
+   * Forwarded to `spillToDataset`. When present and no spillover happens, the
+   * first-page rows are also filtered before being returned.
+   */
+  rowFilter?: (row: T) => boolean;
   source: string;
   store: DatasetStore;
 }
 
 export interface MaybeSpillResult<T> {
   dataset?: DatasetHandle;
-  /** Full row set if a spillover happened, otherwise the first-page rows. */
+  /** Row set after `rowFilter` (when supplied), spilled or first-page only. */
   fullRows: T[];
 }
 
@@ -365,15 +403,16 @@ export interface MaybeSpillResult<T> {
 export async function maybeSpill<T extends Record<string, unknown>>(
   input: MaybeSpillInput<T>,
 ): Promise<MaybeSpillResult<T>> {
-  const { firstPage } = input;
+  const { firstPage, rowFilter } = input;
   if (
     !firstPage.hasMore ||
     firstPage.totalCount === undefined ||
     firstPage.totalCount <= input.loadLimit
   ) {
-    return { fullRows: firstPage.rows };
+    const rows = rowFilter ? firstPage.rows.filter(rowFilter) : firstPage.rows;
+    return { fullRows: rows };
   }
-  const spill = await spillToDataset({
+  const spillInput: SpillInput<T> = {
     store: input.store,
     client: input.client,
     connection: input.connection,
@@ -384,7 +423,9 @@ export async function maybeSpill<T extends Record<string, unknown>>(
     ctx: input.ctx,
     firstPage: firstPage.rows,
     totalCount: firstPage.totalCount,
-  });
+  };
+  if (rowFilter) spillInput.rowFilter = rowFilter;
+  const spill = await spillToDataset(spillInput);
   return {
     fullRows: spill.fullRows,
     dataset: toDatasetHandle(spill.dataset),
@@ -434,11 +475,13 @@ export async function spillToDataset<T extends Record<string, unknown>>(
   const reachedPageCap = pagesFetched >= MAX_SPILLOVER_PAGES && input.totalCount > rows.length;
   const truncated = reachedRowCap || reachedPageCap;
 
+  const persistedRows = input.rowFilter ? rows.filter(input.rowFilter) : rows;
+
   const createInput: CreateDatasetInput = {
     source: input.source,
     baseUrl: input.connection.baseUrl,
     query: input.filters,
-    rows,
+    rows: persistedRows,
   };
   if (truncated) {
     createInput.truncated = true;
@@ -446,7 +489,7 @@ export async function spillToDataset<T extends Record<string, unknown>>(
   }
   const dataset = await input.store.create(input.ctx, createInput);
 
-  return { dataset, fullRows: rows, pagesFetched };
+  return { dataset, fullRows: persistedRows, pagesFetched };
 }
 
 /** BrAPI list endpoints return `{data: T[], ...}`. Some omit the wrapper. */

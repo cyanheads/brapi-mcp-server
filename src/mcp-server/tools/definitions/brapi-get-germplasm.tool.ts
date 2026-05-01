@@ -10,6 +10,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import { AliasInput, buildRequestOptions, isUpstreamNotFound } from '../shared/find-helpers.js';
@@ -185,6 +186,10 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     const supportsProgeny = Boolean(profile.supported['germplasm/{germplasmDbId}/progeny']);
     const supportsStudies = profile.supported.studies?.methods?.includes('GET') ?? false;
 
+    const dialect = supportsStudies
+      ? await resolveDialect(connection, ctx, capabilityLookup)
+      : undefined;
+
     const [pedigree, attributes, studyCount, progenyCount] = await Promise.all([
       supportsPedigree
         ? fetchPedigree(client, connection.baseUrl, id, ctx, buildRequestOptions(connection)).catch(
@@ -200,17 +205,15 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
             buildRequestOptions(connection),
           ).catch((err) => recordWarning(warnings, 'attributes lookup failed', err))
         : Promise.resolve(undefined),
-      supportsStudies
-        ? fetchTotalCount(
+      supportsStudies && dialect
+        ? fetchValidatedStudyCount({
             client,
-            connection.baseUrl,
-            '/studies',
+            connection,
+            germplasmDbId: input.germplasmDbId,
+            dialect,
             ctx,
-            buildRequestOptions(connection, {
-              germplasmDbIds: [input.germplasmDbId],
-              pageSize: 1,
-            }),
-          ).catch((err) => recordWarning(warnings, 'study count probe failed', err))
+            warnings,
+          }).catch((err) => recordWarning(warnings, 'study count probe failed', err))
         : Promise.resolve(undefined),
       supportsProgeny
         ? fetchTotalCount(
@@ -377,4 +380,80 @@ async function fetchTotalCount(
   const env = await client.get<unknown>(baseUrl, path, ctx, options);
   const total = env.metadata?.pagination?.totalCount;
   return typeof total === 'number' ? total : undefined;
+}
+
+interface ValidatedStudyCountInput {
+  client: ReturnType<typeof getBrapiClient>;
+  connection: Parameters<typeof buildRequestOptions>[0];
+  ctx: Parameters<ReturnType<typeof getBrapiClient>['get']>[2];
+  dialect: BrapiDialect;
+  germplasmDbId: string;
+  warnings: string[];
+}
+
+/**
+ * Probe `/studies?germplasmDbIds=X` and a parallel unfiltered baseline.
+ * Some servers (notably the SGN family) silently drop the germplasm filter on
+ * `/studies` and return the global studies total — which would be wildly
+ * misleading as a per-germplasm `studyCount`. The cross-check catches that:
+ * if the filtered total matches the unfiltered baseline, the filter was
+ * ignored and we drop the count rather than report a misleading global.
+ *
+ * Routes the filtered probe through the dialect adapter so any per-server
+ * key translation (or filter drop) takes effect, and surfaces the dialect's
+ * own warnings so the agent sees why a count is missing.
+ */
+async function fetchValidatedStudyCount(
+  input: ValidatedStudyCountInput,
+): Promise<number | undefined> {
+  const { client, connection, ctx, dialect, germplasmDbId, warnings } = input;
+  const adapted = dialect.adaptGetFilters('studies', {
+    germplasmDbIds: [germplasmDbId],
+  });
+  warnings.push(...adapted.warnings);
+
+  // If the dialect dropped the filter entirely, the count would be the
+  // global studies total — useless. Skip and let the caller render `—`.
+  if (Object.keys(adapted.filters).length === 0) {
+    warnings.push(
+      'studyCount probe skipped: the active dialect dropped the germplasm filter for /studies (server does not honor it).',
+    );
+    return;
+  }
+
+  const filteredParams = {
+    ...(adapted.filters as Record<
+      string,
+      string | number | boolean | readonly (string | number)[] | undefined
+    >),
+    pageSize: 1,
+  };
+
+  const [filtered, baseline] = await Promise.all([
+    fetchTotalCount(
+      client,
+      connection.baseUrl,
+      '/studies',
+      ctx,
+      buildRequestOptions(connection, filteredParams),
+    ),
+    fetchTotalCount(
+      client,
+      connection.baseUrl,
+      '/studies',
+      ctx,
+      buildRequestOptions(connection, { pageSize: 1 }),
+    ).catch(() => undefined),
+  ]);
+
+  if (typeof filtered !== 'number') return;
+
+  if (typeof baseline === 'number' && baseline > 0 && filtered === baseline) {
+    warnings.push(
+      `studyCount omitted: /studies returned the same total (${baseline}) for both the germplasm-filtered probe and an unfiltered baseline — the upstream silently ignored the germplasm filter, so a per-germplasm count cannot be trusted.`,
+    );
+    return;
+  }
+
+  return filtered;
 }

@@ -158,8 +158,8 @@ describe('brapi_find_germplasm tool', () => {
     const url = new URL(String(fetcher.mock.calls[0]![0]));
     expect(url.searchParams.has('searchText')).toBe(false);
     expect(url.searchParams.has('text')).toBe(false);
-    // Distributions still reflect the un-filtered fullRows (3 Cassava rows).
-    expect(result.distributions.commonCropName).toEqual({ Cassava: 3 });
+    // Distributions reflect the matched set (only the TME419 row passed the text filter).
+    expect(result.distributions.commonCropName).toEqual({ Cassava: 1 });
     expect(
       result.warnings.some((w) => /narrowed in-context view to 1 of 3 returned rows/.test(w)),
     ).toBe(true);
@@ -182,11 +182,11 @@ describe('brapi_find_germplasm tool', () => {
     expect(result.results[0]?.germplasmDbId).toBe('g1');
   });
 
-  it('warns when free-text matches 0 of N returned rows', async () => {
+  it('warns when free-text matches 0 of N returned rows and emits no misleading distributions', async () => {
     const ctx = await connect(fetcher);
     const rows = [
-      { germplasmDbId: 'g1', germplasmName: 'TME419' },
-      { germplasmDbId: 'g2', germplasmName: 'TMS30572' },
+      { germplasmDbId: 'g1', germplasmName: 'TME419', commonCropName: 'Cassava' },
+      { germplasmDbId: 'g2', germplasmName: 'TMS30572', commonCropName: 'Cassava' },
     ];
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
 
@@ -199,14 +199,19 @@ describe('brapi_find_germplasm tool', () => {
     expect(
       result.warnings.some((w) => /Free-text 'no-such-name' matched 0 of 2 returned rows/.test(w)),
     ).toBe(true);
+    // Distributions reflect the matched set, not the upstream rows — so a
+    // zero-match query produces empty distributions instead of a misleading
+    // `Cassava (2)` block.
+    expect(result.distributions.commonCropName).toEqual({});
   });
 
-  it('mentions the dataset in the partial-match warning when spillover happened', async () => {
+  it('persists only text-matched rows in the spilled dataset', async () => {
     const ctx = await connect(fetcher);
     const totalCount = 15;
     const allRows = Array.from({ length: totalCount }, (_, i) => ({
       germplasmDbId: `g${i + 1}`,
-      // Only g1 matches `TME`; the rest are TMS-* so the post-filter narrows the in-context view.
+      // Only g1 matches `TME`; the rest are TMS-* so the dataset should
+      // persist exactly one row, not all 15.
       germplasmName: i === 0 ? 'TME419' : `TMS${i + 1}`,
       commonCropName: 'Cassava',
     }));
@@ -228,9 +233,48 @@ describe('brapi_find_germplasm tool', () => {
     );
 
     expect(result.dataset).toBeDefined();
+    expect(result.dataset?.rowCount).toBe(1);
     expect(result.returnedCount).toBe(1);
     expect(
-      result.warnings.some((w) => /Full set retained in the dataset for follow-up/.test(w)),
+      result.warnings.some((w) =>
+        /filtered the dataset to 1 matched row\(s\) across the upstream union/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it('skips spillover when free-text matches 0 first-page rows', async () => {
+    const ctx = await connect(fetcher);
+    const totalCount = 842_000;
+    const firstPageRows = Array.from({ length: 10 }, (_, i) => ({
+      germplasmDbId: `g${i + 1}`,
+      germplasmName: `RandomAccession${i + 1}`,
+      commonCropName: 'Cassava',
+    }));
+
+    fetcher.mockImplementation(async () =>
+      jsonResponse(envelope({ data: firstPageRows }, { totalCount })),
+    );
+
+    const result = await brapiFindGermplasm.handler(
+      brapiFindGermplasm.input.parse({ text: 'TMS30572', loadLimit: 10 }),
+      ctx,
+    );
+
+    // Only one HTTP call — no spillover pulls.
+    expect(fetcher.mock.calls.length).toBe(1);
+    expect(result.dataset).toBeUndefined();
+    expect(result.returnedCount).toBe(0);
+    expect(
+      result.warnings.some((w) =>
+        /matched 0 of 10 first-page rows out of 842000 upstream\. Spillover skipped/.test(w),
+      ),
+    ).toBe(true);
+    expect(
+      result.warnings.some((w) =>
+        /names: \['TMS30572'\].*accessionNumbers: \['TMS30572'\].*germplasmDbIds: \['TMS30572'\]/.test(
+          w,
+        ),
+      ),
     ).toBe(true);
   });
 

@@ -200,6 +200,79 @@ describe('brapi_find_observations tool', () => {
     expect(url.searchParams.has('observationVariableDbIds')).toBe(false);
   });
 
+  it('preflights unscoped germplasm queries and skips bulk pull above threshold', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '0', 10);
+      // Preflight uses pageSize=1; only return one row + the huge totalCount.
+      if (pageSize === 1) {
+        return jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 50_000 }));
+      }
+      // If anything but the preflight goes out, the test should fail.
+      throw new Error(`Bulk pull should have been skipped; got pageSize=${pageSize}`);
+    });
+
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ germplasm: ['g-1'] }),
+      ctx,
+    );
+
+    expect(fetcher.mock.calls.length).toBe(1);
+    expect(result.returnedCount).toBe(1);
+    expect(result.totalCount).toBe(50_000);
+    expect(result.dataset).toBeUndefined();
+    expect(
+      result.warnings.some((w) =>
+        /Preflight detected 50000 observations.*Bulk pull skipped/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it('skips preflight when the query has a study scope', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 1 })));
+
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ studies: ['s-1'], germplasm: ['g-1'] }),
+      ctx,
+    );
+
+    // Only one HTTP call — the bulk pull, no preflight.
+    expect(fetcher.mock.calls.length).toBe(1);
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    // Confirms it was the bulk pull (loadLimit) and not a pageSize=1 preflight.
+    expect(url.searchParams.get('pageSize')).not.toBe('1');
+    expect(result.returnedCount).toBe(1);
+  });
+
+  it('preflights and proceeds when the upstream total fits under the threshold', async () => {
+    const ctx = await connect(fetcher);
+    let calls = 0;
+    fetcher.mockImplementation(async (url: string) => {
+      calls += 1;
+      const u = new URL(String(url));
+      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '0', 10);
+      // Preflight returns small total → bulk pull should follow.
+      if (pageSize === 1) {
+        return jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 50 }));
+      }
+      const rows = Array.from({ length: 50 }, (_, i) =>
+        obsRow({ observationDbId: `obs-${i + 1}` }),
+      );
+      return jsonResponse(envelope({ data: rows }, { totalCount: 50 }));
+    });
+
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ germplasm: ['g-1'] }),
+      ctx,
+    );
+
+    expect(calls).toBe(2);
+    expect(result.returnedCount).toBe(50);
+    expect(result.totalCount).toBe(50);
+  });
+
   it('format() renders observation IDs and study/variable names', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 1 })));

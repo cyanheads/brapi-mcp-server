@@ -25,6 +25,7 @@ import {
   ExtraFiltersInput,
   LoadLimitInput,
   loadInitialPage,
+  type MaybeSpillInput,
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
@@ -223,8 +224,27 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       ctx,
     );
 
-    const { fullRows, dataset: datasetMeta } = await maybeSpill({
-      firstPage,
+    // Free-text matching is client-side. No BrAPI server reliably honors a
+    // free-text query parameter on /germplasm — earlier versions of this tool
+    // sent `searchText`, which CassavaBase and the Test Server both silently
+    // ignore. Decide upfront whether to spill: when text is set and matches
+    // 0 rows on the first page, pulling more pages is unlikely to surface
+    // hits and we'd just bury the agent in 50k unrelated rows.
+    const text = input.text;
+    const wouldSpill =
+      firstPage.hasMore && firstPage.totalCount !== undefined && firstPage.totalCount > loadLimit;
+    const firstPageMatched = text
+      ? firstPage.rows.filter((row) => rowMatchesText(row, text))
+      : firstPage.rows;
+    const skipSpillForTextMiss = Boolean(
+      text && wouldSpill && firstPage.rows.length > 0 && firstPageMatched.length === 0,
+    );
+
+    const spillInput: MaybeSpillInput<Record<string, unknown>> = {
+      firstPage: skipSpillForTextMiss
+        ? // Treat the first page as the whole result — no further pages pulled.
+          { rows: firstPage.rows, hasMore: false, pagesFetched: 1 }
+        : firstPage,
       client,
       connection,
       path: '/germplasm',
@@ -233,7 +253,10 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       loadLimit,
       ctx,
       store: datasetStore,
-    });
+    };
+    if (text) spillInput.rowFilter = (row) => rowMatchesText(row, text);
+
+    const { fullRows, dataset: datasetMeta } = await maybeSpill(spillInput);
 
     const distributions = {
       commonCropName: computeDistribution(fullRows, (r) => asString(r.commonCropName)),
@@ -286,29 +309,27 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       ],
     });
 
-    // Free-text matching is client-side. No BrAPI server reliably honors a
-    // free-text query parameter on /germplasm — earlier versions of this tool
-    // sent `searchText`, which CassavaBase and the Test Server both silently
-    // ignore. Filter the in-context rows here so the agent gets a useful
-    // narrowing; the dataset (if any) still carries the full upstream set so
-    // a follow-up `brapi_manage_dataset` call can re-query without losing
-    // rows. Distributions come from the un-filtered fullRows so the agent can
-    // still see the real spread of crops / genus / etc.
-    let inContextRows = firstPage.rows;
-    const text = input.text;
     if (text) {
-      const matched = firstPage.rows.filter((row) => rowMatchesText(row, text));
-      if (firstPage.rows.length > 0 && matched.length === 0) {
+      if (skipSpillForTextMiss) {
         warnings.push(
-          `Free-text '${text}' matched 0 of ${firstPage.rows.length} returned rows. Combine with \`crops\` / \`genus\` / \`accessionNumbers\` to narrow the upstream pull first, or check spelling.`,
+          `Free-text '${text}' matched 0 of ${firstPage.rows.length} first-page rows out of ${totalCount} upstream. Spillover skipped — pulling more pages is unlikely to surface hits. Use exact filters: \`names: ['${text}']\`, \`accessionNumbers: ['${text}']\`, or \`germplasmDbIds: ['${text}']\` for direct lookup.`,
         );
-      } else if (matched.length < firstPage.rows.length) {
+      } else if (fullRows.length === 0 && firstPage.rows.length > 0) {
         warnings.push(
-          `Free-text '${text}' narrowed in-context view to ${matched.length} of ${firstPage.rows.length} returned rows. ${datasetMeta ? 'Full set retained in the dataset for follow-up.' : 'No dataset spillover — un-matched rows are not retained.'}`,
+          `Free-text '${text}' matched 0 of ${firstPage.rows.length} returned rows. Use exact filters (\`names\`, \`accessionNumbers\`, \`germplasmDbIds\`) for direct lookup, or check spelling.`,
+        );
+      } else if (datasetMeta) {
+        warnings.push(
+          `Free-text '${text}' filtered the dataset to ${datasetMeta.rowCount} matched row(s) across the upstream union.`,
+        );
+      } else if (fullRows.length < firstPage.rows.length) {
+        warnings.push(
+          `Free-text '${text}' narrowed in-context view to ${fullRows.length} of ${firstPage.rows.length} returned rows.`,
         );
       }
-      inContextRows = matched;
     }
+
+    const inContextRows = fullRows.slice(0, loadLimit);
 
     const result: Output = {
       alias: connection.alias,

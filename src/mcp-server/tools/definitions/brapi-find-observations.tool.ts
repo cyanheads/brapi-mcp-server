@@ -140,6 +140,14 @@ const OutputSchema = z.object({
 
 type Output = z.infer<typeof OutputSchema>;
 
+/**
+ * Upstream observation totals above this threshold trigger the preflight
+ * bail-out: the bulk pull is skipped and the user is told to narrow the
+ * query. Empirically, CassavaBase germplasm-only queries above ~5k rows
+ * stall past the default request timeout.
+ */
+const PREFLIGHT_BULK_THRESHOLD = 5_000;
+
 const SERVER_TO_USER: Record<string, string> = {
   // Plurals — BrAPI v2.1 spec, used by the `spec` dialect.
   studyDbIds: 'studies',
@@ -233,26 +241,63 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     const filters = applyDialectFilters(dialect, 'observations', merged, warnings);
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
-    const firstPage = await loadInitialPage<Record<string, unknown>>(
-      client,
-      connection,
-      '/observations',
-      filters,
-      loadLimit,
-      ctx,
-    );
+    const loadObservations = (pageSize: number) =>
+      loadInitialPage<Record<string, unknown>>(
+        client,
+        connection,
+        '/observations',
+        filters,
+        pageSize,
+        ctx,
+      );
 
-    const { fullRows, dataset: datasetMeta } = await maybeSpill({
-      firstPage,
-      client,
-      connection,
-      path: '/observations',
-      filters,
-      source: 'find_observations',
-      loadLimit,
-      ctx,
-      store: datasetStore,
-    });
+    /**
+     * Danger pattern: querying /observations by germplasm with no anchoring
+     * scope (study, trial, observation, observation-unit). On large servers
+     * (CassavaBase, T3) `germplasmDbIds=X` alone joins across every study the
+     * germplasm appeared in — the upstream count query takes tens of seconds
+     * and a `pageSize=loadLimit` pull stalls past the request timeout. Probe
+     * with `pageSize=1` first; if the upstream advertises more rows than we'd
+     * safely pull, skip the bulk fetch and surface a warning recommending a
+     * study scope. Other unscoped patterns (variable-only, bare query) are
+     * left alone — they don't carry the same join blow-up risk and adding a
+     * preflight to every call would double HTTP for the common case.
+     */
+    const hasScope =
+      (input.studies?.length ?? 0) > 0 ||
+      (input.trials?.length ?? 0) > 0 ||
+      (input.observationUnits?.length ?? 0) > 0 ||
+      (input.observations?.length ?? 0) > 0;
+    const shouldPreflight = !hasScope && (input.germplasm?.length ?? 0) > 0;
+
+    let firstPage: Awaited<ReturnType<typeof loadObservations>> | undefined;
+    let bulkPullSkipped = false;
+    if (shouldPreflight) {
+      const preflight = await loadObservations(1);
+      const upstreamTotal = preflight.totalCount;
+      if (typeof upstreamTotal === 'number' && upstreamTotal > PREFLIGHT_BULK_THRESHOLD) {
+        warnings.push(
+          `Preflight detected ${upstreamTotal} observations matching this query (germplasm/variable/season scope, no study or trial anchor). Bulk pull skipped to avoid an upstream timeout — narrow with \`studies: ['…']\` or \`trials: ['…']\`, or accept a partial view by re-calling with a tighter scope. Returning the 1-row preflight as the only in-context observation.`,
+        );
+        firstPage = preflight;
+        bulkPullSkipped = true;
+      }
+    }
+    firstPage ??= await loadObservations(loadLimit);
+
+    const { fullRows, dataset: datasetMeta } = bulkPullSkipped
+      ? { fullRows: firstPage.rows, dataset: undefined }
+      : await maybeSpill({
+          firstPage,
+          client,
+          connection,
+          path: '/observations',
+          filters,
+          source: 'find_observations',
+          loadLimit,
+          ctx,
+          store: datasetStore,
+        });
 
     const distributions = {
       observationVariableName: computeDistribution(fullRows, (r) =>
