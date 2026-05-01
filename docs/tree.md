@@ -1,9 +1,10 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-05-01 03:05:40
+Generated on: 2026-05-01 19:36:16
 
 ```text
 brapi-mcp-server/
+├── .agents/
 ├── .claude/
 ├── .github/
 │   └── ISSUE_TEMPLATE/
@@ -228,6 +229,7 @@ brapi-mcp-server/
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
+├── AGENTS.md
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
