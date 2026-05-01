@@ -14,7 +14,7 @@ import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
-import { AliasInput, buildRequestOptions } from '../shared/find-helpers.js';
+import { AliasInput, appendPassthroughLines, buildRequestOptions } from '../shared/find-helpers.js';
 
 const MAX_IMAGES_PER_CALL = 5;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -169,6 +169,22 @@ export const brapiGetImage = tool('brapi_get_image', {
     }
     blocks.push({ type: 'text', text: header.join('\n') });
 
+    const META_RENDERED = new Set([
+      'imageDbId',
+      'imageName',
+      'imageFileName',
+      'imageWidth',
+      'imageHeight',
+      'mimeType',
+      'imageURL',
+      'observationUnitDbId',
+      'observationUnitName',
+      'studyDbId',
+      'studyName',
+      'imageTimeStamp',
+      'copyright',
+      'description',
+    ]);
     for (const img of result.images) {
       const meta = img.metadata;
       const lines: string[] = [];
@@ -194,6 +210,7 @@ export const brapiGetImage = tool('brapi_get_image', {
       if (meta.imageURL) lines.push(`- imageURL: ${meta.imageURL}`);
       if (meta.copyright) lines.push(`- copyright: ${meta.copyright}`);
       if (meta.description) lines.push(`- description: ${meta.description}`);
+      appendPassthroughLines(lines, meta as Record<string, unknown>, META_RENDERED);
       blocks.push({ type: 'text', text: lines.join('\n') });
       blocks.push({
         type: 'image',

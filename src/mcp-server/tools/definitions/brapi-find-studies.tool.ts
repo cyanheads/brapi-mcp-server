@@ -22,6 +22,7 @@ import {
   asStringArray,
   buildRefinementHint,
   checkFilterMatchRates,
+  collectPassthroughParts,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -307,6 +308,25 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     if (result.results.length === 0) {
       lines.push('_No rows returned._');
     } else {
+      const RENDERED = new Set([
+        'studyName',
+        'studyDbId',
+        'studyType',
+        'programName',
+        'programDbId',
+        'trialName',
+        'trialDbId',
+        'locationName',
+        'locationDbId',
+        'seasons',
+        'commonCropName',
+        'active',
+        'startDate',
+        'endDate',
+        'studyCode',
+        'studyPUI',
+        'studyDescription',
+      ]);
       for (const study of result.results) {
         const parts: string[] = [`**${study.studyName ?? study.studyDbId}**`];
         parts.push(`id=\`${study.studyDbId}\``);
@@ -325,6 +345,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         if (study.studyCode) parts.push(`code=${study.studyCode}`);
         if (study.studyPUI) parts.push(`pui=${study.studyPUI}`);
         if (study.studyDescription) parts.push(`desc=${study.studyDescription}`);
+        parts.push(...collectPassthroughParts(study as Record<string, unknown>, RENDERED));
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

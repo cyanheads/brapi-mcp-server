@@ -21,6 +21,7 @@ import {
   asString,
   buildRefinementHint,
   checkFilterMatchRates,
+  collectPassthroughParts,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -386,6 +387,23 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     if (result.results.length === 0) {
       lines.push('_No rows returned._');
     } else {
+      const RENDERED = new Set([
+        'observationVariableName',
+        'observationVariableDbId',
+        'value',
+        'observationDbId',
+        'observationUnitName',
+        'observationUnitDbId',
+        'germplasmName',
+        'germplasmDbId',
+        'studyName',
+        'studyDbId',
+        'observationLevel',
+        'season',
+        'observationTimeStamp',
+        'collector',
+        'uploadedBy',
+      ]);
       for (const o of result.results) {
         const parts: string[] = [];
         const label = o.observationVariableName ?? o.observationVariableDbId ?? '?';
@@ -405,6 +423,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         if (o.observationTimeStamp) parts.push(`time=${o.observationTimeStamp}`);
         if (o.collector) parts.push(`collector=${o.collector}`);
         if (o.uploadedBy) parts.push(`uploadedBy=${o.uploadedBy}`);
+        parts.push(...collectPassthroughParts(o as Record<string, unknown>, RENDERED));
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.4](changelog/0.4.x/0.4.4.md) — 2026-04-30
+
+format() / structuredContent parity — every find_* and get_* tool now emits passthrough fields so text-only clients see the full upstream payload.
+
 ## [0.4.3](changelog/0.4.x/0.4.3.md) — 2026-04-30
 
 Field-test follow-up: studyCount cross-check, find_germplasm text spillover guard, find_observations preflight on unscoped germplasm queries, honest zero-match distributions, prominent dataset expiry.

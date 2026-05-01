@@ -26,6 +26,7 @@ import {
   asString,
   buildRefinementHint,
   checkFilterMatchRates,
+  collectPassthroughParts,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -424,6 +425,17 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     if (result.results.length === 0) {
       lines.push('_No rows returned._');
     } else {
+      const RENDERED = new Set([
+        'observationVariableName',
+        'observationVariableDbId',
+        'observationVariablePUI',
+        'ontologyDbId',
+        'ontologyName',
+        'commonCropName',
+        'trait',
+        'scale',
+        'method',
+      ]);
       for (const v of result.results) {
         const parts: string[] = [`**${v.observationVariableName ?? v.observationVariableDbId}**`];
         parts.push(`id=\`${v.observationVariableDbId}\``);
@@ -431,16 +443,10 @@ export const brapiFindVariables = tool('brapi_find_variables', {
         if (v.ontologyDbId) parts.push(`ontology=${v.ontologyDbId}`);
         if (v.ontologyName) parts.push(`ontologyName=${v.ontologyName}`);
         if (v.commonCropName) parts.push(`crop=${v.commonCropName}`);
-        if (v.trait?.traitName) parts.push(`trait=${v.trait.traitName}`);
-        if (v.trait?.traitDbId) parts.push(`traitDbId=${v.trait.traitDbId}`);
-        if (v.trait?.traitClass) parts.push(`class=${v.trait.traitClass}`);
-        if (v.trait?.description) parts.push(`desc=${v.trait.description}`);
-        if (v.trait?.synonyms?.length) parts.push(`synonyms=${v.trait.synonyms.join(',')}`);
-        if (v.scale?.scaleName) parts.push(`scale=${v.scale.scaleName}`);
-        if (v.scale?.scaleDbId) parts.push(`scaleDbId=${v.scale.scaleDbId}`);
-        if (v.scale?.dataType) parts.push(`dataType=${v.scale.dataType}`);
-        if (v.method?.methodName) parts.push(`method=${v.method.methodName}`);
-        if (v.method?.methodDbId) parts.push(`methodDbId=${v.method.methodDbId}`);
+        if (v.trait) parts.push(`trait=${JSON.stringify(v.trait)}`);
+        if (v.scale) parts.push(`scale=${JSON.stringify(v.scale)}`);
+        if (v.method) parts.push(`method=${JSON.stringify(v.method)}`);
+        parts.push(...collectPassthroughParts(v as Record<string, unknown>, RENDERED));
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

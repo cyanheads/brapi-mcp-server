@@ -20,6 +20,7 @@ import {
   asString,
   buildRefinementHint,
   checkFilterMatchRates,
+  collectPassthroughParts,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -298,6 +299,25 @@ export const brapiFindImages = tool('brapi_find_images', {
     if (result.results.length === 0) {
       lines.push('_No rows returned._');
     } else {
+      const RENDERED = new Set([
+        'imageName',
+        'imageFileName',
+        'imageDbId',
+        'mimeType',
+        'imageWidth',
+        'imageHeight',
+        'imageFileSize',
+        'observationUnitName',
+        'observationUnitDbId',
+        'observationDbIds',
+        'studyName',
+        'studyDbId',
+        'descriptiveOntologyTerms',
+        'imageTimeStamp',
+        'imageURL',
+        'copyright',
+        'description',
+      ]);
       for (const img of result.results) {
         const parts: string[] = [`**${img.imageName ?? img.imageFileName ?? img.imageDbId}**`];
         parts.push(`id=\`${img.imageDbId}\``);
@@ -319,6 +339,7 @@ export const brapiFindImages = tool('brapi_find_images', {
         if (img.imageURL) parts.push(`url=${img.imageURL}`);
         if (img.copyright) parts.push(`©${img.copyright}`);
         if (img.description) parts.push(`desc=${img.description}`);
+        parts.push(...collectPassthroughParts(img as Record<string, unknown>, RENDERED));
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

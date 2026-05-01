@@ -15,6 +15,7 @@ import { getReferenceDataCache } from '@/services/reference-data-cache/index.js'
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
+  appendPassthroughLines,
   buildRequestOptions,
   extractCoordinates,
   isUpstreamNotFound,
@@ -302,6 +303,25 @@ export const brapiGetStudy = tool('brapi_get_study', {
   format: (result) => {
     const lines: string[] = [];
     const study = result.study;
+    const STUDY_RENDERED = new Set([
+      'studyDbId',
+      'studyName',
+      'studyType',
+      'studyDescription',
+      'programDbId',
+      'programName',
+      'trialDbId',
+      'trialName',
+      'locationDbId',
+      'locationName',
+      'commonCropName',
+      'seasons',
+      'active',
+      'startDate',
+      'endDate',
+      'studyCode',
+      'studyPUI',
+    ]);
     lines.push(`# ${study.studyName ?? study.studyDbId}`);
     lines.push('');
     lines.push(`- **studyDbId:** \`${study.studyDbId}\``);
@@ -321,6 +341,7 @@ export const brapiGetStudy = tool('brapi_get_study', {
     if (study.endDate) lines.push(`- **endDate:** ${study.endDate}`);
     if (study.studyCode) lines.push(`- **studyCode:** ${study.studyCode}`);
     if (study.studyPUI) lines.push(`- **studyPUI:** ${study.studyPUI}`);
+    appendPassthroughLines(lines, study as Record<string, unknown>, STUDY_RENDERED);
     lines.push(`- **alias:** ${result.alias}`);
 
     if (result.program) {
@@ -390,6 +411,7 @@ function renderKeyValues(lines: string[], record: Record<string, unknown>): void
       if (value.length === 0) continue;
       lines.push(`- **${key}:** ${value.join(', ')}`);
     } else if (typeof value === 'object') {
+      lines.push(`- **${key}:** ${JSON.stringify(value)}`);
     } else {
       lines.push(`- **${key}:** ${value}`);
     }

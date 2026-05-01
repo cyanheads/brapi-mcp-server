@@ -702,4 +702,41 @@ export function buildRefinementHint(
   return `${totalCount} rows exceed loadLimit=${loadLimit}. Add more specific filters or raise loadLimit.`;
 }
 
+/**
+ * Collect `key=value` strings for every top-level key in a passthrough row
+ * that was not explicitly rendered by the caller. Ensures format() /
+ * structuredContent parity — server fields beyond the declared schema are
+ * still emitted to text-only clients (Claude Desktop sees content[] only).
+ */
+export function collectPassthroughParts(
+  row: Record<string, unknown>,
+  renderedKeys: ReadonlySet<string>,
+): string[] {
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(row)) {
+    if (renderedKeys.has(key) || value === undefined || value === null) continue;
+    const rendered = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    parts.push(`${key}=${rendered}`);
+  }
+  return parts;
+}
+
+/**
+ * Append `- **key:** value` lines for every top-level key in a passthrough
+ * record that was not explicitly rendered. Companion to
+ * `collectPassthroughParts` for detail-view (get_*) tools that use a
+ * line-per-field layout instead of bullet-part lists.
+ */
+export function appendPassthroughLines(
+  lines: string[],
+  record: Record<string, unknown>,
+  renderedKeys: ReadonlySet<string>,
+): void {
+  for (const [key, value] of Object.entries(record)) {
+    if (renderedKeys.has(key) || value === undefined || value === null) continue;
+    const rendered = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    lines.push(`- **${key}:** ${rendered}`);
+  }
+}
+
 export type { BrapiEnvelope, BrapiPagination, ResolvedAuth, ServerConfig };

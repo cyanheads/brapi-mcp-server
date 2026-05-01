@@ -20,6 +20,7 @@ import {
   asString,
   buildRefinementHint,
   checkFilterMatchRates,
+  collectPassthroughParts,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -377,6 +378,25 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     if (result.results.length === 0) {
       lines.push('_No rows returned._');
     } else {
+      const RENDERED = new Set([
+        'germplasmName',
+        'defaultDisplayName',
+        'germplasmDbId',
+        'germplasmPUI',
+        'accessionNumber',
+        'commonCropName',
+        'genus',
+        'species',
+        'subtaxa',
+        'countryOfOriginCode',
+        'collection',
+        'instituteCode',
+        'instituteName',
+        'germplasmOrigin',
+        'biologicalStatusOfAccessionDescription',
+        'pedigree',
+        'synonyms',
+      ]);
       for (const g of result.results) {
         const parts: string[] = [
           `**${g.germplasmName ?? g.defaultDisplayName ?? g.germplasmDbId}**`,
@@ -393,7 +413,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
         if (g.instituteCode) parts.push(`institute=${g.instituteCode}`);
         if (g.instituteName) parts.push(`instituteName=${g.instituteName}`);
         if (g.germplasmOrigin?.length)
-          parts.push(`germplasmOrigin=${g.germplasmOrigin.length} record(s)`);
+          parts.push(`germplasmOrigin=${JSON.stringify(g.germplasmOrigin)}`);
         if (g.biologicalStatusOfAccessionDescription)
           parts.push(`status=${g.biologicalStatusOfAccessionDescription}`);
         if (g.pedigree) parts.push(`pedigree=${g.pedigree}`);
@@ -404,6 +424,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
             .join(',');
           parts.push(`synonyms=${synStr}`);
         }
+        parts.push(...collectPassthroughParts(g as Record<string, unknown>, RENDERED));
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

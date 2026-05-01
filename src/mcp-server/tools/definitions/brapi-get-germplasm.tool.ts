@@ -13,7 +13,13 @@ import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
-import { AliasInput, buildRequestOptions, isUpstreamNotFound } from '../shared/find-helpers.js';
+import {
+  AliasInput,
+  appendPassthroughLines,
+  buildRequestOptions,
+  collectPassthroughParts,
+  isUpstreamNotFound,
+} from '../shared/find-helpers.js';
 
 const GermplasmSchema = z
   .object({
@@ -245,6 +251,25 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
   format: (result) => {
     const lines: string[] = [];
     const g = result.germplasm;
+    const GERMPLASM_RENDERED = new Set([
+      'germplasmDbId',
+      'germplasmName',
+      'germplasmPUI',
+      'commonCropName',
+      'accessionNumber',
+      'genus',
+      'species',
+      'subtaxa',
+      'defaultDisplayName',
+      'pedigree',
+      'biologicalStatusOfAccessionDescription',
+      'germplasmOrigin',
+      'countryOfOriginCode',
+      'collection',
+      'instituteCode',
+      'instituteName',
+      'synonyms',
+    ]);
     lines.push(`# ${g.germplasmName ?? g.defaultDisplayName ?? g.germplasmDbId}`);
     lines.push('');
     lines.push(`- **germplasmDbId:** \`${g.germplasmDbId}\``);
@@ -260,7 +285,7 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     if (g.biologicalStatusOfAccessionDescription)
       lines.push(`- **biologicalStatus:** ${g.biologicalStatusOfAccessionDescription}`);
     if (g.germplasmOrigin?.length)
-      lines.push(`- **germplasmOrigin:** ${g.germplasmOrigin.length} record(s)`);
+      lines.push(`- **germplasmOrigin:** ${JSON.stringify(g.germplasmOrigin)}`);
     if (g.countryOfOriginCode) lines.push(`- **countryOfOriginCode:** ${g.countryOfOriginCode}`);
     if (g.collection) lines.push(`- **collection:** ${g.collection}`);
     if (g.instituteCode) lines.push(`- **instituteCode:** ${g.instituteCode}`);
@@ -271,6 +296,7 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
         .join(', ');
       lines.push(`- **synonyms:** ${synStr}`);
     }
+    appendPassthroughLines(lines, g as Record<string, unknown>, GERMPLASM_RENDERED);
     lines.push(`- **alias:** ${result.alias}`);
 
     lines.push('');
@@ -278,11 +304,13 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     if (result.parents.length === 0) {
       lines.push('_No parents recorded._');
     } else {
+      const PARENT_RENDERED = new Set(['germplasmDbId', 'germplasmName', 'parentType']);
       for (const p of result.parents) {
         const parts: string[] = [];
         if (p.germplasmName) parts.push(p.germplasmName);
         if (p.germplasmDbId) parts.push(`id=\`${p.germplasmDbId}\``);
         if (p.parentType) parts.push(`type=${p.parentType}`);
+        parts.push(...collectPassthroughParts(p as Record<string, unknown>, PARENT_RENDERED));
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
@@ -292,12 +320,19 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     if (result.attributes.length === 0) {
       lines.push('_No attributes recorded._');
     } else {
+      const ATTR_RENDERED = new Set([
+        'attributeName',
+        'attributeDbId',
+        'attributeValue',
+        'determinedDate',
+      ]);
       for (const a of result.attributes) {
         const parts: string[] = [];
         if (a.attributeName) parts.push(a.attributeName);
         if (a.attributeDbId) parts.push(`(id=\`${a.attributeDbId}\`)`);
         if (a.attributeValue != null) parts.push(`= ${a.attributeValue}`);
         if (a.determinedDate) parts.push(`[determined ${a.determinedDate}]`);
+        parts.push(...collectPassthroughParts(a as Record<string, unknown>, ATTR_RENDERED));
         lines.push(`- ${parts.join(' ')}`);
       }
     }

@@ -22,6 +22,7 @@ import {
   buildRefinementHint,
   type CoordinateAxisOrder,
   checkFilterMatchRates,
+  collectPassthroughParts,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -363,6 +364,22 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     if (result.results.length === 0) {
       lines.push('_No rows returned._');
     } else {
+      // `coordinates` intentionally excluded: passthrough helper renders the full
+      // GeoJSON object so text-only clients see it alongside the extracted lat/lon.
+      const RENDERED = new Set([
+        'locationName',
+        'locationDbId',
+        'abbreviation',
+        'locationType',
+        'countryCode',
+        'countryName',
+        'latitude',
+        'longitude',
+        'altitude',
+        'instituteName',
+        'instituteAddress',
+        'documentationURL',
+      ]);
       for (const loc of result.results) {
         const parts: string[] = [`**${loc.locationName ?? loc.locationDbId}**`];
         parts.push(`id=\`${loc.locationDbId}\``);
@@ -381,6 +398,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         if (loc.instituteName) parts.push(`institute=${loc.instituteName}`);
         if (loc.instituteAddress) parts.push(`addr=${loc.instituteAddress}`);
         if (loc.documentationURL) parts.push(`docs=${loc.documentationURL}`);
+        parts.push(...collectPassthroughParts(loc as Record<string, unknown>, RENDERED));
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

@@ -19,6 +19,7 @@ import {
   applyDialectFilters,
   asString,
   buildRefinementHint,
+  collectPassthroughParts,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
@@ -267,6 +268,21 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     if (result.results.length === 0) {
       lines.push('_No rows returned._');
     } else {
+      const RENDERED = new Set([
+        'variantNames',
+        'variantDbId',
+        'variantType',
+        'variantSetDbId',
+        'variantSetDbIds',
+        'referenceName',
+        'start',
+        'end',
+        'referenceBases',
+        'alternateBases',
+        'filtersApplied',
+        'filtersPassed',
+        'filtersFailed',
+      ]);
       for (const v of result.results) {
         const label = v.variantNames?.[0] ?? v.variantDbId;
         const parts: string[] = [`**${label}**`];
@@ -283,6 +299,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
         if (v.filtersPassed != null) parts.push(`filtersPassed=${v.filtersPassed}`);
         if (v.filtersFailed?.length) parts.push(`filtersFailed=${v.filtersFailed.join(',')}`);
         if (v.variantNames?.length) parts.push(`names=${v.variantNames.join(',')}`);
+        parts.push(...collectPassthroughParts(v as Record<string, unknown>, RENDERED));
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

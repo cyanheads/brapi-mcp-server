@@ -24,6 +24,7 @@ import {
   AliasInput,
   asString,
   buildRequestOptions,
+  collectPassthroughParts,
   computeDistribution,
   DatasetHandleSchema,
   renderDatasetHandle,
@@ -313,6 +314,16 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     if (result.results.length === 0) {
       lines.push('_No calls returned._');
     } else {
+      const RENDERED = new Set([
+        'callSetName',
+        'callSetDbId',
+        'variantName',
+        'variantDbId',
+        'variantSetDbId',
+        'genotype',
+        'genotypeValue',
+        'phaseSet',
+      ]);
       for (const call of result.results) {
         const parts: string[] = [];
         parts.push(`**${call.callSetName ?? call.callSetDbId ?? '?'}**`);
@@ -320,9 +331,10 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         parts.push(`variant=${call.variantName ?? call.variantDbId ?? '?'}`);
         if (call.variantDbId) parts.push(`variantDbId=${call.variantDbId}`);
         if (call.variantSetDbId) parts.push(`set=${call.variantSetDbId}`);
-        if (call.genotype?.values?.length) parts.push(`genotype=${call.genotype.values.join('|')}`);
+        if (call.genotype) parts.push(`genotype=${JSON.stringify(call.genotype)}`);
         if (call.genotypeValue) parts.push(`genotypeValue=${call.genotypeValue}`);
         if (call.phaseSet) parts.push(`phaseSet=${call.phaseSet}`);
+        parts.push(...collectPassthroughParts(call as Record<string, unknown>, RENDERED));
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
