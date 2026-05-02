@@ -144,6 +144,56 @@ describe('brapi_find_locations tool', () => {
     expect(url.searchParams.has('locationTypes')).toBe(false);
   });
 
+  it('keeps Breedbase location filters plural for Sweetpotatobase-style servers', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'Sweetpotatobase');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({
+        locations: ['29'],
+        locationNames: ['Ica'],
+        countryCodes: ['PER'],
+        abbreviations: ['BIO'],
+      }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('locationDbIds')).toEqual(['29']);
+    expect(url.searchParams.getAll('locationNames')).toEqual(['Ica']);
+    expect(url.searchParams.getAll('countryCodes')).toEqual(['PER']);
+    expect(url.searchParams.getAll('abbreviations')).toEqual(['BIO']);
+    expect(url.searchParams.has('locationDbId')).toBe(false);
+    expect(url.searchParams.has('locationName')).toBe(false);
+    expect(url.searchParams.has('countryCode')).toBe(false);
+    expect(url.searchParams.has('abbreviation')).toBe(false);
+  });
+
+  it('warns when a requested country appears but unrelated countries are also returned', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(
+      jsonResponse(
+        envelope(
+          {
+            data: [
+              locRow({ locationDbId: 'per-1', countryCode: 'PER' }),
+              locRow({ locationDbId: 'usa-1', countryCode: 'USA' }),
+            ],
+          },
+          { totalCount: 2 },
+        ),
+      ),
+    );
+
+    const result = await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({ countryCodes: ['PER'] }),
+      ctx,
+    );
+
+    expect(result.warnings.join('\n')).toContain('carried other values');
+    expect(result.warnings.join('\n')).toContain('USA');
+  });
+
   it('format() includes the location name, country, and coordinates', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [locRow()] }, { totalCount: 1 })));

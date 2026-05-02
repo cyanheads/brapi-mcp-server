@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.9](changelog/0.4.x/0.4.9.md) — 2026-05-02
+
+Sweetpotatobase follow-up: keep Breedbase location filters plural, add URL-pattern dialect detection, and fail soft when observation spillover pages stall.
+
 ## [0.4.8](changelog/0.4.x/0.4.8.md) — 2026-05-01
 
 Generalize the /observations preflight from germplasm-only to any unanchored query, and make the probe fail-soft via companion call options so a stalled count surfaces as a warning instead of a hard error.

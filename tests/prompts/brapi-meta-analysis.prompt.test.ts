@@ -34,6 +34,17 @@ describe('brapi_meta_analysis prompt', () => {
     expect(text).toContain('brapi_walk_pedigree');
   });
 
+  it('tells agents to pivot to study-anchored observation calls after preflight stalls', () => {
+    const args = brapiMetaAnalysis.args.parse({
+      germplasmDbIds: 'g-1',
+      traitName: 'Dry matter content',
+    });
+    const text = (brapiMetaAnalysis.generate(args)[0]!.content as { text: string }).text;
+    expect(text).toContain('unanchored observation query stalled');
+    expect(text).toContain('studies: ["<studyDbId>"]');
+    expect(text).toContain('germplasm');
+  });
+
   it('threads the alias arg through every tool call snippet', () => {
     const args = brapiMetaAnalysis.args.parse({
       germplasmDbIds: 'g-1',

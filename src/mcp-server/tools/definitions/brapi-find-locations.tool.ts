@@ -309,12 +309,14 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         requestedValues: input.countryCodes,
         distribution: distributions.countryCode,
         caseInsensitive: true,
+        requireEveryRowMatch: true,
       },
       {
         paramName: 'locationTypes',
         requestedValues: input.locationTypes,
         distribution: distributions.locationType,
         caseInsensitive: true,
+        requireEveryRowMatch: true,
       },
     ]);
 

@@ -177,6 +177,33 @@ describe('brapi_find_observations tool', () => {
     expect(result.refinementHint).toMatch(/25 rows exceed loadLimit=10/);
   });
 
+  it('returns the first page with a warning when dataset spillover page pulls fail', async () => {
+    const ctx = await connect(fetcher);
+    const firstRows = Array.from({ length: 10 }, (_, i) =>
+      obsRow({ observationDbId: `obs-${i + 1}`, value: String(i) }),
+    );
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
+      if (page === 0) {
+        return jsonResponse(envelope({ data: firstRows }, { totalCount: 25 }));
+      }
+      throw new Error('upstream page stalled');
+    });
+
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ studies: ['s-1'], loadLimit: 10 }),
+      ctx,
+    );
+
+    expect(result.returnedCount).toBe(10);
+    expect(result.totalCount).toBe(25);
+    expect(result.hasMore).toBe(true);
+    expect(result.dataset).toBeUndefined();
+    expect(result.warnings.join('\n')).toContain('Dataset spillover skipped');
+    expect(result.warnings.join('\n')).toContain('upstream page stalled');
+  });
+
   it('throws ValidationError when /observations is not advertised', async () => {
     const ctx = await connect(fetcher, ['studies']);
     await expect(
@@ -346,6 +373,7 @@ describe('brapi_find_observations tool', () => {
     expect(result.warnings.some((w) => /Observations preflight count probe stalled/.test(w))).toBe(
       true,
     );
+    expect(result.warnings.join('\n')).toContain('find studies containing the germplasm');
   });
 
   it('preflights unscoped germplasm queries and skips bulk pull above threshold', async () => {

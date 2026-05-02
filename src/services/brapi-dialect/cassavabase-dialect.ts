@@ -39,7 +39,7 @@ import type { BrapiDialect } from './types.js';
  * in `find-helpers` will surface a warning when a translation doesn't reduce
  * the result set as expected.
  */
-const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
+const CASSAVABASE_PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
   studies: {
     commonCropNames: 'commonCropName', // observed: works
     studyTypes: 'studyType',
@@ -133,6 +133,15 @@ const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
   },
 };
 
+const BREEDBASE_PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
+  ...CASSAVABASE_PLURAL_TO_SINGULAR,
+  // Sweetpotatobase (SPB) honors the BrAPI v2 plural location filters and
+  // silently ignores singular locationDbId/locationName/countryCode/
+  // abbreviation. Leave the named tool filters in their plural form for the
+  // broader Breedbase dialect; locationTypes works in both forms.
+  locations: {},
+};
+
 /**
  * Filters CassavaBase silently ignores entirely — drop them from the wire and
  * surface a warning so the agent stops trusting the response as if the filter
@@ -179,17 +188,29 @@ const SGN_NOTES = [
   'Several advertised POST /search routes are treated as unavailable because SGN-family deployments often expose them in /calls while serving broken or hanging responses.',
 ] as const;
 
-function createSgnFamilyDialect(id: string, label: string): BrapiDialect {
+function createSgnFamilyDialect(
+  id: string,
+  label: string,
+  pluralToSingular: Record<string, Readonly<Record<string, string>>>,
+): BrapiDialect {
   return createSingularizingDialect({
     id,
     label,
-    pluralToSingular: PLURAL_TO_SINGULAR,
+    pluralToSingular,
     droppedFilters: DROPPED_FILTERS,
     disabledSearchEndpoints: DISABLED_SEARCH_ENDPOINTS,
     notes: SGN_NOTES,
   });
 }
 
-export const cassavabaseDialect = createSgnFamilyDialect('cassavabase', 'CassavaBase');
+export const cassavabaseDialect = createSgnFamilyDialect(
+  'cassavabase',
+  'CassavaBase',
+  CASSAVABASE_PLURAL_TO_SINGULAR,
+);
 
-export const breedbaseDialect = createSgnFamilyDialect('breedbase', 'Breedbase/SGN');
+export const breedbaseDialect = createSgnFamilyDialect(
+  'breedbase',
+  'Breedbase/SGN',
+  BREEDBASE_PLURAL_TO_SINGULAR,
+);

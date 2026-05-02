@@ -85,9 +85,9 @@ export const OrientationDialectSchema = z
         'Active dialect id (e.g. "spec", "cassavabase"). Names a registered adapter that translates outbound filters and declares known-dead routes.',
       ),
     source: z
-      .enum(['env-override', 'server-name', 'organization-name', 'fallback'])
+      .enum(['env-override', 'url-pattern', 'server-name', 'organization-name', 'fallback'])
       .describe(
-        'Where the dialect id came from: pinned via BRAPI_<ALIAS>_DIALECT, matched on /serverinfo serverName / organizationName, or fell through to the spec passthrough.',
+        'Where the dialect id came from: pinned via BRAPI_<ALIAS>_DIALECT, matched on URL host / /serverinfo serverName / organizationName, or fell through to the spec passthrough.',
       ),
     envVar: z
       .string()

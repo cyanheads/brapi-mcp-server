@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  detectDialectFromBaseUrl,
   detectDialectFromName,
   detectDialectId,
   dialectEnvVar,
@@ -14,9 +15,13 @@ import {
 } from '@/services/brapi-dialect/detect.js';
 import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 
-function profile(name: string | undefined, organizationName?: string): CapabilityProfile {
+function profile(
+  name: string | undefined,
+  organizationName?: string,
+  baseUrl = 'https://example.org/brapi/v2',
+): CapabilityProfile {
   return {
-    baseUrl: 'https://example.org/brapi/v2',
+    baseUrl,
     server: { ...(name ? { name } : {}), ...(organizationName ? { organizationName } : {}) },
     supported: {},
     crops: [],
@@ -29,6 +34,30 @@ describe('dialectEnvVar', () => {
     expect(dialectEnvVar('default')).toBe('BRAPI_DEFAULT_DIALECT');
     expect(dialectEnvVar('cassava')).toBe('BRAPI_CASSAVA_DIALECT');
     expect(dialectEnvVar('my-server')).toBe('BRAPI_MY_SERVER_DIALECT');
+  });
+});
+
+describe('detectDialectFromBaseUrl', () => {
+  it('detects known SGN-family hosts with source=url-pattern', () => {
+    expect(detectDialectFromBaseUrl('https://sweetpotatobase.org/brapi/v2')).toEqual({
+      id: 'breedbase',
+      source: 'url-pattern',
+    });
+    expect(detectDialectFromBaseUrl('https://cassavabase.org/brapi/v2')).toEqual({
+      id: 'cassavabase',
+      source: 'url-pattern',
+    });
+  });
+
+  it('falls back for unknown or malformed URLs', () => {
+    expect(detectDialectFromBaseUrl('https://example.org/brapi/v2')).toEqual({
+      id: 'spec',
+      source: 'fallback',
+    });
+    expect(detectDialectFromBaseUrl('not a url')).toEqual({
+      id: 'spec',
+      source: 'fallback',
+    });
   });
 });
 
@@ -117,6 +146,15 @@ describe('detectDialectId', () => {
     });
     expect(result.id).toBe('cassavabase');
     expect(result.source).toBe('server-name');
+  });
+
+  it('uses URL-pattern detection before sparse or generic server names', () => {
+    const result = detectDialectId(
+      'sweetpotato',
+      profile('SPB', undefined, 'https://sweetpotatobase.org/brapi/v2'),
+      {},
+    );
+    expect(result).toEqual({ id: 'breedbase', source: 'url-pattern' });
   });
 
   it('returns spec when no profile and no override', () => {

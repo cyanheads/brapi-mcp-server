@@ -164,6 +164,9 @@ type Output = z.infer<typeof OutputSchema>;
  */
 const PREFLIGHT_BULK_THRESHOLD = 5_000;
 
+const OBSERVATION_PREFLIGHT_RECOVERY =
+  "Narrow with `studies: ['…']`, `trials: ['…']`, or scope to specific `observationUnits` / `observations`. On SGN/Breedbase servers, a practical path is: first find studies containing the germplasm, then call this tool again with both `studies: ['<studyDbId>']` and `germplasm: ['<germplasmDbId>']`.";
+
 const SERVER_TO_USER: Record<string, string> = {
   // Plurals — BrAPI v2.1 spec, used by the `spec` dialect.
   studyDbIds: 'studies',
@@ -314,7 +317,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       });
       if (probe === null) {
         warnings.push(
-          "Observations preflight count probe stalled — the upstream count operation appears unbounded for this query shape, indicating a likely full-table scan. Bulk pull skipped to avoid a long hang. Narrow with `studies: ['…']`, `trials: ['…']`, or scope to specific `observationUnits` / `observations`.",
+          `Observations preflight count probe stalled — the upstream count operation appears unbounded for this query shape, indicating a likely full-table scan. Bulk pull skipped to avoid a long hang. ${OBSERVATION_PREFLIGHT_RECOVERY}`,
         );
         firstPage = { rows: [], hasMore: false, pagesFetched: 0, totalCount: 0 };
         bulkPullSkipped = true;
@@ -323,7 +326,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         probe.totalCount > PREFLIGHT_BULK_THRESHOLD
       ) {
         warnings.push(
-          `Preflight detected ${probe.totalCount} observations matching this query (no study / trial / observationUnit / observation anchor). Bulk pull skipped to avoid an upstream timeout — narrow with \`studies: ['…']\`, \`trials: ['…']\`, or scope to specific \`observationUnits\` / \`observations\`. Returning the 1-row preflight as the only in-context observation.`,
+          `Preflight detected ${probe.totalCount} observations matching this query (no study / trial / observationUnit / observation anchor). Bulk pull skipped to avoid an upstream timeout. ${OBSERVATION_PREFLIGHT_RECOVERY} Returning the 1-row preflight as the only in-context observation.`,
         );
         firstPage = probe;
         bulkPullSkipped = true;
@@ -344,6 +347,11 @@ export const brapiFindObservations = tool('brapi_find_observations', {
           loadLimit,
           ctx,
           store: datasetStore,
+          warnings,
+          spillRequestOptions: {
+            timeoutMs: config.companionTimeoutMs,
+            retryMaxAttempts: 0,
+          },
         });
 
     const distributions = {
@@ -363,11 +371,20 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         requestedValues: input.observationLevels,
         distribution: distributions.observationLevel,
         caseInsensitive: true,
+        requireEveryRowMatch: true,
       },
-      fkMatchCheck('studies', input.studies, fullRows, 'studyDbId'),
-      fkMatchCheck('germplasm', input.germplasm, fullRows, 'germplasmDbId'),
-      fkMatchCheck('variables', input.variables, fullRows, 'observationVariableDbId'),
-      fkMatchCheck('observationUnits', input.observationUnits, fullRows, 'observationUnitDbId'),
+      fkMatchCheck('studies', input.studies, fullRows, 'studyDbId', {
+        requireEveryRowMatch: true,
+      }),
+      fkMatchCheck('germplasm', input.germplasm, fullRows, 'germplasmDbId', {
+        requireEveryRowMatch: true,
+      }),
+      fkMatchCheck('variables', input.variables, fullRows, 'observationVariableDbId', {
+        requireEveryRowMatch: true,
+      }),
+      fkMatchCheck('observationUnits', input.observationUnits, fullRows, 'observationUnitDbId', {
+        requireEveryRowMatch: true,
+      }),
     ]);
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;

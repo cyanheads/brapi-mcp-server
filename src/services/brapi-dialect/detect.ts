@@ -15,6 +15,13 @@ import type { CapabilityProfile } from '@/services/capability-registry/types.js'
 
 const ENV_PREFIX = 'BRAPI_';
 const ENV_SUFFIX = '_DIALECT';
+const CASSAVABASE_HOSTS = ['cassavabase.org'] as const;
+const BREEDBASE_HOSTS = [
+  'sweetpotatobase.org',
+  'yambase.org',
+  'musabase.org',
+  'bananabase.org',
+] as const;
 
 /**
  * Where the resolved dialect id came from. Surfaced in the orientation
@@ -23,6 +30,7 @@ const ENV_SUFFIX = '_DIALECT';
  * spec passthrough.
  *
  * - `env-override` — the operator pinned `BRAPI_<ALIAS>_DIALECT`.
+ * - `url-pattern` — matched on the registered base URL host.
  * - `server-name` — matched on `serverInfo.serverName`.
  * - `organization-name` — matched on `serverInfo.organizationName` (used when
  *   the server name is generic but the host is a known SGN deployment).
@@ -30,6 +38,7 @@ const ENV_SUFFIX = '_DIALECT';
  */
 export type DialectDetectionSource =
   | 'env-override'
+  | 'url-pattern'
   | 'server-name'
   | 'organization-name'
   | 'fallback';
@@ -98,6 +107,29 @@ export function detectDialectFromName(
 }
 
 /**
+ * Pattern-match a registered base URL to a dialect. This catches SGN-family
+ * deployments with generic or sparse `/serverinfo` identity fields.
+ */
+export function detectDialectFromBaseUrl(baseUrl: string | undefined): DialectDetection {
+  if (!baseUrl) return { id: 'spec', source: 'fallback' };
+  let host: string;
+  try {
+    host = new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return { id: 'spec', source: 'fallback' };
+  }
+
+  if (hostMatches(host, CASSAVABASE_HOSTS)) return { id: 'cassavabase', source: 'url-pattern' };
+  if (hostMatches(host, BREEDBASE_HOSTS)) return { id: 'breedbase', source: 'url-pattern' };
+  if (host === 'test-server.brapi.org') return { id: 'brapi-test', source: 'url-pattern' };
+  return { id: 'spec', source: 'fallback' };
+}
+
+function hostMatches(host: string, domains: readonly string[]): boolean {
+  return domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
+}
+
+/**
  * End-to-end detection: env override beats profile inference. Returns the
  * resolved dialect id and the source that produced it. Callers that only
  * need the id can read `.id`; the orientation envelope reads both.
@@ -109,5 +141,7 @@ export function detectDialectId(
 ): DialectDetection {
   const override = readDialectOverride(alias, env);
   if (override) return { id: override, source: 'env-override' };
+  const fromUrl = detectDialectFromBaseUrl(profile?.baseUrl);
+  if (fromUrl.source !== 'fallback') return fromUrl;
   return detectDialectFromName(profile?.server.name, profile?.server.organizationName);
 }

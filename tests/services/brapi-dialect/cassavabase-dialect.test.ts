@@ -7,7 +7,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { cassavabaseDialect } from '@/services/brapi-dialect/cassavabase-dialect.js';
+import {
+  breedbaseDialect,
+  cassavabaseDialect,
+} from '@/services/brapi-dialect/cassavabase-dialect.js';
 
 describe('cassavabaseDialect', () => {
   describe('studies endpoint', () => {
@@ -194,7 +197,7 @@ describe('cassavabaseDialect', () => {
   });
 
   describe('locations / variables / images / variants', () => {
-    it('translates locations plurals', () => {
+    it('translates CassavaBase locations plurals', () => {
       const result = cassavabaseDialect.adaptGetFilters('locations', {
         locationDbIds: ['3'],
         countryCodes: ['NGA'],
@@ -205,6 +208,24 @@ describe('cassavabaseDialect', () => {
         countryCode: 'NGA',
         locationType: 'Field',
       });
+    });
+
+    it('leaves Breedbase location filters plural for Sweetpotatobase compatibility', () => {
+      const result = breedbaseDialect.adaptGetFilters('locations', {
+        locationDbIds: ['29'],
+        locationNames: ['Ica'],
+        countryCodes: ['PER'],
+        locationTypes: ['Field'],
+        abbreviations: ['BIO'],
+      });
+      expect(result.filters).toEqual({
+        locationDbIds: ['29'],
+        locationNames: ['Ica'],
+        countryCodes: ['PER'],
+        locationTypes: ['Field'],
+        abbreviations: ['BIO'],
+      });
+      expect(result.warnings).toEqual([]);
     });
 
     it('translates variables plurals', () => {

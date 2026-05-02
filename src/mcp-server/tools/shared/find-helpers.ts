@@ -233,9 +233,10 @@ function deepEqual(a: unknown, b: unknown): boolean {
 export function buildRequestOptions(
   connection: RegisteredServer,
   params?: BrapiRequestOptions['params'],
+  overrides: BrapiRequestOptions = {},
 ): BrapiRequestOptions {
-  const opts: BrapiRequestOptions = {};
-  if (connection.resolvedAuth) opts.auth = connection.resolvedAuth;
+  const opts: BrapiRequestOptions = { ...overrides };
+  if (connection.resolvedAuth && !opts.auth) opts.auth = connection.resolvedAuth;
   if (params) opts.params = params;
   return opts;
 }
@@ -407,6 +408,7 @@ async function fetchFindRoutePage<T>(
   pageSize: number,
   page: number,
   ctx: Context,
+  requestOptions: BrapiRequestOptions = {},
 ): Promise<BrapiEnvelope<BrapiListResult<T> | T[]>> {
   if (route.kind === 'get') {
     const params: BrapiRequestOptions['params'] = {
@@ -421,7 +423,7 @@ async function fetchFindRoutePage<T>(
       connection.baseUrl,
       route.path,
       ctx,
-      buildRequestOptions(connection, params),
+      buildRequestOptions(connection, params, requestOptions),
     );
   }
 
@@ -431,7 +433,7 @@ async function fetchFindRoutePage<T>(
     route.noun,
     body,
     ctx,
-    buildRequestOptions(connection),
+    buildRequestOptions(connection, undefined, requestOptions),
   );
   if (response.kind === 'sync') return response.envelope;
   return await client.getSearchResults<BrapiListResult<T> | T[]>(
@@ -439,7 +441,7 @@ async function fetchFindRoutePage<T>(
     route.noun,
     response.searchResultsDbId,
     ctx,
-    buildRequestOptions(connection, { pageSize, page }),
+    buildRequestOptions(connection, { pageSize, page }, requestOptions),
   );
 }
 
@@ -451,6 +453,8 @@ export interface SpillInput<T> {
   /** First-page rows already loaded. Avoids a re-fetch. */
   firstPage: T[];
   loadLimit: number;
+  /** Optional request overrides for spillover page pulls. */
+  pageRequestOptions?: BrapiRequestOptions;
   path: string;
   /** Optional route selected by resolveFindRoute; defaults to GET path + filters. */
   route?: FindRoute;
@@ -575,7 +579,15 @@ export interface MaybeSpillInput<T> {
    */
   rowFilter?: (row: T) => boolean;
   source: string;
+  /**
+   * Optional request overrides for spillover page pulls. Useful when a tool
+   * wants dataset persistence to be best-effort under a tighter latency
+   * budget than the first page.
+   */
+  spillRequestOptions?: BrapiRequestOptions;
   store: DatasetStore;
+  /** Optional warning sink. When supplied, spillover failures degrade to rows-only output. */
+  warnings?: string[];
 }
 
 export interface MaybeSpillResult<T> {
@@ -616,11 +628,21 @@ export async function maybeSpill<T extends Record<string, unknown>>(
   };
   if (rowFilter) spillInput.rowFilter = rowFilter;
   if (input.route) spillInput.route = input.route;
-  const spill = await spillToDataset(spillInput);
-  return {
-    fullRows: spill.fullRows,
-    dataset: toDatasetHandle(spill.dataset),
-  };
+  if (input.spillRequestOptions) spillInput.pageRequestOptions = input.spillRequestOptions;
+  try {
+    const spill = await spillToDataset(spillInput);
+    return {
+      fullRows: spill.fullRows,
+      dataset: toDatasetHandle(spill.dataset),
+    };
+  } catch (err) {
+    if (!input.warnings || !(err instanceof SpillPageFetchError)) throw err;
+    input.warnings.push(
+      `Dataset spillover skipped after returning the first ${firstPage.rows.length} row(s): ${formatSpillError(err)}. Narrow filters, raise loadLimit enough to fit the result in one page, or retry when the upstream server is responsive.`,
+    );
+    const rows = rowFilter ? firstPage.rows.filter(rowFilter) : firstPage.rows;
+    return { fullRows: rows };
+  }
 }
 
 /**
@@ -643,14 +665,20 @@ export async function spillToDataset<T extends Record<string, unknown>>(
     if (rows.length >= remainingTarget) break;
     if (input.ctx.signal.aborted) break;
     const route = input.route ?? getRouteForPath(input.path, input.filters);
-    const envelope = await fetchFindRoutePage<T>(
-      input.client,
-      input.connection,
-      route,
-      pageSize,
-      page,
-      input.ctx,
-    );
+    let envelope: BrapiEnvelope<BrapiListResult<T> | T[]>;
+    try {
+      envelope = await fetchFindRoutePage<T>(
+        input.client,
+        input.connection,
+        route,
+        pageSize,
+        page,
+        input.ctx,
+        input.pageRequestOptions,
+      );
+    } catch (err) {
+      throw new SpillPageFetchError(formatSpillError(err), { cause: err });
+    }
     const pageRows = extractRows<T>(envelope.result);
     rows.push(...pageRows);
     pagesFetched += 1;
@@ -676,6 +704,16 @@ export async function spillToDataset<T extends Record<string, unknown>>(
   const dataset = await input.store.create(input.ctx, createInput);
 
   return { dataset, fullRows: persistedRows, pagesFetched };
+}
+
+class SpillPageFetchError extends Error {
+  override readonly name = 'SpillPageFetchError';
+}
+
+function formatSpillError(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err.length > 0) return err;
+  return 'upstream page fetch failed';
 }
 
 function getRouteForPath(path: string, filters: Record<string, unknown>): FindRoute {
@@ -800,6 +838,12 @@ export interface FilterMatchCheck {
   paramName: string;
   /** Requested values from the agent. Undefined or empty means skip this check. */
   requestedValues: readonly (string | number | boolean)[] | undefined;
+  /**
+   * Warn when any returned row carries a value outside the requested set.
+   * Equality filters should usually set this because one matching row is not
+   * enough evidence that the upstream honored the filter.
+   */
+  requireEveryRowMatch?: boolean;
 }
 
 /**
@@ -822,7 +866,25 @@ export function checkFilterMatchRates(
 
     const norm = (v: string) => (check.caseInsensitive ? v.toLowerCase() : v);
     const haystack = new Set(distKeys.map(norm));
-    const matched = check.requestedValues.some((v) => haystack.has(norm(String(v))));
+    const requested = new Set(check.requestedValues.map((v) => norm(String(v))));
+    const matched = [...requested].some((v) => haystack.has(v));
+    if (matched && check.requireEveryRowMatch) {
+      const unexpectedCount = Object.entries(check.distribution).reduce(
+        (sum, [value, count]) => (requested.has(norm(value)) ? sum : sum + count),
+        0,
+      );
+      if (unexpectedCount > 0) {
+        const sample = distKeys
+          .filter((v) => !requested.has(norm(v)))
+          .slice(0, 5)
+          .join(', ');
+        const overflow = distKeys.filter((v) => !requested.has(norm(v))).length > 5 ? ', …' : '';
+        warnings.push(
+          `Filter '${check.paramName}' requested ${JSON.stringify(check.requestedValues)} but ${unexpectedCount} returned row(s) carried other values (${sample}${overflow}) — the server may not honor this filter.`,
+        );
+      }
+      continue;
+    }
     if (matched) continue;
 
     const sample = distKeys.slice(0, 5).join(', ');
@@ -845,11 +907,13 @@ export function fkMatchCheck(
   requestedValues: readonly (string | number | boolean)[] | undefined,
   rows: readonly Record<string, unknown>[],
   fieldName: string,
+  options: { requireEveryRowMatch?: boolean } = {},
 ): FilterMatchCheck {
   return {
     paramName,
     requestedValues,
     distribution: computeDistribution(rows, (r) => asString(r[fieldName])),
+    ...options,
   };
 }
 
