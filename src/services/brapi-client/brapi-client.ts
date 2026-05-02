@@ -31,6 +31,7 @@ import type {
   ResolvedAuth,
   SearchResponse,
 } from './types.js';
+import { DIALECT_ALL_DROPPED_REASON } from './types.js';
 
 /**
  * The framework's `Context` and `RequestContext` are structurally compatible
@@ -62,17 +63,26 @@ export class BrapiClient {
     private readonly fetcher: Fetcher = defaultFetcher,
   ) {}
 
-  /** GET /{path} with optional query params and auth. */
-  get<T>(
+  /**
+   * GET /{path} with optional query params and auth. When `options.dialect` is
+   * supplied, `params` are routed through the dialect adapter at the client
+   * edge — single source of truth for plural/singular translation across every
+   * call site (find_* tools, FK lookups, count probes). Throws a structured
+   * `validationError` (with `data.reason = DIALECT_ALL_DROPPED_REASON`) when
+   * the dialect drops every supplied filter, so callers can detect and skip
+   * without parsing message text.
+   */
+  async get<T>(
     baseUrl: string,
     path: string,
     ctx: Context,
     options: BrapiRequestOptions = {},
   ): Promise<BrapiEnvelope<T>> {
-    return withRetry(
+    const params = applyDialectToParams(path, options);
+    return await withRetry(
       async () => {
         const response = await this.doFetch(
-          this.buildUrl(baseUrl, path, options.params),
+          this.buildUrl(baseUrl, path, params),
           ctx,
           { method: 'GET', headers: this.buildHeaders(options.auth) },
           options.timeoutMs,
@@ -82,7 +92,7 @@ export class BrapiClient {
       {
         operation: `brapi.get ${path}`,
         context: asRequestContext(ctx),
-        maxRetries: this.serverConfig.retryMaxAttempts,
+        maxRetries: options.retryMaxAttempts ?? this.serverConfig.retryMaxAttempts,
         baseDelayMs: this.serverConfig.retryBaseDelayMs,
         signal: ctx.signal,
       },
@@ -408,6 +418,67 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function isEnvelope(value: unknown): value is BrapiEnvelope<unknown> {
   return typeof value === 'object' && value !== null && 'metadata' in value && 'result' in value;
+}
+
+/**
+ * Resolve the dialect endpoint segment from a request path. The segment is
+ * the bare resource name dialect mappings are keyed by (`/trials` →
+ * `trials`, `/germplasm/X/attributes` → `germplasm`). Path-param endpoints
+ * generally don't need filter translation; passing the first segment keeps
+ * lookups consistent and the dialect adapter no-ops on unknown endpoints.
+ */
+function dialectEndpointFor(path: string): string {
+  return path.replace(/^\/+/, '').split('/')[0] ?? '';
+}
+
+/**
+ * Apply the dialect adapter to a request's params when a dialect is supplied.
+ * Empty / undefined params short-circuit (nothing to translate); when the
+ * adapter drops every supplied filter we throw a structured `validationError`
+ * with the canonical `dialect_all_filters_dropped` reason so companions can
+ * `.catch` and skip without surfacing the unfiltered baseline.
+ */
+function applyDialectToParams(
+  path: string,
+  options: BrapiRequestOptions,
+): BrapiRequestOptions['params'] {
+  const dialect = options.dialect;
+  const params = options.params;
+  if (!dialect || !params) return params;
+  const inputKeyCount = Object.keys(params).length;
+  if (inputKeyCount === 0) return params;
+  const adapted = dialect.adaptGetFilters(
+    dialectEndpointFor(path),
+    params as Readonly<Record<string, unknown>>,
+  );
+  if (options.warnings) options.warnings.push(...adapted.warnings);
+  if (adapted.dropped.length > 0 && Object.keys(adapted.filters).length === 0) {
+    throw validationError(
+      `Every supplied filter was dropped by the ${dialect.id} dialect on ${path} (${adapted.dropped.join(', ')}); call would silently widen to the unfiltered baseline.`,
+      {
+        reason: DIALECT_ALL_DROPPED_REASON,
+        dialect: dialect.id,
+        path,
+        dropped: adapted.dropped,
+      },
+    );
+  }
+  return adapted.filters as BrapiRequestOptions['params'];
+}
+
+/**
+ * True when `err` was thrown by the client-level dialect adapter to signal
+ * "every supplied filter dropped." Used by companion call sites to convert
+ * the throw into a graceful warn-and-skip instead of propagating to the user.
+ */
+export function isDialectAllDropped(err: unknown): err is McpError {
+  return (
+    err instanceof McpError &&
+    err.code === JsonRpcErrorCode.ValidationError &&
+    typeof err.data === 'object' &&
+    err.data !== null &&
+    (err.data as Record<string, unknown>).reason === DIALECT_ALL_DROPPED_REASON
+  );
 }
 
 /**

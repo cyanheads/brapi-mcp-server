@@ -84,6 +84,14 @@ const ServerConfigSchema = z.object({
     .positive()
     .default(30_000)
     .describe('Per-request HTTP timeout.'),
+  companionTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(8_000)
+    .describe(
+      'Tighter timeout for non-critical companion enrichments (FK lookups, count probes). Companions also bypass the retry budget so a slow upstream surfaces a warning instead of stretching the response by 4×.',
+    ),
   searchPollTimeoutMs: z.coerce
     .number()
     .int()
@@ -131,6 +139,7 @@ export function getServerConfig(): ServerConfig {
     retryBaseDelayMs: 'BRAPI_RETRY_BASE_DELAY_MS',
     referenceCacheTtlSeconds: 'BRAPI_REFERENCE_CACHE_TTL_SECONDS',
     requestTimeoutMs: 'BRAPI_REQUEST_TIMEOUT_MS',
+    companionTimeoutMs: 'BRAPI_COMPANION_TIMEOUT_MS',
     searchPollTimeoutMs: 'BRAPI_SEARCH_POLL_TIMEOUT_MS',
     searchPollIntervalMs: 'BRAPI_SEARCH_POLL_INTERVAL_MS',
     allowPrivateIps: 'BRAPI_ALLOW_PRIVATE_IPS',

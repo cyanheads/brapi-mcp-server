@@ -15,10 +15,24 @@ import {
   type BrapiEnvelope,
   type BrapiRequestOptions,
   getBrapiClient,
+  isDialectAllDropped,
 } from '@/services/brapi-client/index.js';
+import type { BrapiDialect } from '@/services/brapi-dialect/index.js';
 import type { Location, Program, Trial } from './types.js';
 
-export type ReferenceLookupOptions = Pick<BrapiRequestOptions, 'auth'>;
+export interface ReferenceLookupOptions {
+  auth?: BrapiRequestOptions['auth'];
+  /**
+   * Active dialect for the connection. Threaded through to the BrapiClient so
+   * the v2.1 plural ID filter (`trialDbIds`, `programDbIds`, …) is translated
+   * to the singular form servers like CassavaBase honor. Without this, the
+   * filter is silently ignored upstream and the response carries an arbitrary
+   * page-zero row instead of the requested record.
+   */
+  dialect?: BrapiDialect;
+  /** Optional warnings sink — receives any dialect-translation warnings. */
+  warnings?: string[];
+}
 
 interface BatchResolveConfig<T> {
   cachePrefix: string;
@@ -138,15 +152,33 @@ export class ReferenceDataCache {
   ): Promise<T[]> {
     const requestOptions: BrapiRequestOptions = {
       params: { [cfg.idFilter]: ids, pageSize: ids.length },
+      timeoutMs: this.serverConfig.companionTimeoutMs,
+      retryMaxAttempts: 0,
     };
     if (options.auth) requestOptions.auth = options.auth;
-    const env = await this.client().get<T[] | { data: T[] }>(
-      baseUrl,
-      cfg.endpoint,
-      ctx,
-      requestOptions,
-    );
-    return extractDataArray<T>(env);
+    if (options.dialect) requestOptions.dialect = options.dialect;
+    if (options.warnings) requestOptions.warnings = options.warnings;
+    try {
+      const env = await this.client().get<T[] | { data: T[] }>(
+        baseUrl,
+        cfg.endpoint,
+        ctx,
+        requestOptions,
+      );
+      return extractDataArray<T>(env);
+    } catch (err) {
+      if (isDialectAllDropped(err)) {
+        // The dialect dropped every plural ID filter and there's no singular
+        // alias on this server — surface a warning and return empty so the
+        // caller treats the FK as unavailable instead of receiving a page-zero
+        // row keyed off the wrong ID.
+        options.warnings?.push(
+          `Reference lookup ${cfg.endpoint} skipped: active dialect drops every supported ID filter; FK enrichment unavailable.`,
+        );
+        return [];
+      }
+      throw err;
+    }
   }
 
   private async deletePrefix(ctx: Context, prefix: string): Promise<void> {

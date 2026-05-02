@@ -9,6 +9,7 @@ export {
   BrapiClient,
   getBrapiClient,
   initBrapiClient,
+  isDialectAllDropped,
   resetBrapiClient,
 } from './brapi-client.js';
 export type {
@@ -22,3 +23,4 @@ export type {
   ResolvedAuth,
   SearchResponse,
 } from './types.js';
+export { DIALECT_ALL_DROPPED_REASON } from './types.js';

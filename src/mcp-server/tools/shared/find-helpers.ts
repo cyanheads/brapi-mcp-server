@@ -241,6 +241,36 @@ export function buildRequestOptions(
 }
 
 /**
+ * Build request options for a companion enrichment call (FK lookup, count
+ * probe, preflight). Companions are non-critical — they decorate the response
+ * but never gate it — so they get a tighter wall-clock budget and zero
+ * retries: a slow upstream surfaces as a single warning instead of stretching
+ * the response by 4× the per-attempt timeout.
+ *
+ * The dialect is threaded through so the BrapiClient translates plural ID
+ * filters (`studyDbIds`, `trialDbIds`, …) at the wire edge — the v0.4.7 fix
+ * for the foundational dialect-bypass class of bug. Warnings (dialect drops,
+ * downcasts) flow into the same array the tool surfaces in its envelope.
+ */
+export function companionRequestOptions(
+  connection: RegisteredServer,
+  dialect: BrapiDialect,
+  config: ServerConfig,
+  warnings: string[],
+  params?: BrapiRequestOptions['params'],
+): BrapiRequestOptions {
+  const opts: BrapiRequestOptions = {
+    timeoutMs: config.companionTimeoutMs,
+    retryMaxAttempts: 0,
+    dialect,
+    warnings,
+  };
+  if (connection.resolvedAuth) opts.auth = connection.resolvedAuth;
+  if (params) opts.params = params;
+  return opts;
+}
+
+/**
  * Compute a frequency distribution for one field across a result set.
  * Accepts a field accessor that may return a scalar or array; arrays are
  * exploded. Returns `{value -> count}` sorted by count desc.

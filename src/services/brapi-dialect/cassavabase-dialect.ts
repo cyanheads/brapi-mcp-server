@@ -80,6 +80,16 @@ const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
     trialDbIds: 'trialDbId',
     observationLevels: 'observationLevel',
   },
+  observationunits: {
+    studyDbIds: 'studyDbId',
+    germplasmDbIds: 'germplasmDbId',
+    observationUnitDbIds: 'observationUnitDbId',
+    programDbIds: 'programDbId',
+    trialDbIds: 'trialDbId',
+    locationDbIds: 'locationDbId',
+    seasonDbIds: 'seasonDbId',
+    observationLevels: 'observationLevel',
+  },
   locations: {
     locationDbIds: 'locationDbId',
     locationNames: 'locationName',

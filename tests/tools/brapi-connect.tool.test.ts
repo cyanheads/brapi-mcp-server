@@ -34,6 +34,7 @@ const baseConfig: ServerConfig = {
   retryBaseDelayMs: 1,
   referenceCacheTtlSeconds: 3_600,
   requestTimeoutMs: 1_000,
+  companionTimeoutMs: 500,
   searchPollTimeoutMs: 5_000,
   searchPollIntervalMs: 1,
   allowPrivateIps: false,

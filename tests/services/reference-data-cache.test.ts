@@ -5,10 +5,17 @@
  * @module tests/services/reference-data-cache.test
  */
 
+import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
-import type { BrapiClient, BrapiEnvelope } from '@/services/brapi-client/index.js';
+import {
+  type BrapiClient,
+  type BrapiEnvelope,
+  DIALECT_ALL_DROPPED_REASON,
+} from '@/services/brapi-client/index.js';
+import { cassavabaseDialect } from '@/services/brapi-dialect/index.js';
+import type { BrapiDialect } from '@/services/brapi-dialect/types.js';
 import { ReferenceDataCache } from '@/services/reference-data-cache/reference-data-cache.js';
 import type { Location, Program, Trial } from '@/services/reference-data-cache/types.js';
 
@@ -23,6 +30,7 @@ const baseConfig: ServerConfig = {
   retryBaseDelayMs: 1,
   referenceCacheTtlSeconds: 3_600,
   requestTimeoutMs: 1_000,
+  companionTimeoutMs: 500,
   searchPollTimeoutMs: 5_000,
   searchPollIntervalMs: 1,
   allowPrivateIps: false,
@@ -194,6 +202,70 @@ describe('ReferenceDataCache', () => {
       expect((call[3] as { params: { locationDbIds: string[] } }).params.locationDbIds).toEqual([
         'l1',
       ]);
+    });
+  });
+
+  // The v0.4.7 foundational fix: ReferenceDataCache forwards the dialect into
+  // the client so plural ID filters get translated to whatever the active
+  // server actually honors. Before this, the cache hardcoded the v2.1 plural
+  // (`trialDbIds`, `programDbIds`, `locationDbIds`) and SGN-family servers
+  // silently ignored the filter — returning a page-zero row instead of the
+  // requested record.
+  describe('dialect threading', () => {
+    it('forwards dialect to the client so the client can translate plurals', async () => {
+      client.get.mockResolvedValue(
+        envelope<{ data: Trial[] }>({
+          data: [{ trialDbId: 't1', trialName: 'Advanced Yield' }],
+        }),
+      );
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+      await cache.getTrials(BASE_URL, ['t1'], ctx, { dialect: cassavabaseDialect });
+
+      const call = client.get.mock.calls[0]!;
+      const opts = call[3] as { dialect?: BrapiDialect };
+      expect(opts.dialect?.id).toBe('cassavabase');
+    });
+
+    it('returns empty Map and warns when dialect drops every supported ID filter', async () => {
+      // Stub a dialect that drops every plural ID filter on /trials.
+      const dropAllDialect: BrapiDialect = {
+        id: 'drop-all',
+        adaptGetFilters: () => ({
+          filters: {},
+          dropped: ['trialDbIds'],
+          warnings: ["drop-all dialect: dropped 'trialDbIds'"],
+        }),
+      };
+      // Have the client.get stub mimic BrapiClient.get's actual behavior —
+      // throw the structured all-dropped error.
+      client.get.mockImplementation(async () => {
+        throw validationError('all dropped', {
+          reason: DIALECT_ALL_DROPPED_REASON,
+          dialect: 'drop-all',
+          path: '/trials',
+          dropped: ['trialDbIds'],
+        });
+      });
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+      const warnings: string[] = [];
+
+      const result = await cache.getTrials(BASE_URL, ['t1'], ctx, {
+        dialect: dropAllDialect,
+        warnings,
+      });
+
+      expect(result.size).toBe(0);
+      expect(warnings.some((w) => /Reference lookup \/trials skipped/.test(w))).toBe(true);
+    });
+
+    it('rethrows non-dialect errors so transient upstream failures are visible', async () => {
+      client.get.mockRejectedValue({ code: JsonRpcErrorCode.ServiceUnavailable });
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+      await expect(
+        cache.getTrials(BASE_URL, ['t1'], ctx, { dialect: cassavabaseDialect }),
+      ).rejects.toEqual({ code: JsonRpcErrorCode.ServiceUnavailable });
     });
   });
 

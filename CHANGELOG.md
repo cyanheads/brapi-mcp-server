@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.7](changelog/0.4.x/0.4.7.md) — 2026-05-01
+
+Foundational dialect-bypass fix — every BrAPI client GET routes through the dialect adapter, with tight companion-call budgets so slow upstreams no longer 4× the response time.
+
 ## [0.4.6](changelog/0.4.x/0.4.6.md) — 2026-05-01
 
 BrAPI Test Server v2.0 dialect, shared singularizing engine, and typed all_filters_dropped guard across find_* tools.

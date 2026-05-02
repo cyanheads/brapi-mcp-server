@@ -12,13 +12,16 @@
 
 import { type Context, type HandlerContext, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
+import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
   AliasInput,
   buildRequestOptions,
+  companionRequestOptions,
   extractRows,
   isUpstreamNotFound,
 } from '../shared/find-helpers.js';
@@ -173,6 +176,12 @@ const ApplyBranchSchema = z
     perRowWarnings: z
       .array(PerRowWarningSchema)
       .describe('Per-row notes — unknown variables, empty values, missing IDs.'),
+    warnings: z
+      .array(z.string().describe('Connection-level diagnostic note (e.g. dialect translation).'))
+      .optional()
+      .describe(
+        'Connection-level notes from companion enrichment — dialect drops, downcasts, FK probe gaps. Empty / absent on the happy path.',
+      ),
   })
   .describe('Apply output — writes succeeded, post-state attached.');
 
@@ -275,12 +284,15 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
     const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
+    const config = getServerConfig();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
     const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+    const companionWarnings: string[] = [];
 
     const obsDescriptor = profile.supported.observations;
     const supportsPost = obsDescriptor?.methods?.includes('POST') ?? false;
@@ -443,6 +455,9 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
     const studyObservationCount = await fetchStudyObservationCount(
       input.studyDbId,
       connection,
+      dialect,
+      config,
+      companionWarnings,
       client,
       ctx,
     );
@@ -459,6 +474,7 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
     if (studyName) branch.studyName = studyName;
     if (studyObservationCount !== undefined) branch.studyObservationCount = studyObservationCount;
     if (latestTimestamp) branch.latestObservationTimestamp = latestTimestamp;
+    if (companionWarnings.length > 0) branch.warnings = companionWarnings;
 
     return { alias: connection.alias, result: branch } satisfies Output;
   },
@@ -648,6 +664,9 @@ async function fetchStudyExistence(
 async function fetchStudyObservationCount(
   studyDbId: string,
   connection: RegisteredServer,
+  dialect: BrapiDialect,
+  config: ServerConfig,
+  warnings: string[],
   client: BrapiClient,
   ctx: Context,
 ): Promise<number | undefined> {
@@ -656,7 +675,10 @@ async function fetchStudyObservationCount(
       connection.baseUrl,
       '/observations',
       ctx,
-      buildRequestOptions(connection, { studyDbIds: [studyDbId], pageSize: 1 }),
+      companionRequestOptions(connection, dialect, config, warnings, {
+        studyDbIds: [studyDbId],
+        pageSize: 1,
+      }),
     );
     const total = env.metadata?.pagination?.totalCount;
     return typeof total === 'number' ? total : undefined;

@@ -23,6 +23,7 @@ const baseConfig: ServerConfig = {
   retryBaseDelayMs: 1,
   referenceCacheTtlSeconds: 3_600,
   requestTimeoutMs: 1_000,
+  companionTimeoutMs: 500,
   searchPollTimeoutMs: 5_000,
   searchPollIntervalMs: 1,
   allowPrivateIps: false,
@@ -328,6 +329,102 @@ describe('BrapiClient', () => {
       await expect(
         shortTimeout.getSearchResults(BASE_URL, 'observations', 'abc', ctx),
       ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    });
+  });
+
+  // The v0.4.7 foundational fix: BrapiClient.get applies the dialect adapter
+  // at the client edge so every call site benefits without each having to
+  // remember to call dialect.adaptGetFilters by hand.
+  describe('dialect awareness', () => {
+    const fakeDialect: import('@/services/brapi-dialect/types.js').BrapiDialect = {
+      id: 'fake-singularizing',
+      adaptGetFilters: (endpoint, filters) => {
+        if (endpoint !== 'trials') {
+          return { filters: { ...filters }, dropped: [], warnings: [] };
+        }
+        const out: Record<string, unknown> = {};
+        const warnings: string[] = [];
+        const dropped: string[] = [];
+        for (const [key, value] of Object.entries(filters)) {
+          if (key === 'unsupportedFilter') {
+            dropped.push(key);
+            warnings.push(`fake dialect: dropped '${key}'`);
+            continue;
+          }
+          if (key === 'trialDbIds' && Array.isArray(value)) {
+            out.trialDbId = value[0];
+            continue;
+          }
+          out[key] = value;
+        }
+        return { filters: out, dropped, warnings };
+      },
+    };
+
+    it('translates plural ID filters to singular when a dialect is supplied', async () => {
+      fetcher.mockResolvedValue(jsonResponse(envelope({ data: [{ trialDbId: '7526' }] })));
+      const ctx = createMockContext();
+
+      await client.get(BASE_URL, '/trials', ctx, {
+        params: { trialDbIds: ['7526'], pageSize: 1 },
+        dialect: fakeDialect,
+      });
+
+      const url = new URL(String(fetcher.mock.calls[0]?.[0]));
+      expect(url.searchParams.getAll('trialDbId')).toEqual(['7526']);
+      expect(url.searchParams.has('trialDbIds')).toBe(false);
+    });
+
+    it('appends dialect warnings to the supplied warnings sink', async () => {
+      fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] })));
+      const ctx = createMockContext();
+      const warnings: string[] = [];
+
+      await client.get(BASE_URL, '/trials', ctx, {
+        params: { trialDbIds: ['7526'], unsupportedFilter: 'x' },
+        dialect: fakeDialect,
+        warnings,
+      });
+
+      expect(warnings.some((w) => /dropped 'unsupportedFilter'/.test(w))).toBe(true);
+    });
+
+    it('throws DIALECT_ALL_DROPPED when every supplied filter is dropped', async () => {
+      const ctx = createMockContext();
+
+      await expect(
+        client.get(BASE_URL, '/trials', ctx, {
+          params: { unsupportedFilter: 'x' },
+          dialect: fakeDialect,
+        }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: { reason: 'dialect_all_filters_dropped', dialect: 'fake-singularizing' },
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+    });
+
+    it('passes filters through unchanged when no dialect is supplied (raw_get-style)', async () => {
+      fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] })));
+      const ctx = createMockContext();
+
+      await client.get(BASE_URL, '/trials', ctx, {
+        params: { trialDbIds: ['7526'] },
+      });
+
+      const url = new URL(String(fetcher.mock.calls[0]?.[0]));
+      expect(url.searchParams.getAll('trialDbIds')).toEqual(['7526']);
+    });
+
+    it('respects retryMaxAttempts override (companion-style: 0 retries)', async () => {
+      const c = new BrapiClient({ ...baseConfig, retryMaxAttempts: 5 }, fetcher);
+      fetcher.mockRejectedValue(httpError(503));
+      const ctx = createMockContext();
+
+      await expect(c.get(BASE_URL, '/trials', ctx, { retryMaxAttempts: 0 })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+      });
+      expect(fetcher).toHaveBeenCalledTimes(1);
     });
   });
 });

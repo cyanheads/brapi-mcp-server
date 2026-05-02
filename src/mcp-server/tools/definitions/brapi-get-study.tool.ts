@@ -9,7 +9,9 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getReferenceDataCache } from '@/services/reference-data-cache/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
@@ -17,6 +19,7 @@ import {
   AliasInput,
   appendPassthroughLines,
   buildRequestOptions,
+  companionRequestOptions,
   extractCoordinates,
   isUpstreamNotFound,
 } from '../shared/find-helpers.js';
@@ -162,6 +165,7 @@ export const brapiGetStudy = tool('brapi_get_study', {
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
     const referenceData = getReferenceDataCache();
+    const config = getServerConfig();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
 
@@ -174,8 +178,14 @@ export const brapiGetStudy = tool('brapi_get_study', {
       capabilityLookup,
     );
 
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
     const warnings: string[] = [];
-    const referenceLookup: { auth?: typeof connection.resolvedAuth } = {};
+    const referenceLookup: {
+      auth?: typeof connection.resolvedAuth;
+      dialect: typeof dialect;
+      warnings: string[];
+    } = { dialect, warnings };
     if (connection.resolvedAuth) referenceLookup.auth = connection.resolvedAuth;
 
     let studyEnv: Awaited<ReturnType<typeof client.get<Record<string, unknown>>>>;
@@ -245,7 +255,7 @@ export const brapiGetStudy = tool('brapi_get_study', {
             connection.baseUrl,
             '/observations',
             ctx,
-            buildRequestOptions(connection, {
+            companionRequestOptions(connection, dialect, config, warnings, {
               studyDbIds: [input.studyDbId],
               pageSize: 1,
             }),
@@ -257,7 +267,7 @@ export const brapiGetStudy = tool('brapi_get_study', {
             connection.baseUrl,
             '/observationunits',
             ctx,
-            buildRequestOptions(connection, {
+            companionRequestOptions(connection, dialect, config, warnings, {
               studyDbIds: [input.studyDbId],
               pageSize: 1,
             }),
@@ -269,7 +279,11 @@ export const brapiGetStudy = tool('brapi_get_study', {
             connection.baseUrl,
             '/variables',
             ctx,
-            buildRequestOptions(connection, {
+            companionRequestOptions(connection, dialect, config, warnings, {
+              // /variables historically responded to singular `studyDbId` on
+              // SGN deployments — keep the singular here so the dialect (which
+              // doesn't carry a `variables.studyDbIds → studyDbId` entry) is a
+              // pass-through, not a silent translation that breaks the probe.
               studyDbId: input.studyDbId,
               pageSize: 1,
             }),
