@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.8](changelog/0.4.x/0.4.8.md) — 2026-05-01
+
+Generalize the /observations preflight from germplasm-only to any unanchored query, and make the probe fail-soft via companion call options so a stalled count surfaces as a warning instead of a hard error.
+
 ## [0.4.7](changelog/0.4.x/0.4.7.md) — 2026-05-01
 
 Foundational dialect-bypass fix — every BrAPI client GET routes through the dialect adapter, with tight companion-call budgets so slow upstreams no longer 4× the response time.

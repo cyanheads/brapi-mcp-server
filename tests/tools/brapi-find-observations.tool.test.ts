@@ -103,7 +103,10 @@ describe('brapi_find_observations tool', () => {
       jsonResponse(envelope({ data: [{ observationDbId: 'obs-only-id' }] }, { totalCount: 1 })),
     );
 
-    const result = await brapiFindObservations.handler(brapiFindObservations.input.parse({}), ctx);
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ studies: ['s-1'] }),
+      ctx,
+    );
 
     expect(result.returnedCount).toBe(1);
     expect(result.results[0]?.observationDbId).toBe('obs-only-id');
@@ -141,7 +144,10 @@ describe('brapi_find_observations tool', () => {
       ),
     );
 
-    const result = await brapiFindObservations.handler(brapiFindObservations.input.parse({}), ctx);
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ studies: ['s-1'] }),
+      ctx,
+    );
 
     expect(result.returnedCount).toBe(1);
     expect(result.results[0]?.observationTimeStamp).toBeNull();
@@ -270,6 +276,78 @@ describe('brapi_find_observations tool', () => {
     expect(result.warnings.some((w) => /dropped filter 'observationLevels'/.test(w))).toBe(true);
   });
 
+  it('preflights unscoped variable-only queries (symmetric to germplasm-only blow-up on cassavabase)', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '0', 10);
+      if (pageSize === 1) {
+        return jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 80_000 }));
+      }
+      throw new Error(`Bulk pull should have been skipped; got pageSize=${pageSize}`);
+    });
+
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ variables: ['var-1'] }),
+      ctx,
+    );
+
+    expect(fetcher.mock.calls.length).toBe(1);
+    expect(result.returnedCount).toBe(1);
+    expect(result.totalCount).toBe(80_000);
+    expect(
+      result.warnings.some((w) =>
+        /Preflight detected 80000 observations.*Bulk pull skipped/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it('preflights bare /observations queries (no filters → unanchored full scan risk)', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '0', 10);
+      if (pageSize === 1) {
+        return jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 1_000_000 }));
+      }
+      throw new Error(`Bulk pull should have been skipped; got pageSize=${pageSize}`);
+    });
+
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ loadLimit: 200 }),
+      ctx,
+    );
+
+    expect(fetcher.mock.calls.length).toBe(1);
+    expect(result.totalCount).toBe(1_000_000);
+    expect(
+      result.warnings.some((w) =>
+        /Preflight detected 1000000 observations.*Bulk pull skipped/.test(w),
+      ),
+    ).toBe(true);
+  });
+
+  it('skips bulk pull and warns when the preflight count probe stalls/fails', async () => {
+    const ctx = await connect(fetcher);
+    let calls = 0;
+    fetcher.mockImplementation(async () => {
+      calls += 1;
+      throw new Error('upstream stalled');
+    });
+
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ variables: ['var-1'] }),
+      ctx,
+    );
+
+    expect(calls).toBe(1);
+    expect(result.returnedCount).toBe(0);
+    expect(result.totalCount).toBe(0);
+    expect(result.warnings.some((w) => /Observations preflight count probe stalled/.test(w))).toBe(
+      true,
+    );
+  });
+
   it('preflights unscoped germplasm queries and skips bulk pull above threshold', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockImplementation(async (url: string) => {
@@ -346,7 +424,10 @@ describe('brapi_find_observations tool', () => {
   it('format() renders observation IDs and study/variable names', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 1 })));
-    const result = await brapiFindObservations.handler(brapiFindObservations.input.parse({}), ctx);
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ studies: ['s-1'] }),
+      ctx,
+    );
     const text = (brapiFindObservations.format!(result)[0] as { text: string }).text;
     expect(text).toContain('obs-1');
     expect(text).toContain('Dry Matter %');

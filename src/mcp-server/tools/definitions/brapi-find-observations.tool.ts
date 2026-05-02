@@ -8,25 +8,38 @@
  * @module mcp-server/tools/definitions/brapi-find-observations.tool
  */
 
-import { tool, z } from '@cyanheads/mcp-ts-core';
+import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getServerConfig } from '@/config/server-config.js';
-import { getBrapiClient } from '@/services/brapi-client/index.js';
-import { resolveDialect } from '@/services/brapi-dialect/index.js';
+import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
+import {
+  type BrapiClient,
+  getBrapiClient,
+  isDialectAllDropped,
+} from '@/services/brapi-client/index.js';
+import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getDatasetStore } from '@/services/dataset-store/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
+import {
+  DEFAULT_ALIAS,
+  getServerRegistry,
+  type RegisteredServer,
+} from '@/services/server-registry/index.js';
 import {
   AliasInput,
   applyDialectFiltersOrFail,
   asString,
+  type BrapiListResult,
   buildRefinementHint,
   checkFilterMatchRates,
   collectPassthroughParts,
+  companionRequestOptions,
   computeDistribution,
   DatasetHandleSchema,
   ExtraFiltersInput,
+  extractRows,
+  type FindRoute,
   fkMatchCheck,
+  type LoadedRows,
   LoadLimitInput,
   loadInitialFindPage,
   maybeSpill,
@@ -146,8 +159,8 @@ type Output = z.infer<typeof OutputSchema>;
 /**
  * Upstream observation totals above this threshold trigger the preflight
  * bail-out: the bulk pull is skipped and the user is told to narrow the
- * query. Empirically, CassavaBase germplasm-only queries above ~5k rows
- * stall past the default request timeout.
+ * query. Empirically, CassavaBase unanchored observation queries above
+ * ~5k rows stall past the default request timeout.
  */
 const PREFLIGHT_BULK_THRESHOLD = 5_000;
 
@@ -260,34 +273,59 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       loadInitialFindPage<Record<string, unknown>>(client, connection, route, pageSize, ctx);
 
     /**
-     * Danger pattern: querying /observations by germplasm with no anchoring
-     * scope (study, trial, observation, observation-unit). On large servers
-     * (CassavaBase, T3) `germplasmDbIds=X` alone joins across every study the
-     * germplasm appeared in — the upstream count query takes tens of seconds
-     * and a `pageSize=loadLimit` pull stalls past the request timeout. Probe
-     * with `pageSize=1` first; if the upstream advertises more rows than we'd
-     * safely pull, skip the bulk fetch and surface a warning recommending a
-     * study scope. Other unscoped patterns (variable-only, bare query) are
-     * left alone — they don't carry the same join blow-up risk and adding a
-     * preflight to every call would double HTTP for the common case.
+     * Danger pattern: querying `/observations` without one of the four
+     * anchors (study, trial, observation-unit, observation). On large
+     * servers (CassavaBase, T3) any unanchored variant —
+     * `?germplasmDbId=X`, `?observationVariableDbId=X`, `?seasonDbId=X`,
+     * or a bare `/observations` — joins across the full observations
+     * table and stalls past the request timeout. Probe with `pageSize=1`
+     * using companion-call options (short timeout, zero retries) so a
+     * stalled count operation surfaces as a single warning instead of
+     * pinning the response. Outcomes:
+     *   1. probe stalls/fails → warn and skip the bulk pull entirely
+     *   2. probe returns a count above the threshold → warn, return the
+     *      1-row preflight as the only in-context observation
+     *   3. probe returns a count under the threshold → fall through to
+     *      the normal bulk pull
+     *
+     * Empirically verified on cassavabase.org/brapi/v2:
+     *   - `?germplasmDbId=X`              alone: timeout (>60 s)
+     *   - `?observationVariableDbId=X`    alone: timeout (>60 s)
+     *   - bare `/observations`                  : timeout (>30 s)
+     *   - `?studyDbId=X` (anchored)             : ~15 s OK
      */
-    const hasScope =
+    const hasAnchor =
       (input.studies?.length ?? 0) > 0 ||
       (input.trials?.length ?? 0) > 0 ||
       (input.observationUnits?.length ?? 0) > 0 ||
       (input.observations?.length ?? 0) > 0;
-    const shouldPreflight = !hasScope && (input.germplasm?.length ?? 0) > 0;
 
     let firstPage: Awaited<ReturnType<typeof loadObservations>> | undefined;
     let bulkPullSkipped = false;
-    if (shouldPreflight) {
-      const preflight = await loadObservations(1);
-      const upstreamTotal = preflight.totalCount;
-      if (typeof upstreamTotal === 'number' && upstreamTotal > PREFLIGHT_BULK_THRESHOLD) {
+    if (!hasAnchor && route.kind === 'get') {
+      const probe = await probeObservationCount({
+        client,
+        connection,
+        route,
+        dialect,
+        config,
+        warnings,
+        ctx,
+      });
+      if (probe === null) {
         warnings.push(
-          `Preflight detected ${upstreamTotal} observations matching this query (germplasm/variable/season scope, no study or trial anchor). Bulk pull skipped to avoid an upstream timeout — narrow with \`studies: ['…']\` or \`trials: ['…']\`, or accept a partial view by re-calling with a tighter scope. Returning the 1-row preflight as the only in-context observation.`,
+          "Observations preflight count probe stalled — the upstream count operation appears unbounded for this query shape, indicating a likely full-table scan. Bulk pull skipped to avoid a long hang. Narrow with `studies: ['…']`, `trials: ['…']`, or scope to specific `observationUnits` / `observations`.",
         );
-        firstPage = preflight;
+        firstPage = { rows: [], hasMore: false, pagesFetched: 0, totalCount: 0 };
+        bulkPullSkipped = true;
+      } else if (
+        typeof probe.totalCount === 'number' &&
+        probe.totalCount > PREFLIGHT_BULK_THRESHOLD
+      ) {
+        warnings.push(
+          `Preflight detected ${probe.totalCount} observations matching this query (no study / trial / observationUnit / observation anchor). Bulk pull skipped to avoid an upstream timeout — narrow with \`studies: ['…']\`, \`trials: ['…']\`, or scope to specific \`observationUnits\` / \`observations\`. Returning the 1-row preflight as the only in-context observation.`,
+        );
+        firstPage = probe;
         bulkPullSkipped = true;
       }
     }
@@ -472,4 +510,54 @@ function normalizeSeason(value: unknown): string | undefined {
 
   if (label) return year ? `${label} ${year}` : label;
   return year;
+}
+
+/**
+ * Probe the upstream observation count without burning the global retry
+ * budget. Uses companion-call options (short timeout, zero retries) so a
+ * stalled count operation surfaces as a single warning instead of pinning
+ * the response. Returns:
+ *   - `LoadedRows` on success (1-row sample + totalCount when reported)
+ *   - `null` when the probe fails (timeout, 5xx) — caller treats as
+ *     "scope too large" and bails with a warning.
+ *
+ * Re-throws `dialect_all_filters_dropped` so the typed error contract
+ * still surfaces; that's a programming/dialect mismatch, not a probe
+ * failure.
+ */
+async function probeObservationCount(args: {
+  client: BrapiClient;
+  connection: RegisteredServer;
+  route: Extract<FindRoute, { kind: 'get' }>;
+  dialect: BrapiDialect;
+  config: ServerConfig;
+  warnings: string[];
+  ctx: Context;
+}): Promise<LoadedRows<Record<string, unknown>> | null> {
+  const { client, connection, route, dialect, config, warnings, ctx } = args;
+  try {
+    const envelope = await client.get<
+      BrapiListResult<Record<string, unknown>> | Record<string, unknown>[]
+    >(
+      connection.baseUrl,
+      route.path,
+      ctx,
+      companionRequestOptions(connection, dialect, config, warnings, {
+        ...(route.filters as Record<
+          string,
+          string | number | boolean | readonly (string | number)[] | undefined
+        >),
+        pageSize: 1,
+      }),
+    );
+    const rows = extractRows<Record<string, unknown>>(envelope.result);
+    const totalCount = envelope.metadata?.pagination?.totalCount;
+    const hasMore = typeof totalCount === 'number' && totalCount > rows.length && totalCount > 0;
+    const result: LoadedRows<Record<string, unknown>> = { rows, hasMore, pagesFetched: 1 };
+    if (totalCount !== undefined) result.totalCount = totalCount;
+    return result;
+  } catch (err) {
+    if (isDialectAllDropped(err)) throw err;
+    return null;
+  }
 }
