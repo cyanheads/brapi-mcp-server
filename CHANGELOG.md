@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.11](changelog/0.4.x/0.4.11.md) — 2026-05-03
+
+Framework bump to 0.8.13 — gated tools stay visible in the operator manifest via disabledTool(), SQL gate function deny-list adopted from the framework, RequestContext slice swapped onto the framework's exported type.
+
 ## [0.4.10](changelog/0.4.x/0.4.10.md) — 2026-05-03
 
 Dataframe surface (Tier 3, opt-in) — spilled find_* rows auto-register as DuckDB-backed dataframes; agents run SELECT SQL across them via brapi_dataframe_query/describe/drop. Genotype-call cap promoted to operator policy.

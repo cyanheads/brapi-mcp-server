@@ -14,32 +14,30 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import type { QueryResult } from '@cyanheads/mcp-ts-core/canvas';
+import {
+  type QueryResult,
+  SQL_GATE_REASONS,
+  type SqlGateReason,
+} from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 
 /**
- * Reasons the framework's `assertReadOnlyQuery` (and identifier validator)
- * attaches to its `validationError` throws — see
- * `@cyanheads/mcp-ts-core/dist/services/canvas/core/sqlGate.js`. When the
- * bridge's `query()` rethrows one of these, the handler translates it into
- * the typed `sql_rejected` contract reason while preserving the granular
- * gate reason on `data.gateReason`.
+ * Single source of truth for the SQL gate reason strings — re-exported from
+ * the framework's `sqlGate` module. When the bridge's `query()` rethrows a
+ * gate `validationError`, the handler translates it into the typed
+ * `sql_rejected` contract reason while preserving the granular gate reason
+ * on `data.gateReason`.
  */
-const SQL_GATE_REASONS: ReadonlySet<string> = new Set([
-  'multi_statement',
-  'non_select_statement',
-  'plan_operator_not_allowed',
-  'identifier_empty',
-  'identifier_shape',
-  'identifier_reserved',
-]);
+const KNOWN_GATE_REASONS: ReadonlySet<SqlGateReason> = new Set(Object.values(SQL_GATE_REASONS));
 
-function extractSqlGateReason(err: unknown): string | undefined {
+function extractSqlGateReason(err: unknown): SqlGateReason | undefined {
   if (!(err instanceof McpError)) return;
   if (err.code !== JsonRpcErrorCode.ValidationError) return;
   const reason = (err.data as { reason?: unknown } | undefined)?.reason;
-  return typeof reason === 'string' && SQL_GATE_REASONS.has(reason) ? reason : undefined;
+  return typeof reason === 'string' && KNOWN_GATE_REASONS.has(reason as SqlGateReason)
+    ? (reason as SqlGateReason)
+    : undefined;
 }
 
 const InputSchema = z.object({

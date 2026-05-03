@@ -8,6 +8,7 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
+import { disabledTool } from '@cyanheads/mcp-ts-core/tools';
 import { getServerConfig } from '@/config/server-config.js';
 import { initBrapiClient } from '@/services/brapi-client/index.js';
 import { initBrapiDialectRegistry } from '@/services/brapi-dialect/index.js';
@@ -33,14 +34,31 @@ import {
 
 const serverConfig = getServerConfig();
 
+/**
+ * Operator-facing metadata for the dataframe surface gate (BRAPI_CANVAS_ENABLED).
+ * Surfaces in /.well-known/mcp.json and the HTML landing page so operators see
+ * the gated tools with reason + hint. The framework's CANVAS_PROVIDER_TYPE
+ * acts as a second runtime gate inside the bridge — when that's missing the
+ * tools still register but throw `dataframe_disabled`.
+ */
+const dataframeDisabled = {
+  reason: 'Dataframe surface is gated off (BRAPI_CANVAS_ENABLED=false).',
+  hint: 'Set BRAPI_CANVAS_ENABLED=true and CANVAS_PROVIDER_TYPE=duckdb to enable.',
+};
+
+const writesDisabled = {
+  reason: 'Writes are disabled (BRAPI_ENABLE_WRITES=false).',
+  hint: 'Set BRAPI_ENABLE_WRITES=true to enable observation submission.',
+};
+
 const tools = [
   ...readOnlyToolDefinitions,
-  // Dataframe surface gated by BRAPI_CANVAS_ENABLED. The framework canvas
-  // itself is gated by CANVAS_PROVIDER_TYPE — when that's not `duckdb`, the
-  // bridge returns `isEnabled() === false` and the tools fail with a typed
-  // `dataframe_disabled` error directing the operator to set both env vars.
-  ...(serverConfig.canvasEnabled ? dataframeToolDefinitions : []),
-  ...(serverConfig.enableWrites ? writeToolDefinitions : []),
+  ...dataframeToolDefinitions.map((d) =>
+    serverConfig.canvasEnabled ? d : disabledTool(d, dataframeDisabled),
+  ),
+  ...writeToolDefinitions.map((d) =>
+    serverConfig.enableWrites ? d : disabledTool(d, writesDisabled),
+  ),
 ];
 
 await createApp({

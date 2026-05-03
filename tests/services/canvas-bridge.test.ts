@@ -221,53 +221,6 @@ describe('CanvasBridge.dropDataset', () => {
   });
 });
 
-describe('CanvasBridge.query (server-side forbidden-function deny-list)', () => {
-  it.each([
-    ['read_json', "SELECT * FROM read_json('/etc/passwd')"],
-    ['read_json_auto', "SELECT * FROM read_json_auto('/etc/hostname')"],
-    ['read_json_objects', "SELECT * FROM read_json_objects('/x.json')"],
-    ['read_ndjson', "SELECT * FROM read_ndjson('/x.ndjson')"],
-    ['read_parquet', "SELECT * FROM read_parquet('/x.parquet')"],
-    ['parquet_scan', "SELECT * FROM parquet_scan('/x.parquet')"],
-    ['iceberg_scan', "SELECT * FROM iceberg_scan('/x')"],
-    ['delta_scan', "SELECT * FROM delta_scan('/x')"],
-  ])('rejects %s before reaching the canvas', async (fn, sql) => {
-    const canvas = new FakeDataCanvas();
-    const bridge = new CanvasBridge(canvas, baseConfig);
-    const ctx = createMockContext({ tenantId: 't1' });
-    await expect(bridge.query(ctx, sql)).rejects.toMatchObject({
-      data: expect.objectContaining({
-        reason: 'plan_operator_not_allowed',
-        forbiddenFunction: fn,
-      }),
-    });
-    // Confirm the canvas was never even acquired — the deny-list short-circuits
-    // before getInstance().
-    expect(canvas.canvases.size).toBe(0);
-  });
-
-  it('matches case-insensitively and tolerates whitespace before the open paren', async () => {
-    const canvas = new FakeDataCanvas();
-    const bridge = new CanvasBridge(canvas, baseConfig);
-    const ctx = createMockContext({ tenantId: 't1' });
-    await expect(
-      bridge.query(ctx, "SELECT * FROM READ_JSON   ('/etc/passwd')"),
-    ).rejects.toMatchObject({
-      data: expect.objectContaining({ forbiddenFunction: 'read_json' }),
-    });
-  });
-
-  it('does not flag column names that happen to contain a forbidden substring', async () => {
-    // `myread_json_data` is a column name, not a call — no `(` follows.
-    const canvas = new FakeDataCanvas();
-    const bridge = new CanvasBridge(canvas, baseConfig);
-    const ctx = createMockContext({ tenantId: 't1' });
-    // Should pass the deny-list and reach the (fake) canvas, returning empty rows.
-    const result = await bridge.query(ctx, 'SELECT myread_json_data FROM ds_x');
-    expect(result.rowCount).toBe(0);
-  });
-});
-
 describe('CanvasBridge.query', () => {
   it('caps rowLimit to canvasMaxRows', async () => {
     const canvas = new FakeDataCanvas();

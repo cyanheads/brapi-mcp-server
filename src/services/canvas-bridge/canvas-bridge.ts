@@ -21,28 +21,20 @@ import type {
   RegisterTableResult,
   TableInfo,
 } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type { DatasetMetadata } from '@/services/dataset-store/index.js';
 import type { CanvasTableMeta, DescribedTable } from './types.js';
 
 /**
- * Minimal RequestContext shape consumed by the framework canvas API. The
- * full framework `Context` carries strict-optional fields (`tenantId?: T`
- * vs `tenantId?: T | undefined`) which collide with `exactOptionalPropertyTypes`
- * when passed directly. Constructing this slice explicitly satisfies the
- * structural contract without a cast.
+ * Construct a `RequestContext` slice from the handler `Context`. The
+ * framework's `RequestContext` carries an `[key: string]: unknown` index
+ * signature which the strict `Context` interface lacks, so direct
+ * assignment fails despite the 0.8.12 optional-field widening.
  */
-type CanvasRequestContext = {
-  requestId: string;
-  timestamp: string;
-  tenantId?: string;
-  traceId?: string;
-  spanId?: string;
-};
-
-function asCanvasContext(ctx: Context): CanvasRequestContext {
-  const rc: CanvasRequestContext = {
+function asRequestContext(ctx: Context): RequestContext {
+  const rc: RequestContext = {
     requestId: ctx.requestId,
     timestamp: ctx.timestamp,
   };
@@ -60,31 +52,6 @@ const TABLE_META_PREFIX = 'brapi/canvas/tablemeta/';
 
 /** Auto-registered dataset-table prefix. Anything else is user-derived (registerAs). */
 const DATASET_TABLE_PREFIX = 'ds_';
-
-/**
- * Server-side belt-and-suspenders SQL deny-list for file/network-reading
- * DuckDB table functions that the framework's plan-walk allowlist currently
- * misses (cyanheads/mcp-ts-core — `read_json*` and `read_parquet*`/`parquet_scan`
- * emit plan operators that pass the allowlist, allowing files like
- * `/etc/passwd` to actually be opened by DuckDB). Substring-match is brittle
- * compared to the framework's plan-walk, but closes the live gap until the
- * framework lands a tighter check. Remove once upstream fixes propagate.
- *
- * Also blocks the known third-party scan extensions (iceberg/delta) for the
- * same reason — they bypass canvas and read external data sources. They
- * aren't loaded by default but a future server config might pre-install them.
- */
-const FORBIDDEN_SQL_FUNCTIONS = [
-  'read_json',
-  'read_json_auto',
-  'read_json_objects',
-  'read_ndjson',
-  'read_parquet',
-  'parquet_scan',
-  'iceberg_scan',
-  'delta_scan',
-] as const;
-const FORBIDDEN_SQL_RX = new RegExp(`\\b(?:${FORBIDDEN_SQL_FUNCTIONS.join('|')})\\s*\\(`, 'i');
 
 /** Bridge for `core.canvas` that adds per-tenant default-canvas semantics. */
 export class CanvasBridge {
@@ -112,7 +79,7 @@ export class CanvasBridge {
     const canvas = this.requireCanvas();
     const cached = await ctx.state.get<string>(DEFAULT_CANVAS_KEY);
     try {
-      const instance = await canvas.acquire(cached ?? undefined, asCanvasContext(ctx));
+      const instance = await canvas.acquire(cached ?? undefined, asRequestContext(ctx));
       if (!cached || instance.isNew) {
         await ctx.state.set(DEFAULT_CANVAS_KEY, instance.canvasId);
       }
@@ -120,7 +87,7 @@ export class CanvasBridge {
     } catch (err) {
       if (cached && isCanvasNotFound(err)) {
         await ctx.state.delete(DEFAULT_CANVAS_KEY);
-        const fresh = await canvas.acquire(undefined, asCanvasContext(ctx));
+        const fresh = await canvas.acquire(undefined, asRequestContext(ctx));
         await ctx.state.set(DEFAULT_CANVAS_KEY, fresh.canvasId);
         return fresh;
       }
@@ -207,7 +174,6 @@ export class CanvasBridge {
     sql: string,
     options: { preview?: number; registerAs?: string; rowLimit?: number } = {},
   ): Promise<QueryResult> {
-    assertNoForbiddenFunctions(sql);
     const instance = await this.getInstance(ctx);
     const cap = this.serverConfig.canvasMaxRows;
     const rowLimit = Math.min(options.rowLimit ?? cap, cap);
@@ -308,24 +274,6 @@ function tableMetaKey(tableName: string): string {
 
 function isCanvasNotFound(err: unknown): boolean {
   return err instanceof McpError && err.code === JsonRpcErrorCode.NotFound;
-}
-
-/**
- * Reject SQL that calls a known file/network-reading DuckDB function the
- * framework's plan-walk currently misses. Throws a `validationError` shaped
- * like the framework's gate so {@link CanvasBridge.query}'s caller (the
- * `brapi_dataframe_query` handler) can translate it through `ctx.fail`'s
- * `sql_rejected` contract via the same path it uses for upstream gate
- * rejections.
- */
-function assertNoForbiddenFunctions(sql: string): void {
-  const match = FORBIDDEN_SQL_RX.exec(sql);
-  if (!match) return;
-  const fn = match[0].replace(/\s*\(.*$/, '').toLowerCase();
-  throw validationError(
-    `Canvas SQL contains disallowed function: ${fn}(). File and network-reading functions bypass the canvas and are blocked.`,
-    { reason: 'plan_operator_not_allowed', forbiddenFunction: fn },
-  );
 }
 
 /**
