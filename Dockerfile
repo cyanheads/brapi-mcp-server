@@ -66,6 +66,15 @@ RUN if [ "$OTEL_ENABLED" = "true" ]; then \
         @opentelemetry/semantic-conventions; \
     fi
 
+# Conditionally install the DuckDB optional peer dependency for the dataframe
+# (canvas) surface. Default-on so the published image works out of the box with
+# CANVAS_PROVIDER_TYPE=duckdb. Disable for size-sensitive self-builds with:
+#   docker build --build-arg CANVAS_ENABLED=false
+ARG CANVAS_ENABLED=true
+RUN if [ "$CANVAS_ENABLED" = "true" ]; then \
+      bun add @duckdb/node-api; \
+    fi
+
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
 
