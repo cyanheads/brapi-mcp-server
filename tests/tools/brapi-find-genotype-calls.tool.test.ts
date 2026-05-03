@@ -1,7 +1,8 @@
 /**
  * @fileoverview End-to-end tests for `brapi_find_genotype_calls` — capability
  * gate, sync POST /search/calls happy path, distribution + dataset spillover,
- * input validation when no filter is supplied, truncation at maxCalls.
+ * input validation when no filter is supplied, truncation at the deployment
+ * pull limit (BRAPI_GENOTYPE_CALLS_MAX_PULL).
  *
  * @module tests/tools/brapi-find-genotype-calls.tool.test
  */

@@ -116,6 +116,37 @@ const ServerConfigSchema = z.object({
     .describe(
       'Opt-in flag for the write surface (`brapi_submit_observations`). Off by default — the tool is omitted from `tools/list` unless the operator opts in for this deployment.',
     ),
+  genotypeCallsMaxPull: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(500_000)
+    .default(100_000)
+    .describe(
+      'Hard ceiling on rows pulled from the upstream BrAPI server in a single brapi_find_genotype_calls invocation. Bounds total page count per query — protects the upstream from unbounded pagination loops. Default 100,000 (≈10 pages at the standard pageSize=10,000); maximum 500,000 (≈50 pages, matching the per-query budget of other find_* tools).',
+    ),
+
+  canvasEnabled: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true')
+    .describe(
+      'Gate the brapi_dataframe_* tool surface. Effective only when the framework canvas service is also configured (CANVAS_PROVIDER_TYPE=duckdb). Default true — set false to keep the dependency installed but the tools hidden.',
+    ),
+  canvasMaxRows: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(10_000)
+    .describe(
+      'Hard upper bound on rows materialized into a brapi_dataframe_query response. Larger result sets must use registerAs to keep the full set in the workspace.',
+    ),
+  canvasQueryTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(30_000)
+    .describe('Per-query wall-clock timeout for brapi_dataframe_query.'),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -144,6 +175,10 @@ export function getServerConfig(): ServerConfig {
     searchPollIntervalMs: 'BRAPI_SEARCH_POLL_INTERVAL_MS',
     allowPrivateIps: 'BRAPI_ALLOW_PRIVATE_IPS',
     enableWrites: 'BRAPI_ENABLE_WRITES',
+    genotypeCallsMaxPull: 'BRAPI_GENOTYPE_CALLS_MAX_PULL',
+    canvasEnabled: 'BRAPI_CANVAS_ENABLED',
+    canvasMaxRows: 'BRAPI_CANVAS_MAX_ROWS',
+    canvasQueryTimeoutMs: 'BRAPI_CANVAS_QUERY_TIMEOUT_MS',
   });
   return _config;
 }

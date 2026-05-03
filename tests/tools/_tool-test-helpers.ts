@@ -15,6 +15,7 @@ import {
   initBrapiDialectRegistry,
   resetBrapiDialectRegistry,
 } from '@/services/brapi-dialect/index.js';
+import { initCanvasBridge, resetCanvasBridge } from '@/services/canvas-bridge/index.js';
 import {
   initCapabilityRegistry,
   resetCapabilityRegistry,
@@ -42,6 +43,10 @@ export const TEST_CONFIG: ServerConfig = {
   searchPollIntervalMs: 1,
   allowPrivateIps: false,
   enableWrites: false,
+  genotypeCallsMaxPull: 100_000,
+  canvasEnabled: false,
+  canvasMaxRows: 10_000,
+  canvasQueryTimeoutMs: 30_000,
 };
 
 export function jsonResponse(body: unknown, status = 200): Response {
@@ -66,7 +71,10 @@ export function initTestServices(config: ServerConfig = TEST_CONFIG): MockFetche
   initCapabilityRegistry(config);
   initBrapiDialectRegistry();
   initReferenceDataCache(config);
-  initDatasetStore(config);
+  // Canvas off by default in tests; the bridge is wired but not enabled, so
+  // DatasetStore hook calls cleanly no-op without needing real DuckDB.
+  const canvasBridge = initCanvasBridge(undefined, config);
+  initDatasetStore(config, canvasBridge);
   initServerRegistry(config);
   return fetcher;
 }
@@ -78,6 +86,7 @@ export function resetTestServices(): void {
   resetReferenceDataCache();
   resetDatasetStore();
   resetServerRegistry();
+  resetCanvasBridge();
 }
 
 /** Extracts the pathname of a URL passed to the fetcher, without query. */

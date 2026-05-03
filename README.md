@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/brapi-mcp-server</h1>
   <p><b>BrAPI v2.1 MCP server — studies, germplasm, observations, genotypes, images, and pedigrees across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server.</b>
-  <div>19 Tools • 6 Resources • 2 Prompts</div>
+  <div>22 Tools • 6 Resources • 2 Prompts</div>
   </p>
 </div>
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.4.9-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.4.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
@@ -17,7 +17,7 @@
 
 ## Tools
 
-Nineteen tools grouped by shape — connection tools bootstrap a session, `find_*` tools return a summarized page plus distributions and spill overflow rows into the DatasetStore, `get_*` tools fetch a single record with companion counts, plus pedigree walking, dataset lifecycle, an additive write surface for observations, and raw passthrough escape hatches.
+Twenty-two tools grouped by shape — connection tools bootstrap a session, `find_*` tools return a summarized page plus distributions and spill overflow rows into the DatasetStore, `get_*` tools fetch a single record with companion counts, plus pedigree walking, dataset lifecycle, an opt-in SQL/analytical workspace over spilled rows, an additive write surface for observations, and raw passthrough escape hatches.
 
 ### Orient
 
@@ -42,13 +42,21 @@ Nineteen tools grouped by shape — connection tools bootstrap a session, `find_
 | `brapi_get_image` | Fetch image bytes for up to 5 imageDbIds inline as `type: image` content blocks. Prefers `/images/{id}/imagecontent`, falls back to `imageURL`. |
 | `brapi_find_locations` | Find research stations / field sites by country / type / abbreviation, with optional client-side bounding-box filter. |
 | `brapi_find_variants` | Find variant records by variant set, reference, or genomic region (1-based inclusive / exclusive). |
-| `brapi_find_genotype_calls` | Pull genotype calls across a germplasm × variant set via async-search polling. Default 100k cap (hard cap 500k); rows beyond `loadLimit` spill to DatasetStore. |
+| `brapi_find_genotype_calls` | Pull genotype calls across a germplasm × variant set via async-search polling. Upstream pull bounded by deployment policy (`BRAPI_GENOTYPE_CALLS_MAX_PULL`, default 100k, max 500k); rows beyond `loadLimit` spill to DatasetStore. |
 
 ### Orchestrate
 
 | Tool Name | Description |
 |:----------|:------------|
 | `brapi_manage_dataset` | Lifecycle for `find_*` spillover datasets — list, summary, load (paged rows with column projection), delete. |
+
+### Analyze
+
+| Tool Name | Description |
+|:----------|:------------|
+| `brapi_dataframe_query` | Run SELECT SQL across in-memory dataframes (DuckDB-backed). Spilled `find_*` datasets auto-register as `ds_<datasetId>` dataframes. Use `registerAs` to chain. Read-only — multi-statement, non-SELECT, file-reads, and exports are rejected. **Opt-in via `CANVAS_PROVIDER_TYPE=duckdb` + `BRAPI_CANVAS_ENABLED=true`** — omitted from `tools/list` otherwise. |
+| `brapi_dataframe_describe` | List dataframes with column schema, row counts, and originating-dataset provenance for `ds_*` entries. |
+| `brapi_dataframe_drop` | Drop a dataframe by name. Idempotent — `dropped: false` for unknown names. Underlying DatasetStore dataset is unaffected. |
 
 ### Write
 
@@ -212,8 +220,8 @@ Find variant records by variant set, reference sequence, or genomic region.
 Pull genotype calls for a germplasm × variant set. Handles BrAPI's async-search pattern (`POST /search/calls` → `GET /search/calls/{id}`) transparently.
 
 - Requires at least one filter (`variantSetDbId`, `germplasmDbIds`, `callSetDbIds`, `variantDbIds`) — unfiltered pulls are rejected
-- Default cap of 100,000 calls per call (hard cap 500,000); `truncated: true` flags when the cap was hit
-- Rows beyond `loadLimit` (default 200) spill to `DatasetStore` for export via `brapi_manage_dataset`
+- Upstream pull bounded by deployment policy (`BRAPI_GENOTYPE_CALLS_MAX_PULL`, default 100,000, hard ceiling 500,000) — protects upstream from unbounded sequential paginated GETs. `truncated: true` flags when the cap was hit; agents narrow the filters and re-pull, or query the spilled dataframe
+- Rows beyond `loadLimit` (default 200) spill to `DatasetStore` for paged follow-up via `brapi_manage_dataset`, or SQL-queryable access via `brapi_dataframe_query`
 - Echoes server-reported genotype-encoding (`expandHomozygotes`, `unknownString`, `sepPhased`, `sepUnphased`) so the agent can interpret the values
 
 ---
@@ -227,6 +235,40 @@ Consolidated lifecycle tool for datasets produced by `find_*` spillovers.
 - `mode: load` — paged rows (up to 1000 per page) with optional column projection
 - `mode: delete` — drop metadata and payload
 - Export (CSV / Parquet) is deferred until the write surface lands
+
+---
+
+### `brapi_dataframe_query`
+
+Run SQL across in-memory dataframes — a SQL/analytical workspace backed by the framework's DuckDB-powered DataCanvas. Spilled `find_*` datasets auto-register as `ds_<datasetId>` dataframes; describe them via `brapi_dataframe_describe` before composing a query.
+
+> **Off by default.** Both gates must be on: `CANVAS_PROVIDER_TYPE=duckdb` (framework-side) and `BRAPI_CANVAS_ENABLED=true` (server-side, default true). Requires the optional `@duckdb/node-api` peer dep. Not available on Cloudflare Workers — DuckDB has no V8-isolate build.
+
+- Read-only enforcement via the framework's three-layer SQL gate (single statement → SELECT only → plan-walk allowlist), plus a server-side deny-list for `read_json*` / `read_parquet*` / `iceberg_scan` / `delta_scan` that bypass the canvas
+- `registerAs` materializes the result as a new dataframe — full result lives in the workspace, response carries a bounded `preview` slice plus the full `rowCount`
+- `BRAPI_CANVAS_MAX_ROWS` (default 10,000) caps response materialization; raising `rowLimit` past this is silently capped — use `registerAs` instead
+- `BRAPI_CANVAS_QUERY_TIMEOUT_MS` (default 30,000) wraps the query in a wall-clock cap on top of `ctx.signal`
+- Per-tenant default workspace cached in `ctx.state` — agents never see the underlying canvasId
+- SQL-gate rejections translate to a typed `sql_rejected` reason, preserving the granular gate code on `data.gateReason`
+
+---
+
+### `brapi_dataframe_describe`
+
+List the dataframes available in the current workspace (or describe one by name) with column schema, row counts, and originating-dataset provenance.
+
+- `ds_*`-prefixed dataframes carry full provenance: originating tool (`source`), `baseUrl`, original `query`, `createdAt`, `expiresAt`
+- User-derived dataframes (created via `brapi_dataframe_query({ registerAs })`) show structural info only
+- Pass `tableName` to scope to one entry; omit to list all
+
+---
+
+### `brapi_dataframe_drop`
+
+Release a dataframe by name. Idempotent — returns `dropped: false` rather than failing when the name is unknown.
+
+- Drops the dataframe and its provenance metadata; the underlying DatasetStore dataset is untouched
+- Use `brapi_manage_dataset mode=delete` to drop both the dataset and its dataframe in one call
 
 ---
 
@@ -313,6 +355,7 @@ BrAPI-specific:
 - **Tolerant capability discovery** — if `/serverinfo` is unavailable or sparse, discovery falls back to `/calls` and returns a partial orientation envelope with explicit notes
 - **Find-route planning** — curated `find_*` tools prefer GET list endpoints, then fall back to POST `/search/{noun}` when only search is advertised
 - **Dataset spillover** — `find_*` tools cap in-context rows at `loadLimit` and transparently persist larger unions (up to 50k rows / 50 pages) as handles in `DatasetStore`; `brapi_manage_dataset` pages / projects / deletes them
+- **Dataframes (Tier 3, opt-in)** — spilled `find_*` rows auto-register as DuckDB-backed dataframes named `ds_<datasetId>`; agents run SELECT SQL across them via `brapi_dataframe_query`, with read-only enforcement and a per-tenant workspace. Gated by `CANVAS_PROVIDER_TYPE=duckdb` + `BRAPI_CANVAS_ENABLED=true`; requires the optional `@duckdb/node-api` peer dep. Not available on Cloudflare Workers.
 - **Async-search transparency** — `brapi_find_genotype_calls` and `brapi_raw_search` handle the `POST /search/{noun}` → `GET /search/{noun}/{id}` 202-retry pattern without the agent needing to know
 - **Pedigree DAG walks** — `brapi_walk_pedigree` BFS-traverses ancestry or descendancy with cycle detection, depth limits, and traversal stats — BrAPI only exposes one generation per call
 - **Image content** — `brapi_get_image` fetches image bytes inline as MCP `type: image` blocks, preferring `/images/{id}/imagecontent` and falling back to the metadata `imageURL` field
@@ -394,6 +437,7 @@ No environment variables are required for the public BrAPI test server — agent
 
 - [Bun v1.3.11](https://bun.sh/) or higher (or Node.js v22+).
 - A BrAPI v2 endpoint to point at — the public [test server](https://test-server.brapi.org/brapi/v2) works out of the box; production servers typically need credentials.
+- *(Optional)* [`@duckdb/node-api`](https://www.npmjs.com/package/@duckdb/node-api) — required only to enable the dataframe surface (`CANVAS_PROVIDER_TYPE=duckdb`). Listed as an optional peer dep so the bare install stays light. Linux/macOS/Windows × x64 plus Linux/macOS arm64 supported (Windows arm64 is unsupported by DuckDB upstream). Not available on Cloudflare Workers.
 
 ### Installation
 
@@ -449,6 +493,11 @@ Every variable is optional — agents can configure connections entirely at runt
 | `BRAPI_REFERENCE_CACHE_TTL_SECONDS` | TTL for reference-data cache entries (programs, trials, locations, crops). | `3600` |
 | `BRAPI_ALLOW_PRIVATE_IPS` | Allow connecting to RFC 1918 / loopback targets. Dev-only. | `false` |
 | `BRAPI_ENABLE_WRITES` | Opt-in flag for the write surface (`brapi_submit_observations`). Off by default — the tool is omitted from `tools/list` unless the operator opts in for this deployment. | `false` |
+| `BRAPI_GENOTYPE_CALLS_MAX_PULL` | Hard ceiling on rows pulled from the upstream BrAPI server in a single `brapi_find_genotype_calls` invocation. Bounds total page count per query — protects upstream from unbounded pagination loops. Maximum 500,000. | `100000` |
+| `CANVAS_PROVIDER_TYPE` | Framework-side switch for the `DataCanvas` primitive. Set to `duckdb` to enable the dataframe surface. Fails closed on Cloudflare Workers. | `none` |
+| `BRAPI_CANVAS_ENABLED` | Server-side gate for `brapi_dataframe_*` tools. Effective only when `CANVAS_PROVIDER_TYPE=duckdb`. | `true` |
+| `BRAPI_CANVAS_MAX_ROWS` | Hard cap on rows materialized into a `brapi_dataframe_query` response. Use `registerAs` to keep larger result sets in the workspace. | `10000` |
+| `BRAPI_CANVAS_QUERY_TIMEOUT_MS` | Per-query wall-clock timeout for `brapi_dataframe_query`. | `30000` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
@@ -558,15 +607,16 @@ In HTTP + `none`, every client shares one bucket: connection aliases registered 
 
 | Directory | Purpose |
 |:----------|:--------|
-| `src/index.ts` | `createApp()` entry point — registers 19 tools, 6 resources, 2 prompts, and inits the seven services. |
+| `src/index.ts` | `createApp()` entry point — registers 22 tools, 6 resources, 2 prompts, and inits the eight services. |
 | `src/config` | Server-specific environment variable parsing with Zod. |
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`) and shared helpers (`orientation-envelope`, `find-helpers`, `connect-auth-schema`, `raw-routing-hints`). |
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`) — URI-addressable mirrors of curated tool data. |
 | `src/mcp-server/prompts` | Prompt definitions (`*.prompt.ts`) — multi-step BrAPI workflow templates. |
 | `src/services/brapi-client` | HTTP client with retry, concurrency capping, async-search polling, private-IP guard, and binary fetch. |
 | `src/services/brapi-filters` | Static BrAPI v2.1 filter catalog. |
+| `src/services/canvas-bridge` | Bridge over the framework's `DataCanvas` primitive — per-tenant default-workspace resolution, dataframe naming, provenance tracking. |
 | `src/services/capability-registry` | Per-connection capability profile cache. |
-| `src/services/dataset-store` | Tenant-scoped dataset handles for spilled `find_*` results. |
+| `src/services/dataset-store` | Tenant-scoped dataset handles for spilled `find_*` results. Auto-registers rows as dataframes when the canvas-bridge is enabled. |
 | `src/services/ontology-resolver` | Free-text → ontology-candidate matcher powering `brapi_find_variables` ranking. |
 | `src/services/reference-data-cache` | Cache for programs, trials, locations, crops. |
 | `src/services/server-registry` | Alias → live BrAPI connection map with auth resolution. |

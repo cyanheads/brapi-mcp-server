@@ -27,6 +27,13 @@ export interface DatasetMetadata {
   columns: string[];
   /** ISO 8601 create timestamp. */
   createdAt: string;
+  /**
+   * Dataframe name when the dataset was auto-registered as a SQL-queryable
+   * dataframe (`ds_<datasetId_with_underscores>`). Omitted when the dataframe
+   * surface is disabled or registration failed. Use with
+   * `brapi_dataframe_query` to run SQL across the rows.
+   */
+  dataframe?: string;
   datasetId: string;
   /** ISO 8601 expiry — when the TTL will evict the dataset. */
   expiresAt: string;

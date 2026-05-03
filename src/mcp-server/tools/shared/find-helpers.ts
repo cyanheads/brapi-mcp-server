@@ -503,6 +503,12 @@ export const DatasetHandleSchema = z.object({
     .positive()
     .optional()
     .describe('Cap that was applied at create time, when truncation occurred.'),
+  dataframe: z
+    .string()
+    .optional()
+    .describe(
+      'Dataframe name when this dataset was auto-registered as a SQL-queryable dataframe. Use with brapi_dataframe_query to run SQL across the rows.',
+    ),
 });
 
 export type DatasetHandle = z.infer<typeof DatasetHandleSchema>;
@@ -524,6 +530,9 @@ export function renderDatasetHandle(handle: DatasetHandle): string[] {
   ];
   if (handle.truncated) lines.push(`- truncated: true`);
   if (typeof handle.maxRows === 'number') lines.push(`- maxRows: ${handle.maxRows}`);
+  if (handle.dataframe) {
+    lines.push(`- dataframe: \`${handle.dataframe}\` (queryable via brapi_dataframe_query)`);
+  }
   return lines;
 }
 
@@ -560,6 +569,7 @@ export function toDatasetHandle(metadata: DatasetMetadata): DatasetHandle {
   };
   if (metadata.truncated) handle.truncated = true;
   if (typeof metadata.maxRows === 'number') handle.maxRows = metadata.maxRows;
+  if (metadata.dataframe) handle.dataframe = metadata.dataframe;
   return handle;
 }
 

@@ -39,7 +39,7 @@ const SEARCH_NUDGES: Record<string, string> = {
   variables:
     'Consider `brapi_find_variables` — ranked client-side via OntologyResolver when text is provided.',
   calls:
-    'Consider `brapi_find_genotype_calls` — handles async-search polling, maxCalls cap, and dataset spillover automatically.',
+    'Consider `brapi_find_genotype_calls` — handles async-search polling, deployment-side pull limit, and dataset spillover automatically.',
   images: 'Consider `brapi_find_images`.',
   variants: 'Consider `brapi_find_variants`.',
   locations: 'Consider `brapi_find_locations`.',

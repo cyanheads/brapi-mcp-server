@@ -6,12 +6,18 @@
  * `BRAPI_LOAD_LIMIT`. Provenance (source, baseUrl, query) is mandatory on
  * create — research workflows require reproducibility.
  *
+ * When the optional `CanvasBridge` is wired in, `create()` auto-registers
+ * the row payload as a SQL-queryable table and `delete()` drops it again.
+ * Failures in either path log a warning but never break the dataset op —
+ * the canvas surface is an enrichment, not a precondition.
+ *
  * @module services/dataset-store/dataset-store
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
+import type { CanvasBridge } from '@/services/canvas-bridge/index.js';
 import type {
   CreateDatasetInput,
   DatasetListOptions,
@@ -28,12 +34,17 @@ const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 1_000;
 
 export class DatasetStore {
-  constructor(private readonly serverConfig: ServerConfig) {}
+  constructor(
+    private readonly serverConfig: ServerConfig,
+    private readonly canvasBridge?: CanvasBridge | undefined,
+  ) {}
 
   /**
    * Persist a new dataset and return its metadata. Rows and metadata are
    * written under separate keys so `summary` / `list` can avoid paying the
-   * row-payload read cost.
+   * row-payload read cost. When the canvas-bridge is wired and enabled,
+   * the rows are auto-registered as a SQL-queryable canvas table; failure
+   * there only logs a warning.
    */
   async create(ctx: Context, input: CreateDatasetInput): Promise<DatasetMetadata> {
     if (!input.source) throw validationError('Dataset source is required.');
@@ -60,6 +71,15 @@ export class DatasetStore {
     };
     if (input.truncated) metadata.truncated = true;
     if (typeof input.maxRows === 'number') metadata.maxRows = input.maxRows;
+
+    // Auto-register on the canvas first so the persisted metadata can carry
+    // the dataframe name. Best-effort: a failed registration logs a warning
+    // inside the bridge and returns { registered: false }, leaving
+    // `dataframe` absent on the dataset.
+    const registration = await this.canvasBridge?.registerDataset(ctx, metadata, input.rows);
+    if (registration?.registered && registration.tableName) {
+      metadata.dataframe = registration.tableName;
+    }
 
     await Promise.all([
       ctx.state.set(metaKey(datasetId), metadata, { ttl }),
@@ -151,6 +171,7 @@ export class DatasetStore {
   /** Delete a dataset's metadata and row payload. Idempotent. */
   async delete(ctx: Context, datasetId: string): Promise<void> {
     await ctx.state.deleteMany([metaKey(datasetId), rowsKey(datasetId)]);
+    await this.canvasBridge?.dropDataset(ctx, datasetId);
   }
 }
 
@@ -218,8 +239,11 @@ function isDatasetMetadata(value: unknown): value is DatasetMetadata {
 
 let _store: DatasetStore | undefined;
 
-export function initDatasetStore(serverConfig: ServerConfig): void {
-  _store = new DatasetStore(serverConfig);
+export function initDatasetStore(
+  serverConfig: ServerConfig,
+  canvasBridge?: CanvasBridge | undefined,
+): void {
+  _store = new DatasetStore(serverConfig, canvasBridge);
 }
 
 export function getDatasetStore(): DatasetStore {

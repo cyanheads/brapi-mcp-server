@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.10](changelog/0.4.x/0.4.10.md) — 2026-05-03
+
+Dataframe surface (Tier 3, opt-in) — spilled find_* rows auto-register as DuckDB-backed dataframes; agents run SELECT SQL across them via brapi_dataframe_query/describe/drop. Genotype-call cap promoted to operator policy.
+
 ## [0.4.9](changelog/0.4.x/0.4.9.md) — 2026-05-02
 
 Sweetpotatobase follow-up: keep Breedbase location filters plural, add URL-pattern dialect detection, and fail soft when observation spillover pages stall.

@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-05-01 23:22:02
+Generated on: 2026-05-03 01:21:55
 
 ```text
 brapi-mcp-server/
@@ -49,6 +49,8 @@ brapi-mcp-server/
 │   │   └── SKILL.md
 │   ├── api-auth/
 │   │   └── SKILL.md
+│   ├── api-canvas/
+│   │   └── SKILL.md
 │   ├── api-config/
 │   │   └── SKILL.md
 │   ├── api-context/
@@ -72,6 +74,8 @@ brapi-mcp-server/
 │   │   │   └── security.md
 │   │   └── SKILL.md
 │   ├── api-workers/
+│   │   └── SKILL.md
+│   ├── code-simplifier/
 │   │   └── SKILL.md
 │   ├── design-mcp-server/
 │   │   └── SKILL.md
@@ -118,6 +122,9 @@ brapi-mcp-server/
 │   │   └── tools/
 │   │       ├── definitions/
 │   │       │   ├── brapi-connect.tool.ts
+│   │       │   ├── brapi-dataframe-describe.tool.ts
+│   │       │   ├── brapi-dataframe-drop.tool.ts
+│   │       │   ├── brapi-dataframe-query.tool.ts
 │   │       │   ├── brapi-describe-filters.tool.ts
 │   │       │   ├── brapi-find-genotype-calls.tool.ts
 │   │       │   ├── brapi-find-germplasm.tool.ts
@@ -158,6 +165,10 @@ brapi-mcp-server/
 │   │   │   └── types.ts
 │   │   ├── brapi-filters/
 │   │   │   ├── catalog.ts
+│   │   │   ├── index.ts
+│   │   │   └── types.ts
+│   │   ├── canvas-bridge/
+│   │   │   ├── canvas-bridge.ts
 │   │   │   ├── index.ts
 │   │   │   └── types.ts
 │   │   ├── capability-registry/
@@ -202,7 +213,9 @@ brapi-mcp-server/
 │   │   │   ├── registry.test.ts
 │   │   │   ├── resolve-dialect.test.ts
 │   │   │   └── spec-dialect.test.ts
+│   │   ├── _fake-canvas.ts
 │   │   ├── brapi-client.test.ts
+│   │   ├── canvas-bridge.test.ts
 │   │   ├── capability-registry.test.ts
 │   │   ├── dataset-store.test.ts
 │   │   ├── ontology-resolver.test.ts
@@ -211,6 +224,9 @@ brapi-mcp-server/
 │   ├── tools/
 │   │   ├── _tool-test-helpers.ts
 │   │   ├── brapi-connect.tool.test.ts
+│   │   ├── brapi-dataframe-describe.tool.test.ts
+│   │   ├── brapi-dataframe-drop.tool.test.ts
+│   │   ├── brapi-dataframe-query.tool.test.ts
 │   │   ├── brapi-describe-filters.tool.test.ts
 │   │   ├── brapi-find-genotype-calls.tool.test.ts
 │   │   ├── brapi-find-germplasm.tool.test.ts

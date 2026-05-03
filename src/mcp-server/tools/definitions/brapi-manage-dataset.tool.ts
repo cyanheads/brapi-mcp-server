@@ -35,6 +35,12 @@ const DatasetMetadataSchema = z.object({
     .positive()
     .optional()
     .describe('Cap that was applied at create time, when truncation occurred.'),
+  dataframe: z
+    .string()
+    .optional()
+    .describe(
+      'Dataframe name when this dataset was auto-registered as a SQL-queryable dataframe. Use with brapi_dataframe_query to run SQL across the rows.',
+    ),
 });
 
 const ListResultSchema = z
@@ -269,6 +275,9 @@ function renderList(result: Extract<Result, { mode: 'list' }>): string {
     lines.push(`- baseUrl: ${ds.baseUrl}`);
     lines.push(`- columns: ${ds.columns.join(', ')}`);
     lines.push(`- query: \`${JSON.stringify(ds.query)}\``);
+    if (ds.dataframe) {
+      lines.push(`- dataframe: \`${ds.dataframe}\` (queryable via brapi_dataframe_query)`);
+    }
   }
   return lines.join('\n');
 }
@@ -285,6 +294,9 @@ function renderSummary(dataset: z.infer<typeof DatasetMetadataSchema>): string {
   lines.push(`- expiresAt: ${dataset.expiresAt}`);
   if (dataset.truncated) {
     lines.push(`- truncated: true (cap=${dataset.maxRows ?? '?'} rows)`);
+  }
+  if (dataset.dataframe) {
+    lines.push(`- dataframe: \`${dataset.dataframe}\` (queryable via brapi_dataframe_query)`);
   }
   lines.push(`- columns: ${dataset.columns.join(', ')}`);
   lines.push(`- query: \`${JSON.stringify(dataset.query)}\``);

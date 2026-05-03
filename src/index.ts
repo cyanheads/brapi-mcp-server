@@ -11,6 +11,7 @@ import { createApp } from '@cyanheads/mcp-ts-core';
 import { getServerConfig } from '@/config/server-config.js';
 import { initBrapiClient } from '@/services/brapi-client/index.js';
 import { initBrapiDialectRegistry } from '@/services/brapi-dialect/index.js';
+import { initCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { initCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { initDatasetStore } from '@/services/dataset-store/index.js';
 import { initOntologyResolver } from '@/services/ontology-resolver/index.js';
@@ -25,15 +26,22 @@ import { brapiGermplasmResource } from './mcp-server/resources/definitions/brapi
 import { brapiServerInfoResource } from './mcp-server/resources/definitions/brapi-server-info.resource.js';
 import { brapiStudyResource } from './mcp-server/resources/definitions/brapi-study.resource.js';
 import {
+  dataframeToolDefinitions,
   readOnlyToolDefinitions,
   writeToolDefinitions,
 } from './mcp-server/tools/definitions/index.js';
 
 const serverConfig = getServerConfig();
 
-const tools = serverConfig.enableWrites
-  ? [...readOnlyToolDefinitions, ...writeToolDefinitions]
-  : readOnlyToolDefinitions;
+const tools = [
+  ...readOnlyToolDefinitions,
+  // Dataframe surface gated by BRAPI_CANVAS_ENABLED. The framework canvas
+  // itself is gated by CANVAS_PROVIDER_TYPE — when that's not `duckdb`, the
+  // bridge returns `isEnabled() === false` and the tools fail with a typed
+  // `dataframe_disabled` error directing the operator to set both env vars.
+  ...(serverConfig.canvasEnabled ? dataframeToolDefinitions : []),
+  ...(serverConfig.enableWrites ? writeToolDefinitions : []),
+];
 
 await createApp({
   tools,
@@ -46,12 +54,13 @@ await createApp({
     brapiFiltersResource,
   ],
   prompts: [brapiEdaStudy, brapiMetaAnalysis],
-  setup() {
+  setup(core) {
+    const canvasBridge = initCanvasBridge(core.canvas, serverConfig);
     initBrapiClient(serverConfig);
     initCapabilityRegistry(serverConfig);
     initBrapiDialectRegistry();
     initReferenceDataCache(serverConfig);
-    initDatasetStore(serverConfig);
+    initDatasetStore(serverConfig, canvasBridge);
     initServerRegistry(serverConfig);
     initOntologyResolver();
   },

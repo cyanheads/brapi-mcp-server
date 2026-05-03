@@ -8,9 +8,11 @@
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
+import { CanvasBridge } from '@/services/canvas-bridge/index.js';
 import { DatasetStore } from '@/services/dataset-store/dataset-store.js';
+import { FakeDataCanvas } from './_fake-canvas.js';
 
 const baseConfig: ServerConfig = {
   defaultApiKeyHeader: 'Authorization',
@@ -25,6 +27,11 @@ const baseConfig: ServerConfig = {
   searchPollTimeoutMs: 5_000,
   searchPollIntervalMs: 1,
   allowPrivateIps: false,
+  enableWrites: false,
+  genotypeCallsMaxPull: 100_000,
+  canvasEnabled: false,
+  canvasMaxRows: 10_000,
+  canvasQueryTimeoutMs: 30_000,
 };
 
 function sampleRows(n: number) {
@@ -285,6 +292,78 @@ describe('DatasetStore', () => {
     it('is idempotent when the dataset is already gone', async () => {
       const ctx = createMockContext({ tenantId: 't1' });
       await expect(store.delete(ctx, 'never-existed')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('canvas-bridge integration', () => {
+    it('auto-registers rows on the canvas after create when bridge is enabled', async () => {
+      const fakeCanvas = new FakeDataCanvas();
+      const bridge = new CanvasBridge(fakeCanvas, { ...baseConfig, canvasEnabled: true });
+      const storeWithBridge = new DatasetStore(baseConfig, bridge);
+      const ctx = createMockContext({ tenantId: 't1' });
+      const meta = await storeWithBridge.create(ctx, {
+        source: 'find_observations',
+        baseUrl: 'https://b/v2',
+        query: {},
+        rows: sampleRows(2),
+      });
+      const expectedTableName = `ds_${meta.datasetId.replace(/-/g, '_')}`;
+      expect(meta.dataframe).toBe(expectedTableName);
+      const tables = await bridge.describe(ctx);
+      expect(tables).toHaveLength(1);
+      expect(tables[0]?.name).toBe(expectedTableName);
+      expect(tables[0]?.provenance?.datasetId).toBe(meta.datasetId);
+    });
+
+    it('drops the canvas table after delete', async () => {
+      const fakeCanvas = new FakeDataCanvas();
+      const bridge = new CanvasBridge(fakeCanvas, { ...baseConfig, canvasEnabled: true });
+      const storeWithBridge = new DatasetStore(baseConfig, bridge);
+      const ctx = createMockContext({ tenantId: 't1' });
+      const meta = await storeWithBridge.create(ctx, {
+        source: 'find_observations',
+        baseUrl: 'https://b/v2',
+        query: {},
+        rows: sampleRows(1),
+      });
+      await storeWithBridge.delete(ctx, meta.datasetId);
+      const tables = await bridge.describe(ctx);
+      expect(tables).toHaveLength(0);
+    });
+
+    it('does not call the canvas when bridge is disabled', async () => {
+      const fakeCanvas = new FakeDataCanvas();
+      const bridge = new CanvasBridge(fakeCanvas, { ...baseConfig, canvasEnabled: false });
+      const storeWithBridge = new DatasetStore(baseConfig, bridge);
+      const ctx = createMockContext({ tenantId: 't1' });
+      const meta = await storeWithBridge.create(ctx, {
+        source: 'find_observations',
+        baseUrl: 'https://b/v2',
+        query: {},
+        rows: sampleRows(1),
+      });
+      // No canvas was acquired — the fake's registry is empty.
+      expect(fakeCanvas.canvases.size).toBe(0);
+      // dataframe is omitted when the bridge is off.
+      expect(meta.dataframe).toBeUndefined();
+    });
+
+    it('returns metadata without dataframe when registration fails', async () => {
+      const fakeCanvas = new FakeDataCanvas();
+      const bridge = new CanvasBridge(fakeCanvas, { ...baseConfig, canvasEnabled: true });
+      // Force the bridge's register hook to report failure, mirroring the
+      // best-effort path where DuckDB is up but the registerTable call threw.
+      vi.spyOn(bridge, 'registerDataset').mockResolvedValue({ registered: false });
+      const storeWithBridge = new DatasetStore(baseConfig, bridge);
+      const ctx = createMockContext({ tenantId: 't1' });
+      const meta = await storeWithBridge.create(ctx, {
+        source: 'find_observations',
+        baseUrl: 'https://b/v2',
+        query: {},
+        rows: sampleRows(2),
+      });
+      expect(meta.rowCount).toBe(2);
+      expect(meta.dataframe).toBeUndefined();
     });
   });
 });

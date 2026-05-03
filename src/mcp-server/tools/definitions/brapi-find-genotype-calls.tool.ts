@@ -2,14 +2,19 @@
  * @fileoverview `brapi_find_genotype_calls` — pull allele calls across a
  * germplasm × variant set. Uses BrAPI's async-search pattern
  * (`POST /search/calls` → `GET /search/calls/{id}` with 202-retry) under
- * the hood. Enforces a default 100k cap on total calls returned; rows beyond
- * the cap spill into DatasetStore for export.
+ * the hood. The upstream pull is bounded by `BRAPI_GENOTYPE_CALLS_MAX_PULL`
+ * (operator policy, default 100k, max 500k) so a single query can't trigger
+ * unbounded sequential paginated GETs against the upstream BrAPI server.
+ * `loadLimit` bounds the rows returned inline; when the pull exceeds
+ * loadLimit, the full collected set spills to DatasetStore for paged
+ * follow-up.
  *
  * @module mcp-server/tools/definitions/brapi-find-genotype-calls.tool
  */
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getServerConfig } from '@/config/server-config.js';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
@@ -33,8 +38,6 @@ import {
   toDatasetHandle,
 } from '../shared/find-helpers.js';
 
-const DEFAULT_MAX_CALLS = 100_000;
-const HARD_MAX_CALLS = 500_000;
 const PAGE_SIZE = 10_000;
 
 const CallRowSchema = z
@@ -81,7 +84,9 @@ const OutputSchema = z.object({
     .number()
     .int()
     .nonnegative()
-    .describe('Total calls collected across all pages (may be capped by `maxCalls`).'),
+    .describe(
+      'Total calls collected across all pages (may be capped by the deployment-wide pull limit; check `truncated`).',
+    ),
   hasMore: z
     .boolean()
     .describe('True when the collection was truncated (equivalent to `truncated`).'),
@@ -123,7 +128,9 @@ const OutputSchema = z.object({
   ),
   truncated: z
     .boolean()
-    .describe('True when `maxCalls` was reached and more calls exist upstream.'),
+    .describe(
+      'True when the deployment-wide pull limit was reached and more calls exist upstream. Narrow the filters and re-pull, or query the spilled dataset/dataframe.',
+    ),
   warnings: z
     .array(z.string())
     .describe('Advisory messages (truncation, capability gaps, partial pulls).'),
@@ -134,7 +141,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
   description:
-    'Pull genotype calls for a germplasm × variant set, returned as a single resolved batch. Capped per call by maxCalls; rows beyond loadLimit are persisted as a dataset handle for follow-up paging.',
+    'Pull genotype calls for a germplasm × variant set. Filter to bound cost — at minimum, set `variantSetDbId` or `germplasmDbIds`. The upstream pull is capped by deployment policy (default 100,000 rows, max 500,000); when the pull is truncated, narrow the filters or query the spilled dataframe. `loadLimit` (default 200) bounds the rows returned inline; the full collected set spills to a dataset handle for paged follow-up via brapi_manage_dataset.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -173,19 +180,13 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       .enum(['VCF', 'FLAPJACK', 'DARTSEQ', 'JSON'])
       .optional()
       .describe('Requested call-encoding format, when the server honors it.'),
-    maxCalls: z
-      .number()
-      .int()
-      .positive()
-      .optional()
-      .describe(`Max calls to pull (default ${DEFAULT_MAX_CALLS}, hard cap ${HARD_MAX_CALLS}).`),
     loadLimit: z
       .number()
       .int()
       .positive()
       .optional()
       .describe(
-        'In-context row cap. Rows beyond the cap spill to DatasetStore (if maxCalls > loadLimit).',
+        'Cap on rows returned inline in the response (default 200). When the upstream pull exceeds this, the full collected set spills to a dataset handle and only the first `loadLimit` rows return inline. Use brapi_manage_dataset (paging) or brapi_dataframe_query (SQL) to work with the full set.',
       ),
   }),
   output: OutputSchema,
@@ -216,7 +217,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       );
     }
 
-    const maxCalls = Math.min(input.maxCalls ?? DEFAULT_MAX_CALLS, HARD_MAX_CALLS);
+    const maxCalls = getServerConfig().genotypeCallsMaxPull;
     const loadLimit = input.loadLimit ?? 200;
 
     const searchBody = buildSearchBody(input);
@@ -296,7 +297,9 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       totalCount: result.totalCount,
       dataset: result.dataset,
     });
-    lines.push(result.truncated ? `${headerBase} (truncated at maxCalls)` : headerBase);
+    lines.push(
+      result.truncated ? `${headerBase} (truncated at deployment pull limit)` : headerBase,
+    );
     lines.push('');
     lines.push(`Search body: \`${JSON.stringify(result.searchBody)}\``);
     lines.push('');
@@ -463,7 +466,7 @@ async function collectCalls(input: CollectInput): Promise<CollectResult> {
     rows.length = input.maxCalls;
     truncated = true;
     input.warnings.push(
-      `Truncated at maxCalls=${input.maxCalls}. Increase maxCalls or narrow filters.`,
+      `Truncated at the deployment pull limit (${input.maxCalls} rows). Narrow the filters and re-pull, or have the operator raise BRAPI_GENOTYPE_CALLS_MAX_PULL.`,
     );
   }
 

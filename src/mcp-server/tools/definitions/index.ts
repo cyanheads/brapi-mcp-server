@@ -7,6 +7,9 @@
  */
 
 import { brapiConnect } from './brapi-connect.tool.js';
+import { brapiDataframeDescribe } from './brapi-dataframe-describe.tool.js';
+import { brapiDataframeDrop } from './brapi-dataframe-drop.tool.js';
+import { brapiDataframeQuery } from './brapi-dataframe-query.tool.js';
 import { brapiDescribeFilters } from './brapi-describe-filters.tool.js';
 import { brapiFindGenotypeCalls } from './brapi-find-genotype-calls.tool.js';
 import { brapiFindGermplasm } from './brapi-find-germplasm.tool.js';
@@ -46,6 +49,19 @@ export const readOnlyToolDefinitions = [
   brapiManageDataset,
   brapiRawGet,
   brapiRawSearch,
+];
+
+/**
+ * Dataframe tools — registered only when both the framework canvas service
+ * and BRAPI_CANVAS_ENABLED are on. The dataframe surface is opt-in (Tier 3,
+ * requires the optional `@duckdb/node-api` peer dep). Hidden from
+ * `tools/list` when disabled so the agent doesn't see capabilities it can't
+ * use.
+ */
+export const dataframeToolDefinitions = [
+  brapiDataframeQuery,
+  brapiDataframeDescribe,
+  brapiDataframeDrop,
 ];
 
 /** Write tools — registered only when `BRAPI_ENABLE_WRITES=true`. */
