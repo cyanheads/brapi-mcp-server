@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.4.12-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.4.13-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
@@ -105,7 +105,7 @@ Multi-step BrAPI workflow templates — pure user-message generators, no side ef
 
 - **Multi-server session** — `ServerRegistry` maps aliases to live BrAPI connections; one session can span Breedbase, T3, and Sweetpotatobase in parallel.
 - **Capability-aware calls** — `CapabilityRegistry` caches `/serverinfo` per connection and guards every tool call against unsupported endpoints. Falls back to `/calls` when `/serverinfo` is sparse.
-- **Built-in known-server registry** — `cassava`, `sweetpotato`, `wheat`, `breedbase` resolve out-of-the-box without env vars; orientation envelope carries CC-BY attribution.
+- **Built-in known-server registry** — `bti-cassava`, `bti-sweetpotato`, `bti-breedbase-demo`, `t3-wheat`, `t3-oat`, `t3-barley` resolve out-of-the-box without env vars; orientation envelope carries CC-BY attribution.
 - **Dataset spillover** — `find_*` tools cap in-context rows at `loadLimit` and persist larger unions (up to 50k rows / 50 pages) as handles in `DatasetStore`. `brapi_manage_dataset` pages / projects / deletes them.
 - **Dataframes (Tier 3, opt-in)** — spilled rows auto-register as DuckDB-backed `ds_<datasetId>` dataframes; agents run SELECT SQL via `brapi_dataframe_query` with read-only enforcement and a per-tenant workspace. Requires the optional `@duckdb/node-api` peer dep. Not on Cloudflare Workers.
 - **Async-search transparency** — `brapi_find_genotype_calls` and `brapi_raw_search` handle the `POST /search/{noun}` → `GET /search/{noun}/{id}` 202-retry pattern automatically.
@@ -146,7 +146,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 # Server listens at http://localhost:3010/mcp
 ```
 
-No env vars are required — the four built-in aliases (`cassava`, `sweetpotato`, `wheat`, `breedbase`) resolve out-of-the-box, and agents can connect to any other BrAPI v2 URL at runtime via `brapi_connect`. **For credentialed servers, prefer env vars over agent input** so passwords / tokens / API keys stay out of the LLM context — see [Per-alias credentials](#per-alias-credentials).
+No env vars are required — the six built-in aliases (`bti-cassava`, `bti-sweetpotato`, `bti-breedbase-demo`, `t3-wheat`, `t3-oat`, `t3-barley`) resolve out-of-the-box, and agents can connect to any other BrAPI v2 URL at runtime via `brapi_connect`. **For credentialed servers, prefer env vars over agent input** so passwords / tokens / API keys stay out of the LLM context — see [Per-alias credentials](#per-alias-credentials).
 
 **Prerequisites:** [Bun v1.3.11+](https://bun.sh/) or Node.js v22+. *(Optional)* [`@duckdb/node-api`](https://www.npmjs.com/package/@duckdb/node-api) for the dataframe surface — Linux/macOS/Windows × x64 plus Linux/macOS arm64 (no Windows arm64; no Cloudflare Workers).
 
@@ -202,9 +202,9 @@ Each alias carries **one** credential family — auth mode is derived from which
 Mixing families within an alias raises a `ValidationError`.
 
 ```sh
-# .env — register Cassavabase as alias 'cassava' with write access
-BRAPI_CASSAVA_USERNAME=alice
-BRAPI_CASSAVA_PASSWORD=...
+# .env — attach write credentials to the built-in 'bti-cassava' alias
+BRAPI_BTI_CASSAVA_USERNAME=alice
+BRAPI_BTI_CASSAVA_PASSWORD=...
 # (BASE_URL omitted — built-in registry covers it)
 
 # Static API key as alias 'prod'
@@ -213,7 +213,7 @@ BRAPI_PROD_API_KEY=...
 BRAPI_PROD_API_KEY_HEADER=X-API-Key
 ```
 
-Then the agent calls `brapi_connect({ alias: 'cassava' })` — no `baseUrl`, no `auth`, no secrets in the prompt.
+Then the agent calls `brapi_connect({ alias: 'bti-cassava' })` — no `baseUrl`, no `auth`, no secrets in the prompt.
 
 ### Built-in aliases
 
@@ -221,14 +221,16 @@ The server ships with a curated registry of public BrAPI v2 endpoints. Each reso
 
 | Alias | Upstream | Hosted by | Crop | Notes |
 |:------|:---------|:----------|:-----|:------|
-| `cassava` | [cassavabase.org](https://cassavabase.org/) | Boyce Thompson Institute | Cassava | NextGen Cassava |
-| `sweetpotato` | [sweetpotatobase.org](https://sweetpotatobase.org/) | Boyce Thompson Institute | Sweet potato | |
-| `wheat` | [wheat.triticeaetoolbox.org](https://wheat.triticeaetoolbox.org/) | Triticeae Toolbox (T3) | Wheat | |
-| `breedbase` | [breedbase.org](https://breedbase.org/) | Boyce Thompson Institute | _Demo_ | Sample data only — onboarding + tests. |
+| `bti-cassava` | [cassavabase.org](https://cassavabase.org/) | Boyce Thompson Institute | Cassava | NextGen Cassava |
+| `bti-sweetpotato` | [sweetpotatobase.org](https://sweetpotatobase.org/) | Boyce Thompson Institute | Sweet potato | |
+| `bti-breedbase-demo` | [breedbase.org](https://breedbase.org/) | Boyce Thompson Institute | _Demo_ | Sample data only — onboarding + tests. |
+| `t3-wheat` | [wheat.triticeaetoolbox.org](https://wheat.triticeaetoolbox.org/) | Triticeae Toolbox (T3) | Wheat | Wheat CAP / IWYP. |
+| `t3-oat` | [oat.triticeaetoolbox.org](https://oat.triticeaetoolbox.org/) | Triticeae Toolbox (T3) | Oat | Global Oat Genetics Database. |
+| `t3-barley` | [barley.triticeaetoolbox.org](https://barley.triticeaetoolbox.org/) | Triticeae Toolbox (T3) | Barley | T-CAP / US Wheat & Barley Scab Initiative. |
 
-Set `BRAPI_<ALIAS>_BASE_URL` to repoint at a staging mirror or fork (env wins over the built-in URL). Set `BRAPI_<ALIAS>_USERNAME` etc. to attach credentials on top of the built-in URL — each Breedbase instance has its own user table, so write access requires separate registration on each upstream. Use `BRAPI_BUILTIN_ALIASES_DISABLED=cassava,wheat` to strip specific entries.
+Set `BRAPI_<ALIAS>_BASE_URL` to repoint at a staging mirror or fork (env wins over the built-in URL — hyphens in the alias become underscores in the env var, so `t3-wheat` → `BRAPI_T3_WHEAT_BASE_URL`). Set `BRAPI_<ALIAS>_USERNAME` etc. to attach credentials on top of the built-in URL — each Breedbase instance has its own user table, so write access requires separate registration on each upstream. Use `BRAPI_BUILTIN_ALIASES_DISABLED=bti-cassava,t3-wheat` to strip specific entries.
 
-**Citation:** all four built-ins reference Morales et al. 2022, _"Breedbase: a digital ecosystem for modern plant breeding."_ G3 12(7): jkac078. [doi:10.1093/g3journal/jkac078](https://doi.org/10.1093/g3journal/jkac078).
+**Citation:** all six built-ins reference Morales et al. 2022, _"Breedbase: a digital ecosystem for modern plant breeding."_ G3 12(7): jkac078. [doi:10.1093/g3journal/jkac078](https://doi.org/10.1093/g3journal/jkac078).
 
 ---
 

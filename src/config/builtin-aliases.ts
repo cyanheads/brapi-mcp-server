@@ -41,7 +41,7 @@ export interface BuiltinAlias {
  */
 export const BUILTIN_ALIASES: ReadonlyArray<BuiltinAlias> = Object.freeze([
   Object.freeze({
-    alias: 'cassava',
+    alias: 'bti-cassava',
     baseUrl: 'https://cassavabase.org/brapi/v2',
     homepage: 'https://cassavabase.org/',
     organizationName: 'Boyce Thompson Institute',
@@ -50,7 +50,7 @@ export const BUILTIN_ALIASES: ReadonlyArray<BuiltinAlias> = Object.freeze([
     citation: BREEDBASE_CITATION,
   }),
   Object.freeze({
-    alias: 'sweetpotato',
+    alias: 'bti-sweetpotato',
     baseUrl: 'https://sweetpotatobase.org/brapi/v2',
     homepage: 'https://sweetpotatobase.org/',
     organizationName: 'Boyce Thompson Institute',
@@ -59,7 +59,7 @@ export const BUILTIN_ALIASES: ReadonlyArray<BuiltinAlias> = Object.freeze([
     citation: BREEDBASE_CITATION,
   }),
   Object.freeze({
-    alias: 'wheat',
+    alias: 't3-wheat',
     baseUrl: 'https://wheat.triticeaetoolbox.org/brapi/v2',
     homepage: 'https://wheat.triticeaetoolbox.org/',
     organizationName: 'Triticeae Toolbox (T3)',
@@ -68,7 +68,25 @@ export const BUILTIN_ALIASES: ReadonlyArray<BuiltinAlias> = Object.freeze([
     citation: BREEDBASE_CITATION,
   }),
   Object.freeze({
-    alias: 'breedbase',
+    alias: 't3-oat',
+    baseUrl: 'https://oat.triticeaetoolbox.org/brapi/v2',
+    homepage: 'https://oat.triticeaetoolbox.org/',
+    organizationName: 'Triticeae Toolbox (T3)',
+    cropFocus: 'Oat',
+    license: 'CC-BY',
+    citation: BREEDBASE_CITATION,
+  }),
+  Object.freeze({
+    alias: 't3-barley',
+    baseUrl: 'https://barley.triticeaetoolbox.org/brapi/v2',
+    homepage: 'https://barley.triticeaetoolbox.org/',
+    organizationName: 'Triticeae Toolbox (T3)',
+    cropFocus: 'Barley',
+    license: 'CC-BY',
+    citation: BREEDBASE_CITATION,
+  }),
+  Object.freeze({
+    alias: 'bti-breedbase-demo',
     baseUrl: 'https://breedbase.org/brapi/v2',
     homepage: 'https://breedbase.org/',
     organizationName: 'Boyce Thompson Institute',

@@ -24,9 +24,9 @@ describe('brapi_eda_study prompt', () => {
   });
 
   it('inlines the alias arg when provided', () => {
-    const args = brapiEdaStudy.args.parse({ studyDbId: 's-1', alias: 'cassava' });
+    const args = brapiEdaStudy.args.parse({ studyDbId: 's-1', alias: 'bti-cassava' });
     const text = (brapiEdaStudy.generate(args)[0]!.content as { text: string }).text;
-    expect(text).toContain('alias: "cassava"');
+    expect(text).toContain('alias: "bti-cassava"');
   });
 
   it('omits the alias arg when not provided', () => {

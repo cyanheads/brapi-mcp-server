@@ -49,10 +49,10 @@ describe('brapi_meta_analysis prompt', () => {
     const args = brapiMetaAnalysis.args.parse({
       germplasmDbIds: 'g-1',
       traitName: 'Yield',
-      alias: 'sweetpotato',
+      alias: 'bti-sweetpotato',
     });
     const text = (brapiMetaAnalysis.generate(args)[0]!.content as { text: string }).text;
-    const aliasOccurrences = text.match(/alias: "sweetpotato"/g) ?? [];
+    const aliasOccurrences = text.match(/alias: "bti-sweetpotato"/g) ?? [];
     expect(aliasOccurrences.length).toBeGreaterThanOrEqual(3);
   });
 

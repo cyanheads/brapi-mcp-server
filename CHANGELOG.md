@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.13](changelog/0.4.x/0.4.13.md) — 2026-05-04
+
+Built-in alias rename — source-prefixed handles (`bti-*`, `t3-*`); adds T3/Oat and T3/Barley; fixes hyphenated-builtin env shadow.
+
 ## [0.4.12](changelog/0.4.x/0.4.12.md) — 2026-05-04
 
 Built-in alias registry — `cassava`, `sweetpotato`, `wheat`, and `breedbase` resolve out-of-the-box without env vars; orientation envelope now carries CC-BY attribution metadata.

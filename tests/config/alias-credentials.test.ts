@@ -267,15 +267,15 @@ describe('resolveConnectInput', () => {
 
 describe('resolveConnectInput with builtin registry', () => {
   it('uses the builtin baseUrl when no env entry shadows it', () => {
-    expect(resolveConnectInput('cassava', {}, {})).toEqual({
+    expect(resolveConnectInput('bti-cassava', {}, {})).toEqual({
       baseUrl: 'https://cassavabase.org/brapi/v2',
       auth: { mode: 'none' },
     });
   });
 
   it('env BASE_URL overrides the builtin baseUrl', () => {
-    const env = { BRAPI_CASSAVA_BASE_URL: 'https://staging.example/brapi/v2' };
-    expect(resolveConnectInput('cassava', {}, env)).toEqual({
+    const env = { BRAPI_BTI_CASSAVA_BASE_URL: 'https://staging.example/brapi/v2' };
+    expect(resolveConnectInput('bti-cassava', {}, env)).toEqual({
       baseUrl: 'https://staging.example/brapi/v2',
       auth: { mode: 'none' },
     });
@@ -283,7 +283,7 @@ describe('resolveConnectInput with builtin registry', () => {
 
   it('agent baseUrl overrides the builtin baseUrl', () => {
     expect(
-      resolveConnectInput('cassava', { baseUrl: 'https://agent.example/brapi/v2' }, {}),
+      resolveConnectInput('bti-cassava', { baseUrl: 'https://agent.example/brapi/v2' }, {}),
     ).toEqual({
       baseUrl: 'https://agent.example/brapi/v2',
       auth: { mode: 'none' },
@@ -292,10 +292,10 @@ describe('resolveConnectInput with builtin registry', () => {
 
   it('per-alias env credentials layer auth on top of the builtin URL', () => {
     const env = {
-      BRAPI_CASSAVA_USERNAME: 'cyanheads',
-      BRAPI_CASSAVA_PASSWORD: 'secret',
+      BRAPI_BTI_CASSAVA_USERNAME: 'cyanheads',
+      BRAPI_BTI_CASSAVA_PASSWORD: 'secret',
     };
-    expect(resolveConnectInput('cassava', {}, env)).toEqual({
+    expect(resolveConnectInput('bti-cassava', {}, env)).toEqual({
       baseUrl: 'https://cassavabase.org/brapi/v2',
       auth: { mode: 'sgn', username: 'cyanheads', password: 'secret' },
     });
@@ -308,7 +308,7 @@ describe('resolveConnectInput with builtin registry', () => {
       BRAPI_DEFAULT_BASE_URL: 'https://test-server.brapi.org/brapi/v2',
       BRAPI_DEFAULT_BEARER_TOKEN: 'default-tok',
     };
-    expect(resolveConnectInput('cassava', {}, env)).toEqual({
+    expect(resolveConnectInput('bti-cassava', {}, env)).toEqual({
       baseUrl: 'https://cassavabase.org/brapi/v2',
       auth: { mode: 'none' },
     });
@@ -316,18 +316,22 @@ describe('resolveConnectInput with builtin registry', () => {
 
   it('disabled builtin is not selectable — resolver falls through and throws', () => {
     expect(() =>
-      resolveConnectInput('cassava', {}, { BRAPI_BUILTIN_ALIASES_DISABLED: 'cassava' }),
+      resolveConnectInput('bti-cassava', {}, { BRAPI_BUILTIN_ALIASES_DISABLED: 'bti-cassava' }),
     ).toThrowError(/No baseUrl provided/);
   });
 
   it('disabled list is case-insensitive and tolerates whitespace', () => {
     expect(() =>
-      resolveConnectInput('cassava', {}, { BRAPI_BUILTIN_ALIASES_DISABLED: ' Cassava , wheat ' }),
+      resolveConnectInput(
+        'bti-cassava',
+        {},
+        { BRAPI_BUILTIN_ALIASES_DISABLED: ' BTI-Cassava , T3-Wheat ' },
+      ),
     ).toThrowError(/No baseUrl provided/);
   });
 
   it('builtin is matched case-insensitively against the requested alias', () => {
-    expect(resolveConnectInput('CASSAVA', {}, {})).toEqual({
+    expect(resolveConnectInput('BTI-CASSAVA', {}, {})).toEqual({
       baseUrl: 'https://cassavabase.org/brapi/v2',
       auth: { mode: 'none' },
     });
@@ -408,23 +412,25 @@ describe('discoverConfiguredAliases', () => {
 
   it('surfaces builtins with origin "builtin" when no env entry shadows them', () => {
     const result = discoverConfiguredAliases({});
-    expect(result.find((a) => a.alias === 'cassava')).toEqual({
-      alias: 'cassava',
+    expect(result.find((a) => a.alias === 'bti-cassava')).toEqual({
+      alias: 'bti-cassava',
       authMode: 'none',
       baseUrl: 'https://cassavabase.org/brapi/v2',
       origin: 'builtin',
     });
-    expect(result.find((a) => a.alias === 'sweetpotato')?.origin).toBe('builtin');
-    expect(result.find((a) => a.alias === 'wheat')?.origin).toBe('builtin');
-    expect(result.find((a) => a.alias === 'breedbase')?.origin).toBe('builtin');
+    expect(result.find((a) => a.alias === 'bti-sweetpotato')?.origin).toBe('builtin');
+    expect(result.find((a) => a.alias === 't3-wheat')?.origin).toBe('builtin');
+    expect(result.find((a) => a.alias === 't3-oat')?.origin).toBe('builtin');
+    expect(result.find((a) => a.alias === 't3-barley')?.origin).toBe('builtin');
+    expect(result.find((a) => a.alias === 'bti-breedbase-demo')?.origin).toBe('builtin');
   });
 
   it('env BASE_URL shadows the builtin and reports origin "env"', () => {
-    const env = { BRAPI_CASSAVA_BASE_URL: 'https://staging.example/brapi/v2' };
+    const env = { BRAPI_BTI_CASSAVA_BASE_URL: 'https://staging.example/brapi/v2' };
     const result = discoverConfiguredAliases(env);
-    const cassava = result.find((a) => a.alias === 'cassava');
+    const cassava = result.find((a) => a.alias === 'bti-cassava');
     expect(cassava).toEqual({
-      alias: 'cassava',
+      alias: 'bti-cassava',
       authMode: 'none',
       baseUrl: 'https://staging.example/brapi/v2',
       origin: 'env',
@@ -433,12 +439,12 @@ describe('discoverConfiguredAliases', () => {
 
   it('builtin alias picks up env-set credentials with the right authMode', () => {
     const env = {
-      BRAPI_CASSAVA_USERNAME: 'u',
-      BRAPI_CASSAVA_PASSWORD: 'p',
+      BRAPI_BTI_CASSAVA_USERNAME: 'u',
+      BRAPI_BTI_CASSAVA_PASSWORD: 'p',
     };
     const result = discoverConfiguredAliases(env);
-    expect(result.find((a) => a.alias === 'cassava')).toEqual({
-      alias: 'cassava',
+    expect(result.find((a) => a.alias === 'bti-cassava')).toEqual({
+      alias: 'bti-cassava',
       authMode: 'sgn',
       baseUrl: 'https://cassavabase.org/brapi/v2',
       origin: 'builtin',
@@ -446,10 +452,12 @@ describe('discoverConfiguredAliases', () => {
   });
 
   it('respects BRAPI_BUILTIN_ALIASES_DISABLED', () => {
-    const result = discoverConfiguredAliases({ BRAPI_BUILTIN_ALIASES_DISABLED: 'cassava,wheat' });
-    expect(result.find((a) => a.alias === 'cassava')).toBeUndefined();
-    expect(result.find((a) => a.alias === 'wheat')).toBeUndefined();
-    expect(result.find((a) => a.alias === 'sweetpotato')?.origin).toBe('builtin');
+    const result = discoverConfiguredAliases({
+      BRAPI_BUILTIN_ALIASES_DISABLED: 'bti-cassava,t3-wheat',
+    });
+    expect(result.find((a) => a.alias === 'bti-cassava')).toBeUndefined();
+    expect(result.find((a) => a.alias === 't3-wheat')).toBeUndefined();
+    expect(result.find((a) => a.alias === 'bti-sweetpotato')?.origin).toBe('builtin');
   });
 });
 
@@ -484,13 +492,13 @@ describe('formatConfiguredAliasesHint', () => {
   it('splits builtins and env aliases into separate sentences', () => {
     const hint = formatConfiguredAliasesHint([
       {
-        alias: 'cassava',
+        alias: 'bti-cassava',
         authMode: 'none',
         baseUrl: 'https://cassavabase.org/brapi/v2',
         origin: 'builtin',
       },
       {
-        alias: 'wheat',
+        alias: 't3-wheat',
         authMode: 'none',
         baseUrl: 'https://wheat.triticeaetoolbox.org/brapi/v2',
         origin: 'builtin',
@@ -503,8 +511,8 @@ describe('formatConfiguredAliasesHint', () => {
       },
     ]);
     expect(hint).toContain('Built-in known servers');
-    expect(hint).toContain('`cassava`');
-    expect(hint).toContain('`wheat`');
+    expect(hint).toContain('`bti-cassava`');
+    expect(hint).toContain('`t3-wheat`');
     expect(hint).toContain('Operator-configured');
     expect(hint).toContain('`prod`');
   });

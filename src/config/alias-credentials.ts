@@ -194,12 +194,19 @@ const ALIAS_BASE_URL_PATTERN = /^BRAPI_([A-Z0-9_]+)_BASE_URL$/;
 export function discoverConfiguredAliases(env: NodeJS.ProcessEnv = process.env): DiscoveredAlias[] {
   const result: DiscoveredAlias[] = [];
   const seen = new Set<string>();
+  const builtins = listBuiltinAliases(env);
+  // Reverse-map for hyphen → underscore env-var translation: a builtin named
+  // `bti-cassava` exposes BRAPI_BTI_CASSAVA_*, but the regex below only sees
+  // the underscored form. Without this map, an env var that shadows a
+  // hyphenated builtin would be reported as a separate `bti_cassava` alias.
+  const builtinByUnderscoredName = new Map(builtins.map((b) => [b.alias.replace(/-/g, '_'), b]));
 
   for (const [key, value] of Object.entries(env)) {
     const match = key.match(ALIAS_BASE_URL_PATTERN);
     const captured = match?.[1];
     if (!captured || !value) continue;
-    const alias = captured.toLowerCase();
+    const lowerCaptured = captured.toLowerCase();
+    const alias = builtinByUnderscoredName.get(lowerCaptured)?.alias ?? lowerCaptured;
     const creds = readAliasCredentials(alias, env);
     result.push({
       alias,
@@ -210,7 +217,7 @@ export function discoverConfiguredAliases(env: NodeJS.ProcessEnv = process.env):
     seen.add(alias);
   }
 
-  for (const builtin of listBuiltinAliases(env)) {
+  for (const builtin of builtins) {
     if (seen.has(builtin.alias)) continue;
     const creds = readAliasCredentials(builtin.alias, env);
     result.push({
