@@ -19,7 +19,7 @@ const GET_NUDGES: Record<string, string> = {
   observations:
     'This endpoint is also served by `brapi_find_observations` which adds distributions and dataset spillover.',
   variables:
-    'This endpoint is also served by `brapi_find_variables` which adds free-text ranking via OntologyResolver.',
+    'This endpoint is also served by `brapi_find_variables` which adds free-text ranking against ontology terms.',
   images:
     'This endpoint is also served by `brapi_find_images`; use `brapi_get_image` to pull bytes inline.',
   variants:
@@ -37,7 +37,7 @@ const SEARCH_NUDGES: Record<string, string> = {
   germplasm: 'Consider `brapi_find_germplasm` — handles distributions + spillover.',
   observations: 'Consider `brapi_find_observations` — handles spillover and distributions.',
   variables:
-    'Consider `brapi_find_variables` — ranked client-side via OntologyResolver when text is provided.',
+    'Consider `brapi_find_variables` — ranks results client-side against ontology terms when text is provided.',
   calls:
     'Consider `brapi_find_genotype_calls` — handles async-search polling, deployment-side pull limit, and dataset spillover automatically.',
   images: 'Consider `brapi_find_images`.',

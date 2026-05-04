@@ -53,7 +53,14 @@ const StudyRowSchema = z
     locationName: z.string().nullish().describe('Display name of the study site.'),
     commonCropName: z.string().nullish().describe('Common crop name (e.g. "Maize", "Wheat").'),
     seasons: z
-      .array(z.string().describe('Season identifier — typically a year like "2022".'))
+      .array(
+        z
+          .string()
+          .nullable()
+          .describe(
+            'Season identifier — typically a year like "2022". Nullable: some Breedbase deployments emit a null entry when the study is missing a season.',
+          ),
+      )
       .nullish()
       .describe('Season identifiers this study spans.'),
     active: z.boolean().nullish().describe('True while the study is open for data capture.'),
@@ -135,7 +142,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindStudies = tool('brapi_find_studies', {
   description:
-    'Locate studies matching crop, trial type, season, location, or program. Results are enriched with program/trial/location context in one call. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Locate studies matching crop, trial type, season, location, or program. Enriches results with program/trial/location context in one call. Returns a dataset handle when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -351,7 +358,8 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         if (study.trialDbId) parts.push(`trialDbId=${study.trialDbId}`);
         if (study.locationName) parts.push(`location=${study.locationName}`);
         if (study.locationDbId) parts.push(`locationDbId=${study.locationDbId}`);
-        if (study.seasons?.length) parts.push(`seasons=${study.seasons.join(',')}`);
+        const cleanSeasons = asStringArray(study.seasons);
+        if (cleanSeasons?.length) parts.push(`seasons=${cleanSeasons.join(',')}`);
         if (study.commonCropName) parts.push(`crop=${study.commonCropName}`);
         if (study.active != null) parts.push(`active=${study.active}`);
         if (study.startDate) parts.push(`start=${study.startDate}`);

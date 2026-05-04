@@ -156,7 +156,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The active dialect declares POST /search/calls as known-dead on this server',
       recovery:
-        'Pin BRAPI_<ALIAS>_DIALECT=spec to bypass the dialect, or query a different server that exposes a working /search/calls route.',
+        'Connect to a different BrAPI server that exposes a working /search/calls route — genotype-call workflows are not viable here.',
     },
   ] as const,
   input: z.object({
@@ -466,7 +466,7 @@ async function collectCalls(input: CollectInput): Promise<CollectResult> {
     rows.length = input.maxCalls;
     truncated = true;
     input.warnings.push(
-      `Truncated at the deployment pull limit (${input.maxCalls} rows). Narrow the filters and re-pull, or have the operator raise BRAPI_GENOTYPE_CALLS_MAX_PULL.`,
+      `Truncated at the deployment pull limit (${input.maxCalls} rows). Narrow the filters and re-pull; the captured slice is preserved in the spilled dataset.`,
     );
   }
 

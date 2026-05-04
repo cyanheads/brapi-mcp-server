@@ -139,7 +139,7 @@ export const brapiGetImage = tool('brapi_get_image', {
         if (entry.payload.source === 'imageURL' && !entry.payload.mimeType.startsWith('image/')) {
           warnings.push({
             imageDbId: entry.payload.imageDbId,
-            warning: `imageURL fallback returned content-type '${entry.payload.mimeType}' (not image/*) — the upstream URL likely points at an HTML error page or wrong resource. The bytes are returned as-is; the LLM may not be able to render them.`,
+            warning: `imageURL fallback returned content-type '${entry.payload.mimeType}' (not image/*) — the upstream URL likely points at an HTML error page or wrong resource. The bytes are returned as-is and may not render as an image.`,
           });
         }
       } else errors.push(entry);

@@ -334,4 +334,33 @@ describe('brapi_find_studies tool', () => {
     expect(result.results[0]?.studyCode).toBeNull();
     expect(result.results[0]?.studyName).toBe('00ayt11interspecIB');
   });
+
+  // The breedbase.org demo deployment serves studies with a literal null
+  // inside the seasons array — the per-row schema must accept this shape
+  // without rejecting the whole batch, and downstream consumers (distribution
+  // computation, format renderer) must skip the null entry.
+  it('tolerates null entries inside the seasons array (breedbase demo shape)', async () => {
+    const ctx = await connect(fetcher);
+    const rows = [
+      studyRow('s-bd-1', { seasons: [null] as unknown as string[] }),
+      studyRow('s-bd-2', { seasons: ['2024'] }),
+      studyRow('s-bd-3', { seasons: [null, '2023'] as unknown as string[] }),
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: 3 })));
+    const result = await brapiFindStudies.handler(brapiFindStudies.input.parse({}), ctx);
+    expect(result.returnedCount).toBe(3);
+    // Distribution should count only the non-null values.
+    expect(result.distributions.seasons).toEqual({ '2024': 1, '2023': 1 });
+    // Null entries pass through to results as-is — schema is permissive, the
+    // format renderer is responsible for filtering before display.
+    expect(result.results[0]?.seasons).toEqual([null]);
+    expect(result.results[2]?.seasons).toEqual([null, '2023']);
+    // Format output should not render `null` as a literal "null" string.
+    const formatted = brapiFindStudies.format!(result);
+    expect(typeof formatted).toBe('object');
+    const text = (formatted as Array<{ type: string; text: string }>)[0]?.text ?? '';
+    expect(text).not.toMatch(/seasons=null/);
+    expect(text).not.toMatch(/seasons=,/);
+    expect(text).toMatch(/seasons=2023/);
+  });
 });

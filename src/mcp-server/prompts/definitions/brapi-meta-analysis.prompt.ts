@@ -12,7 +12,7 @@ import { prompt, z } from '@cyanheads/mcp-ts-core';
 
 export const brapiMetaAnalysis = prompt('brapi_meta_analysis', {
   description:
-    'Cross-study meta-analysis playbook for a germplasm × trait combination — resolve trait, find studies, pull observations, harmonize scales, summarize across studies.',
+    'Run a cross-study meta-analysis on a germplasm × trait combination — resolve trait, find studies, pull observations, harmonize scales, summarize across studies.',
   args: z.object({
     germplasmDbIds: z
       .string()
@@ -24,7 +24,7 @@ export const brapiMetaAnalysis = prompt('brapi_meta_analysis', {
       .string()
       .min(1)
       .describe(
-        'Target trait name or free-text query — e.g. "dry matter content", "Plant height". The agent will resolve it to one or more observation variables via brapi_find_variables.',
+        'Target trait name or free-text query — e.g. "dry matter content", "Plant height". Resolved to one or more observation variables via brapi_find_variables.',
       ),
     alias: z
       .string()
@@ -46,7 +46,7 @@ export const brapiMetaAnalysis = prompt('brapi_meta_analysis', {
       `You are running a cross-study meta-analysis on the **${args.traitName}** trait across ${ids.length} germplasm: ${ids.map((id) => `\`${id}\``).join(', ')}. Use the curated \`brapi_*\` tools throughout. Reproducibility matters — record every dataset handle and query you generate.`,
       '',
       '## Step 1 — Resolve the trait to one or more observation variables',
-      `1. Call \`brapi_find_variables\` with \`text: "${args.traitName}"${aliasArg}\` to score candidates via the OntologyResolver.`,
+      `1. Call \`brapi_find_variables\` with \`text: "${args.traitName}"${aliasArg}\` to rank candidates against ontology terms.`,
       '2. Inspect `ontologyCandidates`. If exactly one candidate has an unambiguous PUI / trait name match, use it. If multiple variables represent the same biological trait (e.g. "Dry Matter %" measured by gravimetric vs NIR methods), keep all of them and note the method differences — you will harmonize later.',
       '3. Record the resulting `observationVariableDbId[]` and the scale `dataType` and `scaleName` for each. Numeric scales can be averaged across studies; categorical scales need a mapping table before pooling.',
       '',
@@ -107,7 +107,7 @@ export const brapiMetaAnalysis = prompt('brapi_meta_analysis', {
       '7. **Pedigree notes** — Step 7 if you ran it.',
       '8. **Caveats** — missing data rates, dropped observations, sample-size warnings, capability gaps from the server (e.g. ontology endpoint missing).',
       '',
-      'Reproducibility is non-negotiable: cite the dataset handle returned by every `find_*` call so a future agent can re-run with the same upstream snapshot.',
+      'Reproducibility is non-negotiable: cite the dataset handle returned by every `find_*` call so a future run can reproduce the same upstream snapshot.',
     ].join('\n');
 
     return [

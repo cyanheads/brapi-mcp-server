@@ -61,7 +61,7 @@ const InputSchema = z.object({
     .max(1000)
     .optional()
     .describe(
-      'Cap the number of rows returned in this response (1–1000). When omitted, the deployment-wide response cap applies (typically 10,000). Lower this with `registerAs` when you only need a sample to verify the query.',
+      'Cap the number of rows returned in this response (1–1000). When omitted, the deployment-wide response cap applies. Lower this with `registerAs` when you only need a sample to verify the query.',
     ),
   rowLimit: z
     .number()
@@ -69,7 +69,7 @@ const InputSchema = z.object({
     .positive()
     .optional()
     .describe(
-      'Hard cap on rows materialized into the response. Capped to the deployment-wide response cap (typically 10,000). For larger result sets, use `registerAs` to keep the full result queryable instead of raising this.',
+      'Hard cap on rows materialized into the response, bounded by the deployment-wide response cap. For larger result sets, use `registerAs` to keep the full result queryable instead of raising this.',
     ),
 });
 
@@ -83,7 +83,13 @@ const OutputSchema = z.object({
     .array(z.string().describe('Column name in projection order.'))
     .describe('Column names in projection order.'),
   rows: z
-    .array(z.record(z.string(), z.unknown()).describe('One result row.'))
+    .array(
+      z
+        .record(z.string(), z.unknown())
+        .describe(
+          'One result row. Columns are projected from the SQL SELECT clause; call brapi_dataframe_describe to inspect source dataframe schemas.',
+        ),
+    )
     .describe('Materialized rows, bounded by preview/rowLimit.'),
   dataframe: z
     .string()
@@ -101,9 +107,9 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
     {
       reason: 'dataframe_disabled',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Dataframe surface is gated off by env (CANVAS_PROVIDER_TYPE != duckdb or BRAPI_CANVAS_ENABLED=false)',
+      when: 'Dataframe surface is not enabled on this deployment',
       recovery:
-        'Set CANVAS_PROVIDER_TYPE=duckdb and BRAPI_CANVAS_ENABLED=true on the deployment, or use brapi_manage_dataset for the underlying dataset.',
+        'Use brapi_manage_dataset (mode=load) to page rows from the underlying dataset — SQL across dataframes is gated off here.',
     },
     {
       reason: 'sql_rejected',

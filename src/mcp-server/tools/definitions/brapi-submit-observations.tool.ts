@@ -274,7 +274,7 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
       .boolean()
       .default(false)
       .describe(
-        'Bypass elicitation in apply mode. Use only when the client lacks ctx.elicit support; the agent must have explicit user authorization to apply.',
+        'Bypass elicitation in apply mode. Use only when the client lacks ctx.elicit support and explicit user authorization for the write has been recorded out-of-band.',
       ),
   }),
   output: OutputSchema,

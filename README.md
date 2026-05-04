@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.4.11-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.4.12-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
@@ -77,7 +77,7 @@ Twenty-two tools grouped by shape — connection tools bootstrap a session, `fin
 
 Session bootstrap. Authenticates to a BrAPI v2 server, registers the connection under a named alias, loads the capability profile via `CapabilityRegistry`, and inlines the full orientation envelope in the response. One call fully orients the agent.
 
-- `baseUrl` and `auth` are optional — when omitted they fall back to `BRAPI_<ALIAS>_*`, then `BRAPI_DEFAULT_*` env vars. Agents can call `brapi_connect({ alias: 'cassava' })` with nothing else and credentials never enter the LLM context (see [Per-alias credentials](#per-alias-credentials))
+- `baseUrl` and `auth` are optional — when omitted they fall back to `BRAPI_<ALIAS>_*`, then a built-in registry of public BrAPI servers (`cassava`, `sweetpotato`, `wheat`, `breedbase`), then `BRAPI_DEFAULT_*` (see [Per-alias credentials](#per-alias-credentials) and [Built-in aliases](#built-in-aliases)). Agents can call `brapi_connect({ alias: 'cassava' })` with nothing else and credentials never enter the LLM context
 - Tagged-union auth input: `none`, `sgn` (session-token exchange), `oauth2` (client-credentials exchange), `bearer`, `api_key`
 - Multiple concurrent connections per session via distinct aliases
 - Forces a fresh capability load on every connect — the agent expects current state
@@ -511,11 +511,14 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Per-alias credentials
 
-`brapi_connect` resolves `baseUrl` and `auth` from env vars when the agent omits them, so credentials never enter the LLM context. Three layers of precedence:
+`brapi_connect` resolves `baseUrl` and `auth` from env vars when the agent omits them, so credentials never enter the LLM context. Four layers of precedence:
 
 1. **Explicit agent input** — always wins.
 2. **Per-alias env vars** — `BRAPI_<ALIAS>_*` where the alias name is uppercased and hyphens become underscores (`my-server` → `BRAPI_MY_SERVER_*`).
-3. **Default env vars** — `BRAPI_DEFAULT_*`, only consulted when the alias differs from `default`.
+3. **Built-in known-server registry** — see [Built-in aliases](#built-in-aliases) below.
+4. **Default env vars** — `BRAPI_DEFAULT_*`, only consulted when the alias differs from `default`.
+
+When the baseUrl is satisfied by a builtin, `BRAPI_DEFAULT_*` credentials are **not** layered on top — those belong to the default server, not whatever upstream the builtin happens to point at. Per-alias credentials still apply, since those were explicitly set for this alias.
 
 Each alias carries **one** credential family — auth mode is derived from which fields are set:
 
@@ -548,6 +551,23 @@ BRAPI_SECURE_OAUTH_TOKEN_URL=https://auth.example.com/oauth/token
 ```
 
 Then the agent calls `brapi_connect({ alias: 'cassava' })` — no `baseUrl`, no `auth`, no secrets in the prompt.
+
+### Built-in aliases
+
+The server ships with a curated registry of public BrAPI v2 endpoints. Each alias resolves out-of-the-box without any env vars — call `brapi_connect({ alias: 'cassava' })` and the resolver fills in the URL. Each entry is published under [Creative Commons Attribution](https://creativecommons.org/licenses/by/4.0/); the orientation envelope surfaces license, citation, and homepage in its `attribution` block so agents can satisfy reuse terms automatically.
+
+| Alias | Upstream | Hosted by | Crop | Notes |
+|:------|:---------|:----------|:-----|:------|
+| `cassava` | [cassavabase.org](https://cassavabase.org/) | Boyce Thompson Institute | Cassava | NextGen Cassava project |
+| `sweetpotato` | [sweetpotatobase.org](https://sweetpotatobase.org/) | Boyce Thompson Institute | Sweet potato | |
+| `wheat` | [wheat.triticeaetoolbox.org](https://wheat.triticeaetoolbox.org/) | Triticeae Toolbox (T3) | Wheat | |
+| `breedbase` | [breedbase.org](https://breedbase.org/) | Boyce Thompson Institute | _Demo_ | Sample data only — not production records. Useful for onboarding and tests. |
+
+**Override:** set `BRAPI_<ALIAS>_BASE_URL=...` to repoint an alias at a staging mirror or a fork — env always wins over the builtin URL. Set `BRAPI_<ALIAS>_USERNAME=...` etc. to attach credentials on top of the builtin URL when you need write access (each Breedbase instance has its own user table — separate registration on each upstream).
+
+**Opt-out:** `BRAPI_BUILTIN_ALIASES_DISABLED=cassava,wheat` (comma-separated, case-insensitive) removes specific aliases from resolution and discovery for deployments that prefer a stripped surface.
+
+**Citation:** all four shipped builtins reference the same foundational paper — Morales et al. 2022, _"Breedbase: a digital ecosystem for modern plant breeding."_ G3 12(7): jkac078. [doi:10.1093/g3journal/jkac078](https://doi.org/10.1093/g3journal/jkac078).
 
 ---
 

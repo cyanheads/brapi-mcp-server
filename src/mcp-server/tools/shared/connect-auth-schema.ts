@@ -16,17 +16,20 @@ export const ConnectAuthSchema = z
     z
       .object({
         mode: z.literal('bearer').describe('Pre-obtained bearer token.'),
-        token: z.string().min(1).describe('Raw token; sent as "Authorization: Bearer <token>".'),
+        token: z
+          .string()
+          .min(1)
+          .describe('Pre-obtained access token, sent verbatim with each BrAPI request.'),
       })
       .describe('Bearer-token variant — caller already has an access token.'),
     z
       .object({
         mode: z.literal('api_key').describe('Static API key in a custom header.'),
-        apiKey: z.string().min(1).describe('API key value.'),
+        apiKey: z.string().min(1).describe('API key issued by the BrAPI server.'),
         headerName: z
           .string()
           .optional()
-          .describe('Header name. Defaults to `Authorization` (or BRAPI_DEFAULT_API_KEY_HEADER).'),
+          .describe('HTTP header to send the API key in. Defaults to `Authorization`.'),
       })
       .describe('API-key variant — static key sent in a configurable header.'),
     z
@@ -35,7 +38,10 @@ export const ConnectAuthSchema = z
           .literal('sgn')
           .describe('Breedbase/SGN username+password; exchanged for a bearer token at /token.'),
         username: z.string().min(1).describe('SGN account username.'),
-        password: z.string().min(1).describe('SGN account password.'),
+        password: z
+          .string()
+          .min(1)
+          .describe('Password for the SGN/Breedbase username supplied above.'),
       })
       .describe('SGN variant — username/password exchanged at /token for a session bearer.'),
     z
@@ -45,8 +51,11 @@ export const ConnectAuthSchema = z
           .describe(
             'OAuth2 client-credentials flow; exchanged for an access token at connect time.',
           ),
-        clientId: z.string().min(1).describe('OAuth2 client ID.'),
-        clientSecret: z.string().min(1).describe('OAuth2 client secret.'),
+        clientId: z
+          .string()
+          .min(1)
+          .describe('OAuth2 client identifier registered with the upstream IdP.'),
+        clientSecret: z.string().min(1).describe('OAuth2 client secret paired with the clientId.'),
         tokenUrl: z
           .string()
           .url()

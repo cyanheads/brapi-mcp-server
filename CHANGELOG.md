@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.12](changelog/0.4.x/0.4.12.md) — 2026-05-04
+
+Built-in alias registry — `cassava`, `sweetpotato`, `wheat`, and `breedbase` resolve out-of-the-box without env vars; orientation envelope now carries CC-BY attribution metadata.
+
 ## [0.4.11](changelog/0.4.x/0.4.11.md) — 2026-05-03
 
 Framework bump to 0.8.13 — gated tools stay visible in the operator manifest via disabledTool(), SQL gate function deny-list adopted from the framework, RequestContext slice swapped onto the framework's exported type.

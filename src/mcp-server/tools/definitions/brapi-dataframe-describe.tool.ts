@@ -65,9 +65,9 @@ export const brapiDataframeDescribe = tool('brapi_dataframe_describe', {
     {
       reason: 'dataframe_disabled',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Dataframe surface is gated off by env (CANVAS_PROVIDER_TYPE != duckdb or BRAPI_CANVAS_ENABLED=false)',
+      when: 'Dataframe surface is not enabled on this deployment',
       recovery:
-        'Set CANVAS_PROVIDER_TYPE=duckdb and BRAPI_CANVAS_ENABLED=true on the deployment, or use brapi_manage_dataset to enumerate datasets directly.',
+        'Use brapi_manage_dataset (mode=list) to enumerate datasets directly — the dataframe surface is gated off here.',
     },
   ] as const,
   input: InputSchema,

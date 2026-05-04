@@ -72,9 +72,11 @@ const LoadResultSchema = z
       .array(
         z
           .record(z.string(), z.unknown())
-          .describe('One persisted row, with optional column projection applied.'),
+          .describe(
+            'One persisted row. Schema matches the originating find_* tool result row (e.g. find_germplasm rows for a germplasm dataset); see the dataset summary for column names and the find_* output schema for field semantics.',
+          ),
       )
-      .describe('Rows for this page.'),
+      .describe('Rows for this page, with optional column projection applied.'),
   })
   .describe('Paged rows from a persisted dataset.');
 
@@ -140,7 +142,7 @@ const InputSchema = z.object({
 
 export const brapiManageDataset = tool('brapi_manage_dataset', {
   description:
-    'Dataset lifecycle — list (enumerate), summary (metadata+provenance), load (page rows with column projection), delete (drop payload). Datasets are produced by find_* tools when the upstream total exceeds loadLimit. Export (CSV/Parquet) is not yet implemented.',
+    'Dataset lifecycle — list (enumerate), summary (metadata+provenance), load (page rows with column projection), delete (drop payload). Datasets are produced by find_* tools when the upstream total exceeds loadLimit.',
   annotations: { readOnlyHint: false, idempotentHint: false },
   errors: [
     {

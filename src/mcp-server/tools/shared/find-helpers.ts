@@ -50,7 +50,7 @@ export const LoadLimitInput = z
   .positive()
   .optional()
   .describe(
-    'Override the in-context row cap (BRAPI_LOAD_LIMIT). Rows beyond the cap return as a dataset handle.',
+    'Override the in-context row cap. Rows beyond the cap return as a dataset handle for paged follow-up.',
   );
 
 export const ExtraFiltersInput = z

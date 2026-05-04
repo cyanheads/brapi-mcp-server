@@ -65,7 +65,7 @@ export const brapiRawSearch = tool('brapi_raw_search', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The active dialect declares this POST /search/{noun} route as known-dead on this server',
       recovery:
-        'Use the curated find_* tool for this noun (it routes through GET filters instead) or pin a different dialect via BRAPI_<ALIAS>_DIALECT.',
+        'Use the curated find_* tool for this noun — it routes through GET filters instead and avoids the dead search route.',
     },
   ] as const,
   input: z.object({

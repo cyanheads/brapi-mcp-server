@@ -285,7 +285,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         filteredFull = swappedFull;
         filteredReturned = firstPage.rows.filter((r) => insideBbox(r, bbox, 'swapped'));
         warnings.push(
-          `Server appears to store GeoJSON coordinates as [lat, lon, alt] rather than the spec-required [lon, lat, alt]. Bbox matches returned under the swapped interpretation; report to the server operator so the source quirk gets fixed upstream.`,
+          `Server appears to store GeoJSON coordinates as [lat, lon, alt] rather than the spec-required [lon, lat, alt]. Bbox matches returned under the swapped interpretation; the upstream coordinate convention is non-conformant and should be flagged.`,
         );
       } else {
         warnings.push(

@@ -10,6 +10,7 @@
  */
 
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { findBuiltinAlias, listBuiltinAliases } from '@/config/builtin-aliases.js';
 import type { AuthMode, ConnectAuth } from '@/services/server-registry/index.js';
 
 /**
@@ -41,6 +42,7 @@ const FIELD_SUFFIXES: ReadonlyArray<readonly [keyof AliasCredentials, string]> =
 ];
 
 const DEFAULT_ALIAS = 'default';
+const NONE_AUTH: ConnectAuth = { mode: 'none' };
 
 /** Compute the env-var prefix for an alias. `my-server` → `BRAPI_MY_SERVER_`. */
 export function aliasEnvPrefix(alias: string): string {
@@ -117,14 +119,21 @@ export interface ResolvedConnectInput {
 }
 
 /**
- * Layer agent input over alias env over default env. Returns the resolved
- * baseUrl + auth. Throws when no baseUrl is resolvable from any layer.
+ * Layer agent input over alias env over the builtin registry over default env.
+ * Returns the resolved baseUrl + auth. Throws when no baseUrl is resolvable
+ * from any layer.
  *
  * Precedence:
  *   1. Explicit agent input (`baseUrl`, `auth`) wins.
  *   2. Per-alias env vars (`BRAPI_<ALIAS>_*`).
- *   3. Default env vars (`BRAPI_DEFAULT_*`) — only when alias differs.
- *   4. `auth` falls through to `{ mode: 'none' }`; `baseUrl` has no fallback.
+ *   3. Built-in known-server registry — see `config/builtin-aliases.ts`.
+ *   4. Default env vars (`BRAPI_DEFAULT_*`) — only when alias differs.
+ *   5. `auth` falls through to `{ mode: 'none' }`; `baseUrl` has no fallback.
+ *
+ * When the baseUrl is satisfied by a builtin, default-env auth is NOT used —
+ * default credentials belong to the default server, not whatever upstream the
+ * builtin happens to point at. Per-alias creds still apply, since those were
+ * explicitly set for this alias.
  */
 export function resolveConnectInput(
   alias: string,
@@ -135,7 +144,8 @@ export function resolveConnectInput(
   const defaultCreds =
     alias === DEFAULT_ALIAS ? aliasCreds : readAliasCredentials(DEFAULT_ALIAS, env);
 
-  const baseUrl = agent.baseUrl ?? aliasCreds.baseUrl ?? defaultCreds.baseUrl;
+  const builtin = !agent.baseUrl && !aliasCreds.baseUrl ? findBuiltinAlias(alias, env) : undefined;
+  const baseUrl = agent.baseUrl ?? aliasCreds.baseUrl ?? builtin?.baseUrl ?? defaultCreds.baseUrl;
   if (!baseUrl) {
     throw validationError(
       `No baseUrl provided. Pass \`baseUrl\` explicitly, or set ${aliasEnvPrefix(alias)}BASE_URL${alias === DEFAULT_ALIAS ? '' : ` or ${aliasEnvPrefix(DEFAULT_ALIAS)}BASE_URL`}.`,
@@ -143,56 +153,74 @@ export function resolveConnectInput(
     );
   }
 
+  const allowDefaultAuthFallback = !builtin && alias !== DEFAULT_ALIAS;
   const auth =
     agent.auth ??
     deriveAuthFromCredentials(aliasCreds, alias) ??
-    (alias === DEFAULT_ALIAS
-      ? undefined
-      : deriveAuthFromCredentials(defaultCreds, DEFAULT_ALIAS)) ??
-    ({ mode: 'none' } as ConnectAuth);
+    (allowDefaultAuthFallback
+      ? deriveAuthFromCredentials(defaultCreds, DEFAULT_ALIAS)
+      : undefined) ??
+    NONE_AUTH;
 
   return { baseUrl, auth };
 }
 
 /**
- * Summary of an alias discovered from env vars — what the operator pre-wired
- * for this deployment. Surfaced to the LLM via the connect tool description so
- * agents can pick a shortcut without the human having to enumerate them.
+ * Summary of an alias the agent can call out-of-the-box. Either pre-wired by
+ * the operator via `BRAPI_<ALIAS>_BASE_URL` (`origin: 'env'`) or shipped in the
+ * built-in known-server registry (`origin: 'builtin'`). Surfaced to the LLM
+ * via the connect tool description so agents can pick a shortcut without the
+ * human having to enumerate them.
  */
 export interface DiscoveredAlias {
   alias: string;
   authMode: AuthMode;
   baseUrl: string;
+  origin: 'env' | 'builtin';
 }
 
 const ALIAS_BASE_URL_PATTERN = /^BRAPI_([A-Z0-9_]+)_BASE_URL$/;
 
 /**
- * Scan env for `BRAPI_<X>_BASE_URL` keys and derive the alias inventory the
- * operator has pre-configured. Each alias resolves its credential family via
- * the same logic `resolveConnectInput` uses; ambiguous families fall back to
- * `none` so the alias is still surfaced (the connect call will then raise the
- * same `ValidationError` the agent would have hit anyway).
+ * Inventory of aliases the agent can call without specifying a baseUrl. Merges
+ * env-driven entries (operator-set `BRAPI_<X>_BASE_URL`) with the built-in
+ * known-server registry. Env-set aliases win when both are present, since the
+ * resolver gives env precedence; their `origin` reflects that. Per-alias
+ * credentials still derive auth in either case, so a builtin alias with
+ * `BRAPI_<ALIAS>_USERNAME` set surfaces with the right `authMode`.
  *
  * Default-alias entries land first; the rest are alphabetical.
  */
 export function discoverConfiguredAliases(env: NodeJS.ProcessEnv = process.env): DiscoveredAlias[] {
   const result: DiscoveredAlias[] = [];
+  const seen = new Set<string>();
+
   for (const [key, value] of Object.entries(env)) {
     const match = key.match(ALIAS_BASE_URL_PATTERN);
     const captured = match?.[1];
     if (!captured || !value) continue;
     const alias = captured.toLowerCase();
     const creds = readAliasCredentials(alias, env);
-    let authMode: AuthMode = 'none';
-    try {
-      const auth = deriveAuthFromCredentials(creds, alias);
-      if (auth) authMode = auth.mode;
-    } catch {
-      // Ambiguous credential family — surface the alias anyway.
-    }
-    result.push({ alias, authMode, baseUrl: value });
+    result.push({
+      alias,
+      authMode: deriveModeForDiscovery(creds, alias),
+      baseUrl: value,
+      origin: 'env',
+    });
+    seen.add(alias);
   }
+
+  for (const builtin of listBuiltinAliases(env)) {
+    if (seen.has(builtin.alias)) continue;
+    const creds = readAliasCredentials(builtin.alias, env);
+    result.push({
+      alias: builtin.alias,
+      authMode: deriveModeForDiscovery(creds, builtin.alias),
+      baseUrl: builtin.baseUrl,
+      origin: 'builtin',
+    });
+  }
+
   result.sort((a, b) => {
     if (a.alias === DEFAULT_ALIAS) return -1;
     if (b.alias === DEFAULT_ALIAS) return 1;
@@ -201,14 +229,41 @@ export function discoverConfiguredAliases(env: NodeJS.ProcessEnv = process.env):
   return result;
 }
 
+function deriveModeForDiscovery(creds: AliasCredentials, alias: string): AuthMode {
+  try {
+    const auth = deriveAuthFromCredentials(creds, alias);
+    return auth?.mode ?? 'none';
+  } catch {
+    // Ambiguous credential family — surface the alias as `none` so the agent
+    // still sees it; the connect call will raise the same ValidationError.
+    return 'none';
+  }
+}
+
 /**
  * Render the discovered alias list as a sentence appended to the connect
- * tool's description. Empty when nothing is pre-configured — the original
- * description stands alone in that case. Phrased so that absent aliases are
- * never read as restricted servers: any BrAPI v2 URL stays connectable.
+ * tool's description. Empty when nothing is configured. Splits builtins from
+ * env-driven aliases so the LLM understands which work out-of-the-box vs
+ * which the operator pre-wired. Phrased so that absent aliases are never read
+ * as restricted servers: any BrAPI v2 URL stays connectable.
  */
 export function formatConfiguredAliasesHint(aliases: DiscoveredAlias[]): string {
   if (aliases.length === 0) return '';
-  const names = aliases.map((a) => `\`${a.alias}\``).join(', ');
-  return `Pre-configured aliases on this deployment (callable without \`baseUrl\` or \`auth\` — credentials are read from server env vars): ${names}. Aliases are shortcuts only; any other BrAPI v2 server is reachable by passing \`baseUrl\` directly.`;
+  const builtin = aliases.filter((a) => a.origin === 'builtin').map((a) => `\`${a.alias}\``);
+  const env = aliases.filter((a) => a.origin === 'env').map((a) => `\`${a.alias}\``);
+  const parts: string[] = [];
+  if (builtin.length > 0) {
+    parts.push(
+      `Built-in known servers (callable with no \`baseUrl\` or \`auth\` — public BrAPI v2 endpoints): ${builtin.join(', ')}.`,
+    );
+  }
+  if (env.length > 0) {
+    parts.push(
+      `Operator-configured aliases on this deployment (credentials and/or baseUrl read from server env vars): ${env.join(', ')}.`,
+    );
+  }
+  parts.push(
+    'Aliases are shortcuts only; any other BrAPI v2 server is reachable by passing `baseUrl` directly.',
+  );
+  return parts.join(' ');
 }

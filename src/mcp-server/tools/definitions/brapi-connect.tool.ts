@@ -60,17 +60,17 @@ export const brapiConnect = tool('brapi_connect', {
       .url()
       .optional()
       .describe(
-        'BrAPI v2 base URL including any path prefix — e.g. https://test-server.brapi.org/brapi/v2. Falls back to BRAPI_<ALIAS>_BASE_URL, then BRAPI_DEFAULT_BASE_URL.',
+        'BrAPI v2 base URL including any path prefix — e.g. https://test-server.brapi.org/brapi/v2. Omit to use the configured default for this alias.',
       ),
     auth: ConnectAuthSchema.optional().describe(
-      'Auth payload. When omitted, derived from BRAPI_<ALIAS>_* env vars (USERNAME+PASSWORD → sgn; BEARER_TOKEN → bearer; API_KEY → api_key; OAUTH_CLIENT_ID+OAUTH_CLIENT_SECRET → oauth2), then BRAPI_DEFAULT_*, then no auth.',
+      'Auth payload. Omit to use credentials configured server-side for this alias (or no auth when none are configured).',
     ),
     alias: z
       .string()
       .regex(/^[a-zA-Z0-9_-]+$/)
       .default('default')
       .describe(
-        'Alias for this connection. Use distinct aliases to register multiple BrAPI servers in one session. Drives env-var lookup: alias `cassava` reads `BRAPI_CASSAVA_*`.',
+        'Alias for this connection. Use distinct aliases to register multiple BrAPI servers in one session.',
       ),
   }),
   output: OrientationEnvelopeSchema,

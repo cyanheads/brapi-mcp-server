@@ -10,6 +10,7 @@
  */
 
 import { type Context, z } from '@cyanheads/mcp-ts-core';
+import { findBuiltinAlias } from '@/config/builtin-aliases.js';
 import type { BrapiClient, BrapiRequestOptions } from '@/services/brapi-client/index.js';
 import { detectDialectId, dialectEnvVar, getDialectById } from '@/services/brapi-dialect/index.js';
 import type {
@@ -87,12 +88,12 @@ export const OrientationDialectSchema = z
     source: z
       .enum(['env-override', 'url-pattern', 'server-name', 'organization-name', 'fallback'])
       .describe(
-        'Where the dialect id came from: pinned via BRAPI_<ALIAS>_DIALECT, matched on URL host / /serverinfo serverName / organizationName, or fell through to the spec passthrough.',
+        'Where the dialect id came from: env-var override, URL host match, /serverinfo serverName, organizationName, or the spec passthrough fallback.',
       ),
     envVar: z
       .string()
       .describe(
-        'The env var an operator sets to pin the dialect for this alias (e.g. BRAPI_DEFAULT_DIALECT). Surfaced so agents can guide operators when detection misfires.',
+        'Env var that pins the dialect for this alias (e.g. BRAPI_DEFAULT_DIALECT) when detection misfires.',
       ),
     disabledSearchEndpoints: z
       .array(z.string().describe('A POST /search/{noun} route the dialect routes around.'))
@@ -103,7 +104,7 @@ export const OrientationDialectSchema = z
       .array(z.string().describe('Verified compatibility note exposed by the active dialect.'))
       .describe('Dialect-level compatibility notes for this server family.'),
   })
-  .describe('Active dialect summary — agents can plan around quirks declared here.');
+  .describe('Active dialect summary — declares known quirks for this server family.');
 
 export const OrientationContentSchema = z
   .object({
@@ -137,6 +138,24 @@ export const OrientationContentSchema = z
   })
   .describe('Content summary. Counts are populated only when the server supports cheap totals.');
 
+export const OrientationAttributionSchema = z
+  .object({
+    homepage: z.string().describe('Public homepage of the upstream dataset.'),
+    license: z
+      .string()
+      .describe('License under which the upstream dataset is published (e.g. "CC-BY").'),
+    citation: z
+      .string()
+      .describe('Citation requested by the upstream when data is reused in publications.'),
+    isDemo: z
+      .boolean()
+      .optional()
+      .describe('True when this server hosts demo / sample data, not production records.'),
+  })
+  .describe(
+    'Attribution metadata for connections served from the built-in known-server registry. Surfaces license + citation alongside the data so reuse terms (e.g. CC-BY attribution) can be satisfied. Absent when the connection uses a custom baseUrl — those carry no curated attribution.',
+  );
+
 export const OrientationEnvelopeSchema = z.object({
   alias: z.string().describe('Connection alias.'),
   baseUrl: z.string().describe('BrAPI v2 base URL for this connection.'),
@@ -149,6 +168,9 @@ export const OrientationEnvelopeSchema = z.object({
     'Active dialect adapter — translates outbound filters and declares known-dead routes for this server.',
   ),
   content: OrientationContentSchema.describe('Content summary (crops + optional totals).'),
+  attribution: OrientationAttributionSchema.optional().describe(
+    'Attribution metadata for built-in known-server connections. Absent for custom (env-only) connections.',
+  ),
   notes: z
     .array(z.string().describe('Server-specific quirk or degradation note.'))
     .describe('Server-specific quirks or degradation notes.'),
@@ -220,8 +242,14 @@ export async function buildOrientationEnvelope(
   if (connection.resolvedAuth?.expiresAt) auth.expiresAt = connection.resolvedAuth.expiresAt;
 
   const dialect = buildDialectSummary(connection, profile);
+  const builtin = findBuiltinAlias(connection.alias);
+  if (builtin?.isDemo) {
+    notes.push(
+      `Alias '${connection.alias}' points at a demo Breedbase instance (${builtin.homepage}) — sample data only, not production records.`,
+    );
+  }
 
-  return {
+  const envelope: OrientationEnvelope = {
     alias: connection.alias,
     baseUrl: connection.baseUrl,
     server: { ...profile.server },
@@ -236,6 +264,16 @@ export async function buildOrientationEnvelope(
     notes,
     fetchedAt: new Date().toISOString(),
   };
+  if (builtin) {
+    const attribution: z.infer<typeof OrientationAttributionSchema> = {
+      homepage: builtin.homepage,
+      license: builtin.license,
+      citation: builtin.citation,
+    };
+    if (builtin.isDemo) attribution.isDemo = true;
+    envelope.attribution = attribution;
+  }
+  return envelope;
 }
 
 function buildDialectSummary(
@@ -370,6 +408,16 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
     lines.push(`- Programs: ${envelope.content.programCount}`);
   if (envelope.content.locationCount !== undefined)
     lines.push(`- Locations: ${envelope.content.locationCount}`);
+
+  if (envelope.attribution) {
+    lines.push('');
+    lines.push('## Attribution');
+    lines.push(`- **License:** ${envelope.attribution.license}`);
+    lines.push(`- **Homepage:** ${envelope.attribution.homepage}`);
+    lines.push(`- **Citation:** ${envelope.attribution.citation}`);
+    if (envelope.attribution.isDemo)
+      lines.push('- **Demo dataset** — sample data, not production.');
+  }
 
   if (envelope.notes.length > 0) {
     lines.push('');

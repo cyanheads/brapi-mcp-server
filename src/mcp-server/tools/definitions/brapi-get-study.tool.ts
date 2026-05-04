@@ -18,6 +18,7 @@ import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/ind
 import {
   AliasInput,
   appendPassthroughLines,
+  asStringArray,
   buildRequestOptions,
   companionRequestOptions,
   extractCoordinates,
@@ -38,7 +39,14 @@ const StudySchema = z
     locationName: z.string().nullish().describe('Display name of the study site.'),
     commonCropName: z.string().nullish().describe('Common crop name (e.g. "Maize", "Wheat").'),
     seasons: z
-      .array(z.string().describe('Season identifier — typically a year like "2022".'))
+      .array(
+        z
+          .string()
+          .nullable()
+          .describe(
+            'Season identifier — typically a year like "2022". Nullable: some Breedbase deployments emit a null entry when the study is missing a season.',
+          ),
+      )
       .nullish()
       .describe('Season identifiers this study spans.'),
     active: z.boolean().nullish().describe('True while the study is open for data capture.'),
@@ -349,7 +357,8 @@ export const brapiGetStudy = tool('brapi_get_study', {
     if (study.locationDbId) lines.push(`- **locationDbId:** ${study.locationDbId}`);
     if (study.locationName) lines.push(`- **locationName:** ${study.locationName}`);
     if (study.commonCropName) lines.push(`- **commonCropName:** ${study.commonCropName}`);
-    if (study.seasons?.length) lines.push(`- **seasons:** ${study.seasons.join(', ')}`);
+    const cleanSeasons = asStringArray(study.seasons);
+    if (cleanSeasons?.length) lines.push(`- **seasons:** ${cleanSeasons.join(', ')}`);
     if (study.active != null) lines.push(`- **active:** ${study.active}`);
     if (study.startDate) lines.push(`- **startDate:** ${study.startDate}`);
     if (study.endDate) lines.push(`- **endDate:** ${study.endDate}`);
