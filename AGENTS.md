@@ -188,6 +188,8 @@ async handler(input, ctx) {
 }
 ```
 
+**Declare contracts inline on each tool, even when similar across tools.** The contract is part of the tool's documented public surface — reading one tool definition file should give the full picture (input, output, errors, handler, format). Don't extract a shared `errors[]` constant or contract module to deduplicate near-identical entries; per-tool repetition is the intended cost of locality, and dynamic `recovery` hints often need tool-specific runtime context anyway.
+
 **Fallback (no contract entry fits, services, prototype tools):** throw via factories or plain `Error`.
 
 ```ts

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.14](changelog/0.4.x/0.4.14.md) — 2026-05-04
+
+Live-fire fixes against Cassavabase: canvas dataframes survive null columns; deduplicates 11×-repeated synonyms; find_variables actually re-ranks against the spilled union; truthful truncated-dataset metadata; trims empty nested containers.
+
 ## [0.4.13](changelog/0.4.x/0.4.13.md) — 2026-05-04
 
 Built-in alias rename — source-prefixed handles (`bti-*`, `t3-*`); adds T3/Oat and T3/Barley; fixes hyphenated-builtin env shadow.

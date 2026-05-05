@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-05-03 01:21:55
+Generated on: 2026-05-05 06:53:43
 
 ```text
 brapi-mcp-server/
@@ -100,11 +100,14 @@ brapi-mcp-server/
 │   │   └── SKILL.md
 │   ├── security-pass/
 │   │   └── SKILL.md
-│   └── setup/
+│   ├── setup/
+│   │   └── SKILL.md
+│   └── tool-defs-analysis/
 │       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   ├── alias-credentials.ts
+│   │   ├── builtin-aliases.ts
 │   │   └── server-config.ts
 │   ├── mcp-server/
 │   │   ├── prompts/
@@ -194,7 +197,8 @@ brapi-mcp-server/
 │   └── index.ts
 ├── tests/
 │   ├── config/
-│   │   └── alias-credentials.test.ts
+│   │   ├── alias-credentials.test.ts
+│   │   └── builtin-aliases.test.ts
 │   ├── prompts/
 │   │   ├── brapi-eda-study.prompt.test.ts
 │   │   └── brapi-meta-analysis.prompt.test.ts
