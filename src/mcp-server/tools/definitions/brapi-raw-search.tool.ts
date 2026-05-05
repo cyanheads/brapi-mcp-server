@@ -1,22 +1,37 @@
 /**
  * @fileoverview `brapi_raw_search` — last-resort passthrough to any BrAPI
  * `POST /search/{noun}` endpoint with async-search polling handled
- * transparently. Returns the raw upstream envelope once the search completes.
- * Emits a routing nudge when a curated goal-shaped tool covers the noun.
+ * transparently. Returns the raw upstream envelope once the search completes,
+ * and spills to a canvas dataframe when the upstream advertises more rows
+ * than `loadLimit` AND the result is a list shape. Spillover is skipped
+ * when the caller drives paging via `body.page` / `body.pageSize` — they're
+ * walking pages explicitly. Emits a routing nudge when a curated goal-shaped
+ * tool covers the noun.
  *
  * @module mcp-server/tools/definitions/brapi-raw-search.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getServerConfig } from '@/config/server-config.js';
 import {
   type BrapiPagination,
   type BrapiRequestOptions,
   getBrapiClient,
 } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
-import { AliasInput, buildRequestOptions } from '../shared/find-helpers.js';
+import {
+  AliasInput,
+  buildRequestOptions,
+  DataframeHandleSchema,
+  extractListRows,
+  LoadLimitInput,
+  renderDataframeHandle,
+  spillToCanvas,
+  toDataframeHandle,
+} from '../shared/find-helpers.js';
 import { suggestForSearch } from '../shared/raw-routing-hints.js';
 
 const PaginationSchema = z
@@ -51,13 +66,16 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe('Emitted when a curated goal-shaped tool covers this search.'),
+  dataframe: DataframeHandleSchema.optional().describe(
+    'Present when the upstream advertised more rows than `loadLimit` AND the result is a list shape. The inline `result` is unchanged; the dataframe carries the full union of pages — query with brapi_dataframe_query.',
+  ),
 });
 
 type Output = z.infer<typeof OutputSchema>;
 
 export const brapiRawSearch = tool('brapi_raw_search', {
   description:
-    'Passthrough to any BrAPI POST /search/{noun} endpoint, returning the resolved envelope (async polling resolved upstream). Raw passthrough — no distributions, foreign-key resolution, or dataset spillover applied.',
+    'Passthrough to any BrAPI POST /search/{noun} endpoint, returning the resolved envelope (async polling resolved upstream). Spills to a canvas dataframe when the upstream advertises more rows than `loadLimit` AND the result is a list shape; inline `result` is unchanged. Skips spillover when the caller drives paging via `body.page` / `body.pageSize`. No distributions or foreign-key resolution applied.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -78,12 +96,15 @@ export const brapiRawSearch = tool('brapi_raw_search', {
     body: z
       .record(z.string(), z.unknown())
       .describe('Filter body passed verbatim to POST /search/{noun}.'),
+    loadLimit: LoadLimitInput,
   }),
   output: OutputSchema,
 
   async handler(input, ctx) {
     const registry = getServerRegistry();
     const client = getBrapiClient();
+    const bridge = getCanvasBridge();
+    const config = getServerConfig();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
 
@@ -104,10 +125,14 @@ export const brapiRawSearch = tool('brapi_raw_search', {
       );
     }
 
+    const loadLimit = input.loadLimit ?? config.loadLimit;
+    const userControlsPaging = input.body.page !== undefined || input.body.pageSize !== undefined;
+    const body = userControlsPaging ? input.body : { ...input.body, pageSize: loadLimit };
+
     const response = await client.postSearch<unknown>(
       connection.baseUrl,
       input.noun,
-      input.body,
+      body,
       ctx,
       requestOptions,
     );
@@ -141,6 +166,37 @@ export const brapiRawSearch = tool('brapi_raw_search', {
     if (searchResultsDbId !== undefined) result.searchResultsDbId = searchResultsDbId;
     const suggestion = suggestForSearch(input.noun);
     if (suggestion) result.suggestion = suggestion;
+
+    if (!userControlsPaging) {
+      const totalCount = envelope.metadata?.pagination?.totalCount;
+      const rows = extractListRows(envelope.result);
+      if (
+        rows !== null &&
+        rows.length > 0 &&
+        typeof totalCount === 'number' &&
+        totalCount > loadLimit
+      ) {
+        const spill = await spillToCanvas({
+          bridge,
+          client,
+          connection,
+          ctx,
+          firstPage: rows,
+          totalCount,
+          loadLimit,
+          path: `/search/${input.noun}`,
+          filters: input.body as Record<string, unknown>,
+          source: 'raw_search',
+          route: {
+            kind: 'search',
+            noun: input.noun,
+            service: `search/${input.noun}`,
+            searchBody: input.body,
+          },
+        });
+        result.dataframe = toDataframeHandle(spill.dataframe);
+      }
+    }
     return result;
   },
 
@@ -161,6 +217,11 @@ export const brapiRawSearch = tool('brapi_raw_search', {
     if (result.suggestion) {
       lines.push('');
       lines.push(`**Suggestion:** ${result.suggestion}`);
+    }
+    if (result.dataframe) {
+      lines.push('');
+      lines.push('## Dataframe');
+      lines.push(...renderDataframeHandle(result.dataframe));
     }
     lines.push('');
     lines.push('## Raw result');
