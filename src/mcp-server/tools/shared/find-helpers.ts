@@ -466,6 +466,14 @@ export interface SpillInput<T> {
    * headers can still report the true upstream size.
    */
   rowFilter?: (row: T) => boolean;
+  /**
+   * Optional client-side transform applied to every row (first-page + spilled)
+   * before any predicate filter runs. Used to normalize sparse / duplicated
+   * upstream payloads (e.g. dedup'ing CassavaBase's 11×-repeated synonym
+   * arrays) so the in-context view, the persisted dataset, and the canvas
+   * dataframe all see the same cleaned shape. Runs before `rowFilter`.
+   */
+  rowMapper?: (row: T) => T;
   source: string;
   store: DatasetStore;
   /** Total reported by the server on the first page. */
@@ -588,6 +596,11 @@ export interface MaybeSpillInput<T> {
    * first-page rows are also filtered before being returned.
    */
   rowFilter?: (row: T) => boolean;
+  /**
+   * Optional client-side transform applied to every row (first-page + spilled)
+   * before persistence and before any `rowFilter`. See {@link SpillInput.rowMapper}.
+   */
+  rowMapper?: (row: T) => T;
   source: string;
   /**
    * Optional request overrides for spillover page pulls. Useful when a tool
@@ -615,14 +628,13 @@ export interface MaybeSpillResult<T> {
 export async function maybeSpill<T extends Record<string, unknown>>(
   input: MaybeSpillInput<T>,
 ): Promise<MaybeSpillResult<T>> {
-  const { firstPage, rowFilter } = input;
+  const { firstPage, rowMapper, rowFilter } = input;
   if (
     !firstPage.hasMore ||
     firstPage.totalCount === undefined ||
     firstPage.totalCount <= input.loadLimit
   ) {
-    const rows = rowFilter ? firstPage.rows.filter(rowFilter) : firstPage.rows;
-    return { fullRows: rows };
+    return { fullRows: applyRowTransforms(firstPage.rows, rowMapper, rowFilter) };
   }
   const spillInput: SpillInput<T> = {
     store: input.store,
@@ -636,6 +648,7 @@ export async function maybeSpill<T extends Record<string, unknown>>(
     firstPage: firstPage.rows,
     totalCount: firstPage.totalCount,
   };
+  if (rowMapper) spillInput.rowMapper = rowMapper;
   if (rowFilter) spillInput.rowFilter = rowFilter;
   if (input.route) spillInput.route = input.route;
   if (input.spillRequestOptions) spillInput.pageRequestOptions = input.spillRequestOptions;
@@ -650,9 +663,23 @@ export async function maybeSpill<T extends Record<string, unknown>>(
     input.warnings.push(
       `Dataset spillover skipped after returning the first ${firstPage.rows.length} row(s): ${formatSpillError(err)}. Narrow filters, raise loadLimit enough to fit the result in one page, or retry when the upstream server is responsive.`,
     );
-    const rows = rowFilter ? firstPage.rows.filter(rowFilter) : firstPage.rows;
-    return { fullRows: rows };
+    return { fullRows: applyRowTransforms(firstPage.rows, rowMapper, rowFilter) };
   }
+}
+
+/**
+ * Apply mapper before filter on a row set. Centralizes the order constraint
+ * across the three spillover sites — early-exit, error fallback, and persist
+ * — so they can't drift apart and accidentally filter raw rows the spilled
+ * dataset has already normalized.
+ */
+function applyRowTransforms<T>(
+  rows: T[],
+  mapper: ((row: T) => T) | undefined,
+  filter: ((row: T) => boolean) | undefined,
+): T[] {
+  const mapped = mapper ? rows.map(mapper) : rows;
+  return filter ? mapped.filter(filter) : mapped;
 }
 
 /**
@@ -699,7 +726,7 @@ export async function spillToDataset<T extends Record<string, unknown>>(
   const reachedPageCap = pagesFetched >= MAX_SPILLOVER_PAGES && input.totalCount > rows.length;
   const truncated = reachedRowCap || reachedPageCap;
 
-  const persistedRows = input.rowFilter ? rows.filter(input.rowFilter) : rows;
+  const persistedRows = applyRowTransforms(rows, input.rowMapper, input.rowFilter);
 
   const createInput: CreateDatasetInput = {
     source: input.source,
@@ -709,7 +736,24 @@ export async function spillToDataset<T extends Record<string, unknown>>(
   };
   if (truncated) {
     createInput.truncated = true;
-    createInput.maxRows = MAX_SPILLOVER_ROWS;
+    // `maxRows` only carries meaning when the row cap fired — it's the upper
+    // bound the spillover honored. When the page cap fired first (small
+    // `loadLimit` × `MAX_SPILLOVER_PAGES` < upstream total), reporting
+    // `maxRows = MAX_SPILLOVER_ROWS` is misleading: the dataset stopped at
+    // `loadLimit × MAX_SPILLOVER_PAGES`, well below the row cap. Log the
+    // page-cap event for operators; the agent sees only `truncated: true`
+    // without the false 50k bound and can raise `loadLimit` to push past it.
+    if (reachedRowCap) {
+      createInput.maxRows = MAX_SPILLOVER_ROWS;
+    } else if (reachedPageCap) {
+      input.ctx.log.warning('Spillover hit page cap before exhausting upstream', {
+        source: input.source,
+        pagesFetched,
+        maxPages: MAX_SPILLOVER_PAGES,
+        rowsFetched: rows.length,
+        totalCount: input.totalCount,
+      });
+    }
   }
   const dataset = await input.store.create(input.ctx, createInput);
 
@@ -750,6 +794,50 @@ export function extractRows<T>(result: BrapiListResult<T> | T[]): T[] {
 /** Return the input as a non-empty string, or undefined. Used in distribution accessors. */
 export function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Drop entries from a `synonyms` array that are structurally identical to an
+ * entry already kept. Some Breedbase deployments (notably CassavaBase) return
+ * each registered synonym repeated 11× per germplasm record — the bloat is
+ * purely upstream and carries no information beyond the unique set.
+ *
+ * Identity is taken via a stable serialization (keys sorted recursively) so
+ * that two entries with the same fields but different property insertion
+ * order are recognized as duplicates — observed live: CassavaBase emits two
+ * key orderings on the same record. Two entries that genuinely differ on
+ * any field (e.g. same `synonym` text but different `type`) still hash to
+ * distinct keys and are both kept. When no duplicates are present the
+ * input row is returned by reference — the helper is allocation-free on
+ * the common case.
+ */
+export function dedupSynonymsByIdentity<T extends Record<string, unknown>>(row: T): T {
+  if (!Array.isArray(row.synonyms)) return row;
+  const seen = new Set<string>();
+  const out: unknown[] = [];
+  for (const entry of row.synonyms) {
+    const key = stableStringify(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(entry);
+  }
+  if (out.length === row.synonyms.length) return row;
+  return { ...row, synonyms: out };
+}
+
+/**
+ * Order-invariant `JSON.stringify` for structural identity hashing. Sorts
+ * object keys recursively so insertion order doesn't affect the output.
+ * Arrays preserve element order — order is semantically meaningful there.
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
 }
 
 /** Return the input as a non-empty string array, or undefined. */

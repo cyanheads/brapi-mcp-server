@@ -217,7 +217,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       .string()
       .optional()
       .describe(
-        'Free-text query. **Re-ranks (does not subset)** the returned rows client-side — matched rows are promoted to the top, unmatched rows still appear below. Use exact filters (`variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`) to actually narrow the result set. Differs from `brapi_find_germplasm.text`, which subsets client-side.',
+        'Free-text query. Ranks the **full upstream union** (the spilled dataset when one is produced, otherwise the first page) via the ontology resolver, then fills the in-context window up to loadLimit with matches first and unmatched rows for context. Use exact filters (`variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`) to actually narrow the upstream pull. Differs from `brapi_find_germplasm.text`, which drops unmatched rows.',
       ),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
@@ -315,9 +315,16 @@ export const brapiFindVariables = tool('brapi_find_variables', {
         const matchedPuis = new Set(
           candidates.map((c) => c.termId).filter((v): v is string => Boolean(v)),
         );
+        // Iterate the full spilled union, not just firstPage.rows. The
+        // ontology resolver matches against fullRows, so matched dbIds
+        // routinely sit past the in-context window (e.g. "dry matter
+        // content" hits CO_334:0002058, which is row ~700 of 750 in
+        // alphabetical order). Walking firstPage.rows alone produced an
+        // empty `matched` set and a no-op rerank. After the merge, slice
+        // back to loadLimit so the response stays bounded.
         const matched: Record<string, unknown>[] = [];
         const rest: Record<string, unknown>[] = [];
-        for (const row of firstPage.rows) {
+        for (const row of fullRows) {
           const dbId = row.observationVariableDbId;
           const pui = row.observationVariablePUI;
           const isMatch =
@@ -326,7 +333,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
           if (isMatch) matched.push(row);
           else rest.push(row);
         }
-        rankedResults = [...matched, ...rest];
+        rankedResults = [...matched, ...rest].slice(0, loadLimit);
       }
     }
 
@@ -374,10 +381,20 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       ],
     });
 
+    // Strip top-level keys whose value is a non-array object with no
+    // meaningful fields (every leaf null/undefined/empty). CassavaBase
+    // emits `method: {}` and similar empty containers on every variable,
+    // and the bloat is pure noise in the in-context view. Objects that
+    // carry any non-empty field are kept untouched — including their null
+    // siblings — so no information is dropped, only empty containers.
+    // Applied to in-context rows only; the spilled dataset and canvas
+    // dataframe keep the raw upstream shape for research traceability.
+    const inContextRows = rankedResults.map(pruneEmptyNestedObjects);
+
     const result: Output = {
       alias: connection.alias,
-      results: rankedResults as z.infer<typeof VariableRowSchema>[],
-      returnedCount: rankedResults.length,
+      results: inContextRows as z.infer<typeof VariableRowSchema>[],
+      returnedCount: inContextRows.length,
       totalCount,
       hasMore: firstPage.hasMore,
       distributions,
@@ -475,3 +492,31 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/**
+ * Drop top-level keys whose value is a non-array object with no meaningful
+ * content. Used to suppress bloat-only containers like `method: {}` that
+ * some Breedbase deployments attach to every variable record. An object is
+ * considered meaningful iff at least one of its values is non-null,
+ * non-undefined, and non-empty-string. Arrays (including empty arrays) are
+ * always preserved — `[]` carries the semantic "no entries" rather than
+ * "container exists but empty".
+ */
+function pruneEmptyNestedObjects(row: Record<string, unknown>): Record<string, unknown> {
+  let changed = false;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const inner = value as Record<string, unknown>;
+      const meaningful = Object.values(inner).some(
+        (v) => v !== null && v !== undefined && v !== '',
+      );
+      if (!meaningful) {
+        changed = true;
+        continue;
+      }
+    }
+    out[key] = value;
+  }
+  return changed ? out : row;
+}

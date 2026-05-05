@@ -24,6 +24,7 @@ import {
   collectPassthroughParts,
   computeDistribution,
   DatasetHandleSchema,
+  dedupSynonymsByIdentity,
   ExtraFiltersInput,
   LoadLimitInput,
   loadInitialFindPage,
@@ -268,6 +269,10 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       loadLimit,
       ctx,
       store: datasetStore,
+      // CassavaBase repeats every synonym entry 11× per record. Dedup at the
+      // spillover layer so the in-context view, the persisted dataset, and
+      // the canvas dataframe all see the cleaned shape consistently.
+      rowMapper: dedupSynonymsByIdentity,
     };
     if (text) spillInput.rowFilter = (row) => rowMatchesText(row, text);
 

@@ -18,6 +18,7 @@ import {
   appendPassthroughLines,
   buildRequestOptions,
   collectPassthroughParts,
+  dedupSynonymsByIdentity,
   isUpstreamNotFound,
 } from '../shared/find-helpers.js';
 
@@ -234,10 +235,14 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
 
     const parents = pedigree?.parents ?? [];
     const attrList = attributes ?? [];
+    // Some Breedbase deployments (CassavaBase) repeat each synonym entry 11×.
+    // Dedup structurally so the in-context view matches what `find_germplasm`
+    // returns and the agent isn't asked to reason about phantom duplicates.
+    const cleanedGermplasm = dedupSynonymsByIdentity(germplasm as Record<string, unknown>);
 
     const result: Output = {
       alias: connection.alias,
-      germplasm: germplasm as z.infer<typeof GermplasmSchema>,
+      germplasm: cleanedGermplasm as z.infer<typeof GermplasmSchema>,
       parents,
       attributes: attrList,
       directParentCount: parents.length,

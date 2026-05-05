@@ -16,6 +16,8 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type {
   CanvasInstance,
+  ColumnSchema,
+  ColumnType,
   DataCanvas,
   QueryResult,
   RegisterTableResult,
@@ -110,7 +112,16 @@ export class CanvasBridge {
     const tableName = datasetTableName(metadata.datasetId);
     try {
       const instance = await this.getInstance(ctx);
-      await instance.registerTable(tableName, rows);
+      // Pre-compute an explicit all-nullable schema. The framework's default
+      // path sniffs the first N rows and infers `nullable: false` for any
+      // column that happened to be non-null in the sample — DuckDB then
+      // creates the table with NOT NULL constraints, and the appender rolls
+      // back the entire batch the first time a later row carries a null for
+      // that column. Sniffed schemas can never prove non-nullability from a
+      // sample, so we walk every row, classify types ourselves, and emit
+      // `nullable: true` for every column.
+      const schema = deriveAllNullableSchema(rows);
+      await instance.registerTable(tableName, rows, { schema });
       const tableMeta: CanvasTableMeta = {
         datasetId: metadata.datasetId,
         source: metadata.source,
@@ -274,6 +285,80 @@ function tableMetaKey(tableName: string): string {
 
 function isCanvasNotFound(err: unknown): boolean {
   return err instanceof McpError && err.code === JsonRpcErrorCode.NotFound;
+}
+
+/**
+ * Walk every row, union the JS-side types per column, and emit a
+ * `ColumnSchema[]` with `nullable: true` on every column. Mirrors the
+ * framework's sniffer type classification (string/integer/double/bigint/
+ * boolean/object) so the inferred DuckDB types stay identical, but never
+ * emits NOT NULL constraints — sample-based sniffing cannot prove the
+ * absence of nulls, and a wrong NOT NULL inference rolls back the entire
+ * appender batch when the first violating row appears later.
+ *
+ * Walks the full row set rather than a sample so that columns appearing
+ * only in late rows still show up in the schema. We already hold every
+ * row in memory at this point (the spillover persisted them), so the
+ * extra pass is cheap.
+ */
+function deriveAllNullableSchema(rows: ReadonlyArray<Record<string, unknown>>): ColumnSchema[] {
+  const observedByCol = new Map<string, Set<JsTypeTag>>();
+  const columnOrder: string[] = [];
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      let bag = observedByCol.get(key);
+      if (!bag) {
+        bag = new Set();
+        observedByCol.set(key, bag);
+        columnOrder.push(key);
+      }
+      bag.add(classifyValue(row[key]));
+    }
+  }
+  return columnOrder.map((name) => ({
+    name,
+    type: unionToColumnType(observedByCol.get(name) ?? new Set(['null'])),
+    nullable: true,
+  }));
+}
+
+type JsTypeTag = 'null' | 'string' | 'boolean' | 'integer' | 'double' | 'bigint' | 'object';
+
+function classifyValue(value: unknown): JsTypeTag {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'string') return 'string';
+  if (typeof value === 'boolean') return 'boolean';
+  if (typeof value === 'bigint') return 'bigint';
+  if (typeof value === 'number') return Number.isInteger(value) ? 'integer' : 'double';
+  return 'object';
+}
+
+function unionToColumnType(observed: Set<JsTypeTag>): ColumnType {
+  const nonNull = new Set(observed);
+  nonNull.delete('null');
+  if (nonNull.size === 0) return 'VARCHAR';
+  if (nonNull.size === 1) {
+    const [only] = nonNull;
+    switch (only) {
+      case 'string':
+        return 'VARCHAR';
+      case 'integer':
+      case 'bigint':
+        return 'BIGINT';
+      case 'double':
+        return 'DOUBLE';
+      case 'boolean':
+        return 'BOOLEAN';
+      case 'object':
+        return 'JSON';
+      default:
+        return 'VARCHAR';
+    }
+  }
+  const allNumeric = [...nonNull].every((t) => t === 'integer' || t === 'double' || t === 'bigint');
+  if (allNumeric) return nonNull.has('double') ? 'DOUBLE' : 'BIGINT';
+  if (!nonNull.has('string') && nonNull.has('object')) return 'JSON';
+  return 'VARCHAR';
 }
 
 /**
