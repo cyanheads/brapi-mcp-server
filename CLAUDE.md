@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.4.13
+**Version:** 0.5.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -79,15 +79,15 @@ export const brapiConnect = tool('brapi_connect', {
 });
 ```
 
-### Tool — find with dataset spillover
+### Tool — find with dataframe spillover
 
-`find_*` tools share a pattern: pull one page capped at `loadLimit`, compute distributions across the returned rows, and if the upstream total exceeds `loadLimit` spill the full union into `DatasetStore` and return a handle.
+`find_*` tools share a pattern: pull one page capped at `loadLimit`, compute distributions across the returned rows, and if the upstream total exceeds `loadLimit` materialize the full union as a canvas dataframe and return a handle. Spilled rows live in DuckDB only — there is no parallel JSON store. Canvas is mandatory: startup fails closed when `core.canvas` is undefined.
 
 ```ts
 // src/mcp-server/tools/definitions/brapi-find-germplasm.tool.ts (abbreviated)
 export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   description:
-    'Find germplasm by name, synonym, accession, PUI, crop, or free-text. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Find germplasm by name, synonym, accession, PUI, crop, or free-text. Spills to a canvas dataframe when the upstream total exceeds loadLimit — query with brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   input: z.object({
     alias: AliasInput,
@@ -101,15 +101,16 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   async handler(input, ctx) {
     const connection = await getServerRegistry().get(ctx, input.alias ?? DEFAULT_ALIAS);
     await getCapabilityRegistry().ensure(connection.baseUrl, { service: 'germplasm', method: 'GET' }, ctx);
+    const bridge = getCanvasBridge();
 
     const filters = mergeFilters(/* named + extraFilters */, warnings);
     const firstPage = await loadInitialPage(client, connection, '/germplasm', filters, loadLimit, ctx);
 
-    if (firstPage.hasMore && firstPage.totalCount > loadLimit) {
-      const spill = await spillToDataset({ /* persists union into DatasetStore */ });
-      // ... attach dataset handle to result
-    }
-    return { /* results + distributions + refinementHint + dataset? */ };
+    const { fullRows, dataframe } = await maybeSpill({
+      firstPage, client, connection, bridge,
+      path: '/germplasm', filters, source: 'find_germplasm', loadLimit, ctx,
+    });
+    return { /* results + distributions + refinementHint + dataframe? */ };
   },
   format: (result) => [{ type: 'text', text: renderFindResult(result) }],
 });
@@ -124,7 +125,7 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
   defaultBaseUrl: z.string().url().optional(),
-  loadLimit: z.coerce.number().int().positive().default(200),
+  loadLimit: z.coerce.number().int().positive().default(1_000),
   maxConcurrentRequests: z.coerce.number().int().positive().default(4),
   retryMaxAttempts: z.coerce.number().int().min(0).default(3),
   datasetTtlSeconds: z.coerce.number().int().positive().default(86_400),
@@ -159,7 +160,7 @@ Handlers receive a unified `ctx` object. Currently used surface:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
-| `ctx.state` | Tenant-scoped KV — used by `ServerRegistry` (connection aliases), `DatasetStore` (spilled `find_*` results), and `CapabilityRegistry` (cached profiles). |
+| `ctx.state` | Tenant-scoped KV — used by `ServerRegistry` (connection aliases), `CanvasBridge` (per-tenant default canvasId + per-table provenance), and `CapabilityRegistry` (cached profiles). Spilled `find_*` rows live on the canvas (DuckDB), not in `ctx.state`. |
 | `ctx.signal` | `AbortSignal` — threaded into every BrAPI HTTP call so client-side cancellation aborts the upstream request. |
 | `ctx.requestId` | Unique request ID — auto-attached to every `ctx.log` entry. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio — scopes all `ctx.state` reads/writes. |
@@ -172,7 +173,7 @@ Handlers receive a unified `ctx` object. Currently used surface:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated); to surface it on the wire, spread `...ctx.recoveryFor('reason')` into `data` or pass an explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Live across the BrAPI surface today: `brapi_connect`, `brapi_describe_filters`, `brapi_find_genotype_calls`, `brapi_get_germplasm`, `brapi_get_image`, `brapi_get_study`, `brapi_manage_dataset`, `brapi_raw_get`, `brapi_raw_search`, `brapi_submit_observations`, plus the `brapi://study/{studyDbId}`, `brapi://germplasm/{germplasmDbId}`, and `brapi://filters/{endpoint}` resources.
+**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated); to surface it on the wire, spread `...ctx.recoveryFor('reason')` into `data` or pass an explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Live across the BrAPI surface today: `brapi_connect`, `brapi_dataframe_query`, `brapi_describe_filters`, `brapi_find_genotype_calls`, `brapi_get_germplasm`, `brapi_get_image`, `brapi_get_study`, `brapi_raw_get`, `brapi_raw_search`, `brapi_submit_observations`, plus the `brapi://study/{studyDbId}`, `brapi://germplasm/{germplasmDbId}`, and `brapi://filters/{endpoint}` resources.
 
 ```ts
 errors: [
@@ -215,7 +216,7 @@ Available factories include `notFound`, `validationError`, `forbidden`, `unautho
 
 ```text
 src/
-  index.ts                                # createApp() entry point — registers 19 tools, 6 resources, 2 prompts; inits 7 services
+  index.ts                                # createApp() entry point — registers 21 tools, 5 resources, 2 prompts; inits 7 services
   config/
     server-config.ts                      # BRAPI_* env vars (Zod schema, lazy-parsed)
     alias-credentials.ts                  # Per-alias env-var resolution (BRAPI_<ALIAS>_*) for brapi_connect
@@ -223,8 +224,8 @@ src/
     brapi-client/                         # HTTP client — retry, concurrency cap, async-search poll, private-IP guard, binary fetch, POST/PUT
     brapi-dialect/                        # Per-server filter / payload adapters (spec, cassavabase) — translates plural→singular, drops searchText, declares known-dead POST /search routes; envelope surfaces id + source + disabled-search nouns
     brapi-filters/                        # Static v2.1 filter catalog
+    canvas-bridge/                        # Per-tenant default-canvas resolver, df_<uuid> table generator, provenance store
     capability-registry/                  # Per-connection /serverinfo cache + call guard
-    dataset-store/                        # Tenant-scoped handles for spilled find_* results
     ontology-resolver/                    # Free-text → ontology-term matcher for variables
     reference-data-cache/                 # Programs / trials / locations / crops lookup cache
     server-registry/                      # Alias → live connection map with auth resolution
@@ -245,15 +246,18 @@ src/
         brapi-get-image.tool.ts           # Fetch image bytes inline (imagecontent → imageURL fallback)
         brapi-find-locations.tool.ts      # find_* — locations, optional client-side bbox filter
         brapi-find-variants.tool.ts       # find_* — variants, 1-based inclusive/exclusive genomic region
-        brapi-find-genotype-calls.tool.ts # Async-search genotype calls with maxCalls cap + spillover
-        brapi-manage-dataset.tool.ts      # Dataset lifecycle — list / summary / load / delete
+        brapi-find-genotype-calls.tool.ts # Async-search genotype calls with maxCalls cap + dataframe spillover
+        brapi-dataframe-describe.tool.ts  # List / describe canvas dataframes with columns, row counts, provenance
+        brapi-dataframe-query.tool.ts     # Run SQL across canvas dataframes (SELECT only); typed columns response
+        brapi-dataframe-drop.tool.ts      # Drop a dataframe by name (opt-in via BRAPI_CANVAS_DROP_ENABLED)
+        brapi-dataframe-export.tool.ts    # Write CSV/Parquet/JSON to BRAPI_EXPORT_DIR (opt-in, stdio-only)
         brapi-submit-observations.tool.ts # Two-phase observation write — preview / apply (POST + PUT) with elicit gate
         brapi-raw-get.tool.ts             # Last-resort GET passthrough with routing nudge
         brapi-raw-search.tool.ts          # Last-resort POST /search passthrough with async polling
       shared/
         connect-auth-schema.ts            # Tagged-union auth input
         orientation-envelope.ts           # Shared envelope builder + formatter
-        find-helpers.ts                   # Alias / loadLimit / extraFilters fragments, mergeFilters, maybeSpill, DatasetHandleSchema
+        find-helpers.ts                   # Alias / loadLimit / extraFilters fragments, mergeFilters, maybeSpill, DataframeHandleSchema
         raw-routing-hints.ts              # Routing nudges emitted by raw_get / raw_search when a curated tool exists
     resources/
       definitions/
@@ -261,7 +265,6 @@ src/
         brapi-calls.resource.ts           # brapi://calls — raw capability profile
         brapi-study.resource.ts           # brapi://study/{studyDbId} — single study with FKs
         brapi-germplasm.resource.ts       # brapi://germplasm/{germplasmDbId} — single germplasm with attributes + parents
-        brapi-dataset.resource.ts         # brapi://dataset/{datasetId} — dataset metadata + provenance
         brapi-filters.resource.ts         # brapi://filters/{endpoint} — filter catalog
     prompts/
       definitions/
@@ -308,6 +311,7 @@ Available skills:
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
 | `report-issue-local` | File a bug or feature request against this server's own repo via `gh` CLI |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
+| `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
 | `api-config` | AppConfig, parseConfig, env vars |
 | `api-context` | Context interface, logger, state, progress |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
@@ -387,7 +391,7 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] BrAPI tool: gates the call with `CapabilityRegistry.ensure(...)` — never fires against an endpoint the server didn't advertise
 - [ ] BrAPI tool: raw / domain / output schemas reviewed against real upstream sparsity (most `/germplasm` and `/studies` fields are optional in the wild)
 - [ ] BrAPI tool: normalization and `format()` preserve uncertainty — never fabricate missing IDs, names, or counts
-- [ ] BrAPI tool with dataset spillover: rows beyond `loadLimit` persist via `DatasetStore`, handle surfaces in `result.dataset`, `hasMore` set correctly
+- [ ] BrAPI tool with dataframe spillover: rows beyond `loadLimit` materialize as a `df_<uuid>` canvas table via `CanvasBridge.registerDataframe`, handle surfaces in `result.dataframe`, `hasMore` set correctly
 - [ ] Tests include at least one sparse upstream payload (fields omitted) alongside the happy path
 - [ ] Registered in the `tools` array of `createApp()` in `src/index.ts`
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`

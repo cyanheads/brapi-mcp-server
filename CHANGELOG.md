@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-05-05 · ⚠️ Breaking
+
+Consolidate spillover onto canvas-only dataframes — remove brapi_manage_dataset and the brapi://dataset/{id} resource, mandate DuckDB, gate brapi_dataframe_drop opt-in, and return typed columns from brapi_dataframe_query.
+
 ## [0.4.14](changelog/0.4.x/0.4.14.md) — 2026-05-04
 
 Live-fire fixes against Cassavabase: canvas dataframes survive null columns; deduplicates 11×-repeated synonyms; find_variables actually re-ranks against the spilled union; truthful truncated-dataset metadata; trims empty nested containers.
