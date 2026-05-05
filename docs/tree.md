@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-05-05 06:53:43
+Generated on: 2026-05-05 12:19:45
 
 ```text
 brapi-mcp-server/
@@ -19,10 +19,9 @@ brapi-mcp-server/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
+│   ├── 0.5.x/
 │   └── template.md
 ├── docs/
-│   ├── compatibility.md
-│   └── design.md
 ├── scripts/
 │   ├── build-changelog.ts
 │   ├── build.ts
@@ -117,7 +116,6 @@ brapi-mcp-server/
 │   │   ├── resources/
 │   │   │   └── definitions/
 │   │   │       ├── brapi-calls.resource.ts
-│   │   │       ├── brapi-dataset.resource.ts
 │   │   │       ├── brapi-filters.resource.ts
 │   │   │       ├── brapi-germplasm.resource.ts
 │   │   │       ├── brapi-server-info.resource.ts
@@ -127,6 +125,7 @@ brapi-mcp-server/
 │   │       │   ├── brapi-connect.tool.ts
 │   │       │   ├── brapi-dataframe-describe.tool.ts
 │   │       │   ├── brapi-dataframe-drop.tool.ts
+│   │       │   ├── brapi-dataframe-export.tool.ts
 │   │       │   ├── brapi-dataframe-query.tool.ts
 │   │       │   ├── brapi-describe-filters.tool.ts
 │   │       │   ├── brapi-find-genotype-calls.tool.ts
@@ -140,7 +139,6 @@ brapi-mcp-server/
 │   │       │   ├── brapi-get-germplasm.tool.ts
 │   │       │   ├── brapi-get-image.tool.ts
 │   │       │   ├── brapi-get-study.tool.ts
-│   │       │   ├── brapi-manage-dataset.tool.ts
 │   │       │   ├── brapi-raw-get.tool.ts
 │   │       │   ├── brapi-raw-search.tool.ts
 │   │       │   ├── brapi-server-info.tool.ts
@@ -178,10 +176,6 @@ brapi-mcp-server/
 │   │   │   ├── capability-registry.ts
 │   │   │   ├── index.ts
 │   │   │   └── types.ts
-│   │   ├── dataset-store/
-│   │   │   ├── dataset-store.ts
-│   │   │   ├── index.ts
-│   │   │   └── types.ts
 │   │   ├── ontology-resolver/
 │   │   │   ├── index.ts
 │   │   │   ├── ontology-resolver.ts
@@ -204,7 +198,6 @@ brapi-mcp-server/
 │   │   └── brapi-meta-analysis.prompt.test.ts
 │   ├── resources/
 │   │   ├── brapi-calls.resource.test.ts
-│   │   ├── brapi-dataset.resource.test.ts
 │   │   ├── brapi-filters.resource.test.ts
 │   │   ├── brapi-germplasm.resource.test.ts
 │   │   ├── brapi-server-info.resource.test.ts
@@ -221,7 +214,6 @@ brapi-mcp-server/
 │   │   ├── brapi-client.test.ts
 │   │   ├── canvas-bridge.test.ts
 │   │   ├── capability-registry.test.ts
-│   │   ├── dataset-store.test.ts
 │   │   ├── ontology-resolver.test.ts
 │   │   ├── reference-data-cache.test.ts
 │   │   └── server-registry.test.ts
@@ -230,6 +222,7 @@ brapi-mcp-server/
 │   │   ├── brapi-connect.tool.test.ts
 │   │   ├── brapi-dataframe-describe.tool.test.ts
 │   │   ├── brapi-dataframe-drop.tool.test.ts
+│   │   ├── brapi-dataframe-export.tool.test.ts
 │   │   ├── brapi-dataframe-query.tool.test.ts
 │   │   ├── brapi-describe-filters.tool.test.ts
 │   │   ├── brapi-find-genotype-calls.tool.test.ts
@@ -243,7 +236,6 @@ brapi-mcp-server/
 │   │   ├── brapi-get-germplasm.tool.test.ts
 │   │   ├── brapi-get-image.tool.test.ts
 │   │   ├── brapi-get-study.tool.test.ts
-│   │   ├── brapi-manage-dataset.tool.test.ts
 │   │   ├── brapi-raw-get.tool.test.ts
 │   │   ├── brapi-raw-search.tool.test.ts
 │   │   ├── brapi-server-info.tool.test.ts
