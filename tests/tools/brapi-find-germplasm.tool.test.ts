@@ -1,6 +1,6 @@
 /**
  * @fileoverview End-to-end tests for brapi_find_germplasm — filter merge,
- * distribution computation (crop/genus/species), dataset spillover.
+ * distribution computation (crop/genus/species), dataframe spillover.
  *
  * @module tests/tools/brapi-find-germplasm.tool.test
  */
@@ -107,7 +107,7 @@ describe('brapi_find_germplasm tool', () => {
     expect(url.searchParams.get('genus')).toBe('Manihot');
   });
 
-  it('spills to dataset when totalCount exceeds loadLimit', async () => {
+  it('spills to a canvas dataframe when totalCount exceeds loadLimit', async () => {
     const ctx = await connect(fetcher);
     const totalCount = 15;
     const allRows = Array.from({ length: totalCount }, (_, i) => ({
@@ -134,7 +134,7 @@ describe('brapi_find_germplasm tool', () => {
     );
 
     expect(result.hasMore).toBe(true);
-    expect(result.dataset?.rowCount).toBe(15);
+    expect(result.dataframe?.rowCount).toBe(15);
     expect(result.refinementHint).toMatch(/15 rows exceed loadLimit=10/);
   });
 
@@ -205,12 +205,12 @@ describe('brapi_find_germplasm tool', () => {
     expect(result.distributions.commonCropName).toEqual({});
   });
 
-  it('persists only text-matched rows in the spilled dataset', async () => {
+  it('persists only text-matched rows in the spilled dataframe', async () => {
     const ctx = await connect(fetcher);
     const totalCount = 15;
     const allRows = Array.from({ length: totalCount }, (_, i) => ({
       germplasmDbId: `g${i + 1}`,
-      // Only g1 matches `TME`; the rest are TMS-* so the dataset should
+      // Only g1 matches `TME`; the rest are TMS-* so the dataframe should
       // persist exactly one row, not all 15.
       germplasmName: i === 0 ? 'TME419' : `TMS${i + 1}`,
       commonCropName: 'Cassava',
@@ -232,12 +232,12 @@ describe('brapi_find_germplasm tool', () => {
       ctx,
     );
 
-    expect(result.dataset).toBeDefined();
-    expect(result.dataset?.rowCount).toBe(1);
+    expect(result.dataframe).toBeDefined();
+    expect(result.dataframe?.rowCount).toBe(1);
     expect(result.returnedCount).toBe(1);
     expect(
       result.warnings.some((w) =>
-        /filtered the dataset to 1 matched row\(s\) across the upstream union/.test(w),
+        /filtered the dataframe to 1 matched row\(s\) across the upstream union/.test(w),
       ),
     ).toBe(true);
   });
@@ -262,7 +262,7 @@ describe('brapi_find_germplasm tool', () => {
 
     // Only one HTTP call — no spillover pulls.
     expect(fetcher.mock.calls.length).toBe(1);
-    expect(result.dataset).toBeUndefined();
+    expect(result.dataframe).toBeUndefined();
     expect(result.returnedCount).toBe(0);
     expect(
       result.warnings.some((w) =>

@@ -1,8 +1,8 @@
 /**
  * @fileoverview `brapi_find_studies` — locate studies matching crop / trial
  * type / season / location / program filters. Pulls an initial page and, if
- * the server reports more rows than loadLimit, spills the union into
- * DatasetStore and returns a handle. Companion response: per-field
+ * the server reports more rows than loadLimit, materializes the union as a
+ * dataframe and returns a handle. Companion response: per-field
  * distributions computed from the full row set plus a refinement hint.
  *
  * @module mcp-server/tools/definitions/brapi-find-studies.tool
@@ -13,8 +13,8 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
@@ -25,7 +25,7 @@ import {
   checkFilterMatchRates,
   collectPassthroughParts,
   computeDistribution,
-  DatasetHandleSchema,
+  DataframeHandleSchema,
   ExtraFiltersInput,
   fkMatchCheck,
   LoadLimitInput,
@@ -33,7 +33,7 @@ import {
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
-  renderDatasetHandle,
+  renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
   resolveFindRoute,
@@ -101,8 +101,8 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe('Suggested next-step query refinement when the result set is large.'),
-  dataset: DatasetHandleSchema.optional().describe(
-    'Dataset handle when the full result set was persisted to DatasetStore.',
+  dataframe: DataframeHandleSchema.optional().describe(
+    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
   ),
   warnings: z
     .array(z.string())
@@ -142,7 +142,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindStudies = tool('brapi_find_studies', {
   description:
-    'Locate studies matching crop, trial type, season, location, or program. Enriches results with program/trial/location context in one call. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Locate studies matching crop, trial type, season, location, or program. Enriches results with program/trial/location context in one call. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -175,7 +175,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
-    const datasetStore = getDatasetStore();
+    const bridge = getCanvasBridge();
     const config = getServerConfig();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
@@ -221,7 +221,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       ctx,
     );
 
-    const { fullRows, dataset: datasetMeta } = await maybeSpill({
+    const { fullRows, dataframe } = await maybeSpill({
       firstPage,
       client,
       connection,
@@ -231,7 +231,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       source: 'find_studies',
       loadLimit,
       ctx,
-      store: datasetStore,
+      bridge,
     });
 
     const distributions = {
@@ -279,7 +279,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       baseUrl: connection.baseUrl,
       totalCount,
       returnedCount: firstPage.rows.length,
-      spilled: datasetMeta !== undefined,
+      spilled: dataframe !== undefined,
     });
 
     const result: Output = {
@@ -293,7 +293,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
-    if (datasetMeta) result.dataset = datasetMeta;
+    if (dataframe) result.dataframe = dataframe;
     return result;
   },
 
@@ -305,13 +305,13 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         alias: result.alias,
         returnedCount: result.returnedCount,
         totalCount: result.totalCount,
-        dataset: result.dataset,
+        dataframe: result.dataframe,
       }),
     );
     lines.push('');
     if (result.hasMore) {
       lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataset ? `Full set persisted as dataset \`${result.dataset.datasetId}\`.` : 'Narrow filters or raise loadLimit.'}`,
+        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
       );
       lines.push('');
     }
@@ -371,10 +371,10 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
-    if (result.dataset) {
+    if (result.dataframe) {
       lines.push('');
-      lines.push('## Dataset handle');
-      lines.push(...renderDatasetHandle(result.dataset));
+      lines.push('## Dataframe handle');
+      lines.push(...renderDataframeHandle(result.dataframe));
     }
     if (result.warnings.length > 0) {
       lines.push('');

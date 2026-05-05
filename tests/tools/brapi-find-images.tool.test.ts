@@ -1,7 +1,7 @@
 /**
  * @fileoverview End-to-end tests for `brapi_find_images` — capability gate,
  * filter forwarding, distribution computation across MIME / study / unit /
- * ontology terms, dataset spillover, sparse upstream rows.
+ * ontology terms, dataframe spillover, sparse upstream rows.
  *
  * @module tests/tools/brapi-find-images.tool.test
  */

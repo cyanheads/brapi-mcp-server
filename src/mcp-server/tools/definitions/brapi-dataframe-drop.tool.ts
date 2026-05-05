@@ -1,15 +1,16 @@
 /**
  * @fileoverview `brapi_dataframe_drop` — release a single dataframe by name.
  * Idempotent (returns `dropped: false` for unknown names rather than failing).
- * Drops the dataframe and any provenance metadata stored alongside it. The
- * originating dataset is unaffected — use `brapi_manage_dataset mode=delete`
- * to drop both.
+ * Drops the dataframe and its provenance metadata.
+ *
+ * Gated opt-in via `BRAPI_CANVAS_DROP_ENABLED` — when the operator hasn't
+ * opted in, the tool is omitted from `tools/list` entirely and dataframes
+ * expire via TTL when left unmanaged.
  *
  * @module mcp-server/tools/definitions/brapi-dataframe-drop.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 
 const InputSchema = z.object({
@@ -30,29 +31,13 @@ const OutputSchema = z.object({
 
 export const brapiDataframeDrop = tool('brapi_dataframe_drop', {
   description:
-    'Drop a dataframe by name. Idempotent — returns dropped:false rather than failing when the name is unknown. The underlying dataset is untouched (use brapi_manage_dataset mode=delete to drop both).',
+    'Drop a dataframe by name. Idempotent — returns dropped:false rather than failing when the name is unknown. Dataframes also expire via TTL automatically; explicit drop is only needed when the operator wants to free workspace memory immediately.',
   annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: false },
-  errors: [
-    {
-      reason: 'dataframe_disabled',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Dataframe surface is not enabled on this deployment',
-      recovery:
-        'Use brapi_manage_dataset (mode=delete) to drop the underlying dataset — the dataframe surface is gated off here.',
-    },
-  ] as const,
   input: InputSchema,
   output: OutputSchema,
 
   async handler(input, ctx) {
     const bridge = getCanvasBridge();
-    if (!bridge.isEnabled()) {
-      throw ctx.fail(
-        'dataframe_disabled',
-        'brapi_dataframe_drop is unavailable — dataframes are not enabled on this deployment.',
-        { ...ctx.recoveryFor('dataframe_disabled') },
-      );
-    }
     const dropped = await bridge.drop(ctx, input.dataframe);
     return { dataframe: input.dataframe, dropped };
   },

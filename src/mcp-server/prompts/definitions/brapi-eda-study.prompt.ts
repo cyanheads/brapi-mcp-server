@@ -40,7 +40,7 @@ export const brapiEdaStudy = prompt('brapi_eda_study', {
       '3. Group variables by trait class and by scale data type — the breakdown drives which downstream checks make sense (numerical → outlier checks; categorical → distribution checks).',
       '',
       '## Step 3 — Observation coverage',
-      `1. Call \`brapi_find_observations\` with \`studies: ["${args.studyDbId}"]${aliasArg}\` and a \`loadLimit\` large enough to materialize the full study in one shot if \`observationCount\` from Step 1 fits, otherwise spill to a dataset and read it back via \`brapi_manage_dataset\` (mode: \`load\`).`,
+      `1. Call \`brapi_find_observations\` with \`studies: ["${args.studyDbId}"]${aliasArg}\` and a \`loadLimit\` large enough to materialize the full study in one shot if \`observationCount\` from Step 1 fits. Otherwise, the call spills to a dataframe — note the \`dataframe.tableName\` from the response, then describe + query it via \`brapi_dataframe_describe\` and \`brapi_dataframe_query\` (use SQL \`LIMIT/OFFSET\` to walk pages, projection to trim columns, aggregation for summaries).`,
       '2. From the response `distributions`, capture: observations per variable, observations per germplasm, observations per observation level (plot / plant / field), and observations per season.',
       '3. Compute coverage = `observationCount` ÷ (`observationUnitCount` × `variableCount`). Anything materially below 1.0 implies missing measurements.',
       '',

@@ -2,8 +2,8 @@
  * @fileoverview Shared building blocks for `find_*` tools — Zod fragments for
  * common inputs (alias, loadLimit, extraFilters), utilities to merge named
  * filters with the passthrough map, a generic distribution aggregator, and
- * the dataset-spillover handler that turns a "too many rows" result into a
- * DatasetStore handle.
+ * the spillover handler that turns a "too many rows" result into a canvas
+ * dataframe handle.
  *
  * @module mcp-server/tools/shared/find-helpers
  */
@@ -19,12 +19,12 @@ import type {
   ResolvedAuth,
 } from '@/services/brapi-client/index.js';
 import type { BrapiDialect } from '@/services/brapi-dialect/index.js';
-import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 import type {
-  CreateDatasetInput,
-  DatasetMetadata,
-  DatasetStore,
-} from '@/services/dataset-store/index.js';
+  CanvasBridge,
+  RegisterDataframeInput,
+  RegisterDataframeResult,
+} from '@/services/canvas-bridge/index.js';
+import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 
 /** True when the thrown value is an upstream 404 surfaced by the BrAPI client. */
@@ -32,10 +32,10 @@ export function isUpstreamNotFound(err: unknown): boolean {
   return err instanceof McpError && err.code === JsonRpcErrorCode.NotFound;
 }
 
-/** Upper cap on how many rows we'll pull for DatasetStore spillover per call. */
+/** Upper cap on how many rows we'll pull for canvas dataframe spillover per call. */
 export const MAX_SPILLOVER_ROWS = 50_000;
 
-/** Hard cap on how many BrAPI pages we'll traverse when building a dataset. */
+/** Hard cap on how many BrAPI pages we'll traverse when building a dataframe. */
 export const MAX_SPILLOVER_PAGES = 50;
 
 export const AliasInput = z
@@ -50,7 +50,7 @@ export const LoadLimitInput = z
   .positive()
   .optional()
   .describe(
-    'Override the in-context row cap. Rows beyond the cap return as a dataset handle for paged follow-up.',
+    'Cap on rows returned inline. Omit for the deployment default — sized so spillover reaches its full row-count ceiling. Rows beyond the cap land in a dataframe; query with brapi_dataframe_query (SQL) instead of paging row-by-row. Heads-up: this same value drives the upstream pageSize during spillover walks, so lowering it to "preview a smaller sample" also shrinks the dataframe ceiling proportionally — prefer SQL `LIMIT` on the dataframe for sampling instead.',
   );
 
 export const ExtraFiltersInput = z
@@ -294,22 +294,24 @@ export function computeDistribution<T>(
 }
 
 /**
- * Render the standardized header line for `find_*` tools. When a dataset
- * spillover is present, surfaces the dataset row count alongside the
+ * Render the standardized header line for `find_*` tools. When a dataframe
+ * spillover is present, surfaces the dataframe row count alongside the
  * in-context count and the upstream total — `{returned} of {total}` alone
  * hides the middle number and confuses readers when filters miss server-
- * side and the dataset row count diverges from both.
+ * side and the dataframe row count diverges from both.
  */
 export function renderFindHeader(opts: {
   noun: string;
   alias: string;
   returnedCount: number;
   totalCount: number;
-  dataset?: { rowCount: number; expiresAt?: string } | undefined;
+  dataframe?: { rowCount: number; expiresAt?: string } | undefined;
 }): string {
-  if (opts.dataset) {
-    const expiry = opts.dataset.expiresAt ? ` (${formatExpiresIn(opts.dataset.expiresAt)})` : '';
-    return `# ${opts.returnedCount} returned · ${opts.dataset.rowCount} in dataset${expiry} · ${opts.totalCount} total ${opts.noun} — \`${opts.alias}\``;
+  if (opts.dataframe) {
+    const expiry = opts.dataframe.expiresAt
+      ? ` (${formatExpiresIn(opts.dataframe.expiresAt)})`
+      : '';
+    return `# ${opts.returnedCount} returned · ${opts.dataframe.rowCount} in dataframe${expiry} · ${opts.totalCount} total ${opts.noun} — \`${opts.alias}\``;
   }
   return `# ${opts.returnedCount} of ${opts.totalCount} ${opts.noun} — \`${opts.alias}\``;
 }
@@ -364,7 +366,7 @@ export interface LoadedRows<T> {
 /**
  * Pull rows up to `loadLimit` on a single page. If the server reports more
  * rows than the limit, leave the rest behind — callers decide whether to
- * spill via `spillToDataset`.
+ * spill via `spillToCanvas`.
  */
 export async function loadInitialPage<T>(
   client: BrapiClient,
@@ -446,6 +448,7 @@ async function fetchFindRoutePage<T>(
 }
 
 export interface SpillInput<T> {
+  bridge: CanvasBridge;
   client: BrapiClient;
   connection: RegisteredServer;
   ctx: Context;
@@ -460,8 +463,8 @@ export interface SpillInput<T> {
   route?: FindRoute;
   /**
    * Optional client-side predicate applied to every row (first-page + spilled)
-   * before persistence. When present, only rows that pass are persisted to
-   * DatasetStore and returned in `fullRows`. The unfiltered upstream total is
+   * before persistence. When present, only rows that pass are registered on
+   * the canvas and returned in `fullRows`. The unfiltered upstream total is
    * preserved separately on the LoadedRows envelope so distributions and
    * headers can still report the true upstream size.
    */
@@ -470,77 +473,78 @@ export interface SpillInput<T> {
    * Optional client-side transform applied to every row (first-page + spilled)
    * before any predicate filter runs. Used to normalize sparse / duplicated
    * upstream payloads (e.g. dedup'ing CassavaBase's 11×-repeated synonym
-   * arrays) so the in-context view, the persisted dataset, and the canvas
-   * dataframe all see the same cleaned shape. Runs before `rowFilter`.
+   * arrays) so the in-context view and the canvas dataframe see the same
+   * cleaned shape. Runs before `rowFilter`.
    */
   rowMapper?: (row: T) => T;
   source: string;
-  store: DatasetStore;
   /** Total reported by the server on the first page. */
   totalCount: number;
 }
 
 export interface SpillResult<T> {
-  dataset: DatasetMetadata;
-  /** Rows that were persisted (post-filter when `rowFilter` was supplied). */
+  dataframe: RegisterDataframeResult;
+  /** Rows that were registered (post-filter when `rowFilter` was supplied). */
   fullRows: T[];
   pagesFetched: number;
 }
 
 /**
- * Shape of the dataset handle returned inline by `find_*` tools. Drops the
- * provenance fields (source/baseUrl/query) since those are internal and
- * available via `brapi_manage_dataset summary`.
+ * Shape of the dataframe handle returned inline by `find_*` tools. The
+ * dataframe is the canvas table holding every row beyond `loadLimit`; query
+ * it with `brapi_dataframe_query` for SQL access or describe it with
+ * `brapi_dataframe_describe` for schema + provenance.
  */
-export const DatasetHandleSchema = z.object({
-  datasetId: z.string().describe('Use with brapi_manage_dataset to page or export.'),
-  rowCount: z.number().int().nonnegative().describe('Number of rows persisted in the dataset.'),
-  sizeBytes: z.number().int().nonnegative().describe('Serialized size of the dataset in bytes.'),
+export const DataframeHandleSchema = z.object({
+  tableName: z
+    .string()
+    .describe(
+      'Dataframe name. Use with brapi_dataframe_describe (schema + provenance) and brapi_dataframe_query (SQL).',
+    ),
+  rowCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe('Number of rows materialized in the dataframe.'),
   columns: z
-    .array(z.string().describe('Column name from the persisted rows.'))
-    .describe('Full column list of the persisted rows.'),
-  createdAt: z.string().describe('ISO 8601 timestamp the dataset was created.'),
-  expiresAt: z.string().describe('ISO 8601 timestamp after which the dataset will be purged.'),
+    .array(z.string().describe('Column name from the materialized rows.'))
+    .describe('Full column list of the dataframe.'),
+  createdAt: z.string().describe('ISO 8601 timestamp the dataframe was created.'),
+  expiresAt: z
+    .string()
+    .describe(
+      'ISO 8601 timestamp after which the dataframe metadata will be purged. Re-run the find_* tool to refresh, or copy results out before expiry.',
+    ),
   truncated: z
     .boolean()
     .optional()
-    .describe('True when the dataset hit a row cap before exhausting upstream.'),
+    .describe('True when the dataframe hit a row cap before exhausting upstream.'),
   maxRows: z
     .number()
     .int()
     .positive()
     .optional()
     .describe('Cap that was applied at create time, when truncation occurred.'),
-  dataframe: z
-    .string()
-    .optional()
-    .describe(
-      'Dataframe name when this dataset was auto-registered as a SQL-queryable dataframe. Use with brapi_dataframe_query to run SQL across the rows.',
-    ),
 });
 
-export type DatasetHandle = z.infer<typeof DatasetHandleSchema>;
+export type DataframeHandle = z.infer<typeof DataframeHandleSchema>;
 
 /**
- * Render a DatasetHandle as bullet lines, matching the existing find_* tool
+ * Render a DataframeHandle as bullet lines, matching the existing find_* tool
  * format. Centralized so the truncated/maxRows fields surface consistently.
  * `expiresAt` is paired with a human-readable `expires in Xh / Xd` so the
  * agent doesn't have to subtract dates to know when the handle goes stale.
  */
-export function renderDatasetHandle(handle: DatasetHandle): string[] {
+export function renderDataframeHandle(handle: DataframeHandle): string[] {
   const lines = [
-    `- datasetId: \`${handle.datasetId}\``,
+    `- tableName: \`${handle.tableName}\` (query via brapi_dataframe_query)`,
     `- rowCount: ${handle.rowCount}`,
-    `- sizeBytes: ${handle.sizeBytes}`,
     `- columns: ${handle.columns.join(', ')}`,
     `- createdAt: ${handle.createdAt}`,
     `- expiresAt: ${handle.expiresAt} (${formatExpiresIn(handle.expiresAt)})`,
   ];
   if (handle.truncated) lines.push(`- truncated: true`);
   if (typeof handle.maxRows === 'number') lines.push(`- maxRows: ${handle.maxRows}`);
-  if (handle.dataframe) {
-    lines.push(`- dataframe: \`${handle.dataframe}\` (queryable via brapi_dataframe_query)`);
-  }
   return lines;
 }
 
@@ -565,23 +569,22 @@ export function formatExpiresIn(expiresAt: string, now: Date = new Date()): stri
   return deltaMs >= 0 ? `expires in ${label}` : `expired ${label} ago`;
 }
 
-/** Project a `DatasetMetadata` to the in-context handle shape. */
-export function toDatasetHandle(metadata: DatasetMetadata): DatasetHandle {
-  const handle: DatasetHandle = {
-    datasetId: metadata.datasetId,
-    rowCount: metadata.rowCount,
-    sizeBytes: metadata.sizeBytes,
-    columns: metadata.columns,
-    createdAt: metadata.createdAt,
-    expiresAt: metadata.expiresAt,
+/** Project a `RegisterDataframeResult` to the inline handle shape. */
+export function toDataframeHandle(result: RegisterDataframeResult): DataframeHandle {
+  const handle: DataframeHandle = {
+    tableName: result.tableName,
+    rowCount: result.rowCount,
+    columns: result.columns,
+    createdAt: result.createdAt,
+    expiresAt: result.expiresAt,
   };
-  if (metadata.truncated) handle.truncated = true;
-  if (typeof metadata.maxRows === 'number') handle.maxRows = metadata.maxRows;
-  if (metadata.dataframe) handle.dataframe = metadata.dataframe;
+  if (result.truncated) handle.truncated = true;
+  if (typeof result.maxRows === 'number') handle.maxRows = result.maxRows;
   return handle;
 }
 
 export interface MaybeSpillInput<T> {
+  bridge: CanvasBridge;
   client: BrapiClient;
   connection: RegisteredServer;
   ctx: Context;
@@ -592,7 +595,7 @@ export interface MaybeSpillInput<T> {
   route?: FindRoute;
   /**
    * Optional client-side predicate applied to every row before persistence.
-   * Forwarded to `spillToDataset`. When present and no spillover happens, the
+   * Forwarded to `spillToCanvas`. When present and no spillover happens, the
    * first-page rows are also filtered before being returned.
    */
   rowFilter?: (row: T) => boolean;
@@ -604,26 +607,26 @@ export interface MaybeSpillInput<T> {
   source: string;
   /**
    * Optional request overrides for spillover page pulls. Useful when a tool
-   * wants dataset persistence to be best-effort under a tighter latency
-   * budget than the first page.
+   * wants dataframe materialization to run under a tighter latency budget
+   * than the first page.
    */
   spillRequestOptions?: BrapiRequestOptions;
-  store: DatasetStore;
   /** Optional warning sink. When supplied, spillover failures degrade to rows-only output. */
   warnings?: string[];
 }
 
 export interface MaybeSpillResult<T> {
-  dataset?: DatasetHandle;
+  dataframe?: DataframeHandle;
   /** Row set after `rowFilter` (when supplied), spilled or first-page only. */
   fullRows: T[];
 }
 
 /**
- * Wrap `spillToDataset` with the "only spill when hasMore and totalCount >
+ * Wrap `spillToCanvas` with the "only spill when hasMore and totalCount >
  * loadLimit" guard that every `find_*` tool replicates. When no spillover is
- * needed, returns the first-page rows untouched. When it is, persists the
- * union to DatasetStore and returns both the full set and the handle.
+ * needed, returns the first-page rows untouched. When it is, materializes
+ * the union as a canvas dataframe and returns both the full set and the
+ * handle.
  */
 export async function maybeSpill<T extends Record<string, unknown>>(
   input: MaybeSpillInput<T>,
@@ -637,7 +640,7 @@ export async function maybeSpill<T extends Record<string, unknown>>(
     return { fullRows: applyRowTransforms(firstPage.rows, rowMapper, rowFilter) };
   }
   const spillInput: SpillInput<T> = {
-    store: input.store,
+    bridge: input.bridge,
     client: input.client,
     connection: input.connection,
     path: input.path,
@@ -653,15 +656,15 @@ export async function maybeSpill<T extends Record<string, unknown>>(
   if (input.route) spillInput.route = input.route;
   if (input.spillRequestOptions) spillInput.pageRequestOptions = input.spillRequestOptions;
   try {
-    const spill = await spillToDataset(spillInput);
+    const spill = await spillToCanvas(spillInput);
     return {
       fullRows: spill.fullRows,
-      dataset: toDatasetHandle(spill.dataset),
+      dataframe: toDataframeHandle(spill.dataframe),
     };
   } catch (err) {
     if (!input.warnings || !(err instanceof SpillPageFetchError)) throw err;
     input.warnings.push(
-      `Dataset spillover skipped after returning the first ${firstPage.rows.length} row(s): ${formatSpillError(err)}. Narrow filters, raise loadLimit enough to fit the result in one page, or retry when the upstream server is responsive.`,
+      `Dataframe spillover skipped after returning the first ${firstPage.rows.length} row(s): ${formatSpillError(err)}. Narrow filters, raise loadLimit enough to fit the result in one page, or retry when the upstream server is responsive.`,
     );
     return { fullRows: applyRowTransforms(firstPage.rows, rowMapper, rowFilter) };
   }
@@ -671,7 +674,7 @@ export async function maybeSpill<T extends Record<string, unknown>>(
  * Apply mapper before filter on a row set. Centralizes the order constraint
  * across the three spillover sites — early-exit, error fallback, and persist
  * — so they can't drift apart and accidentally filter raw rows the spilled
- * dataset has already normalized.
+ * dataframe has already normalized.
  */
 function applyRowTransforms<T>(
   rows: T[],
@@ -683,11 +686,11 @@ function applyRowTransforms<T>(
 }
 
 /**
- * Pull every remaining page up to MAX_SPILLOVER_* caps, then persist the
- * union to DatasetStore. Returns the dataset metadata plus the full row set
- * (so callers can compute honest distributions from the whole result).
+ * Pull every remaining page up to MAX_SPILLOVER_* caps, then materialize the
+ * union as a canvas dataframe. Returns the dataframe metadata plus the full
+ * row set (so callers can compute honest distributions from the whole result).
  */
-export async function spillToDataset<T extends Record<string, unknown>>(
+export async function spillToCanvas<T extends Record<string, unknown>>(
   input: SpillInput<T>,
 ): Promise<SpillResult<T>> {
   const remainingTarget = Math.min(input.totalCount, MAX_SPILLOVER_ROWS);
@@ -728,23 +731,23 @@ export async function spillToDataset<T extends Record<string, unknown>>(
 
   const persistedRows = applyRowTransforms(rows, input.rowMapper, input.rowFilter);
 
-  const createInput: CreateDatasetInput = {
+  const registerInput: RegisterDataframeInput = {
     source: input.source,
     baseUrl: input.connection.baseUrl,
     query: input.filters,
     rows: persistedRows,
   };
   if (truncated) {
-    createInput.truncated = true;
+    registerInput.truncated = true;
     // `maxRows` only carries meaning when the row cap fired — it's the upper
     // bound the spillover honored. When the page cap fired first (small
     // `loadLimit` × `MAX_SPILLOVER_PAGES` < upstream total), reporting
-    // `maxRows = MAX_SPILLOVER_ROWS` is misleading: the dataset stopped at
+    // `maxRows = MAX_SPILLOVER_ROWS` is misleading: the dataframe stopped at
     // `loadLimit × MAX_SPILLOVER_PAGES`, well below the row cap. Log the
     // page-cap event for operators; the agent sees only `truncated: true`
     // without the false 50k bound and can raise `loadLimit` to push past it.
     if (reachedRowCap) {
-      createInput.maxRows = MAX_SPILLOVER_ROWS;
+      registerInput.maxRows = MAX_SPILLOVER_ROWS;
     } else if (reachedPageCap) {
       input.ctx.log.warning('Spillover hit page cap before exhausting upstream', {
         source: input.source,
@@ -755,9 +758,9 @@ export async function spillToDataset<T extends Record<string, unknown>>(
       });
     }
   }
-  const dataset = await input.store.create(input.ctx, createInput);
+  const dataframe = await input.bridge.registerDataframe(input.ctx, registerInput);
 
-  return { dataset, fullRows: persistedRows, pagesFetched };
+  return { dataframe, fullRows: persistedRows, pagesFetched };
 }
 
 class SpillPageFetchError extends Error {
@@ -789,6 +792,30 @@ export function extractRows<T>(result: BrapiListResult<T> | T[]): T[] {
   if (Array.isArray(result)) return result;
   if (result && Array.isArray(result.data)) return result.data;
   return [];
+}
+
+/**
+ * Extract a homogeneous record-row set from a raw BrAPI envelope `result`.
+ * Returns the array when `result` is itself a list of objects, or when
+ * `result.data` is — covering both bare-array and BrAPI-list-envelope shapes.
+ * Returns `null` for non-list shapes (single object, scalar, primitive
+ * arrays) so callers — notably `raw_get` / `raw_search` — can skip spillover
+ * and pass the upstream payload through unchanged. Empty arrays are list-
+ * shaped but carry no rows; the caller uses `length === 0` to decide whether
+ * to register a dataframe.
+ */
+export function extractListRows<T extends Record<string, unknown>>(result: unknown): T[] | null {
+  const candidate: unknown[] | null = Array.isArray(result)
+    ? result
+    : result && typeof result === 'object' && Array.isArray((result as { data?: unknown }).data)
+      ? (result as { data: unknown[] }).data
+      : null;
+  if (candidate === null) return null;
+  if (candidate.length === 0) return [];
+  const allObjects = candidate.every(
+    (row) => typeof row === 'object' && row !== null && !Array.isArray(row),
+  );
+  return allObjects ? (candidate as T[]) : null;
 }
 
 /** Return the input as a non-empty string, or undefined. Used in distribution accessors. */

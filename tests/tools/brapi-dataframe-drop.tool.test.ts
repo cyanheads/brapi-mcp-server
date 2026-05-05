@@ -1,12 +1,13 @@
 /**
- * @fileoverview Handler tests for `brapi_dataframe_drop`. Covers
- * dataframe-disabled gating, the dropped:true path, and the idempotent
- * dropped:false path.
+ * @fileoverview Handler tests for `brapi_dataframe_drop`. Covers the
+ * dropped:true path and the idempotent dropped:false path. The opt-in
+ * `BRAPI_CANVAS_DROP_ENABLED` gate is enforced by the registration layer
+ * (see registration-gate.test.ts), not by the handler itself.
  *
  * @module tests/tools/brapi-dataframe-drop.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { brapiDataframeDrop } from '@/mcp-server/tools/definitions/brapi-dataframe-drop.tool.js';
@@ -19,19 +20,9 @@ describe('brapi_dataframe_drop', () => {
     resetCanvasBridge();
   });
 
-  it('throws dataframe_disabled when the bridge is off', async () => {
-    initCanvasBridge(undefined, { ...TEST_CONFIG, canvasEnabled: false });
-    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeDrop.errors });
-    const input = brapiDataframeDrop.input.parse({ dataframe: 'staging' });
-    await expect(brapiDataframeDrop.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      data: expect.objectContaining({ reason: 'dataframe_disabled' }),
-    });
-  });
-
   it('returns dropped:true when the dataframe existed and was removed', async () => {
     const fake = new FakeDataCanvas();
-    const bridge = initCanvasBridge(fake, { ...TEST_CONFIG, canvasEnabled: true });
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
     const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeDrop.errors });
     await bridge.registerTable(ctx, 'staging', [{ a: 1 }]);
     const result = await brapiDataframeDrop.handler(
@@ -43,7 +34,7 @@ describe('brapi_dataframe_drop', () => {
 
   it('returns dropped:false (idempotent) for unknown dataframe names', async () => {
     const fake = new FakeDataCanvas();
-    initCanvasBridge(fake, { ...TEST_CONFIG, canvasEnabled: true });
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
     const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeDrop.errors });
     const result = await brapiDataframeDrop.handler(
       brapiDataframeDrop.input.parse({ dataframe: 'never_existed' }),

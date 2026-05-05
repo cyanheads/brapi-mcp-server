@@ -1,6 +1,6 @@
 /**
  * @fileoverview End-to-end tests for `brapi_find_observations` — capability
- * gate, distribution computation, dataset spillover, sparse upstream payloads.
+ * gate, distribution computation, dataframe spillover, sparse upstream payloads.
  *
  * @module tests/tools/brapi-find-observations.tool.test
  */
@@ -154,7 +154,7 @@ describe('brapi_find_observations tool', () => {
     expect(result.results[0]?.season).toBeNull();
   });
 
-  it('spills to DatasetStore when totalCount exceeds loadLimit', async () => {
+  it('spills to a canvas dataframe when totalCount exceeds loadLimit', async () => {
     const ctx = await connect(fetcher);
     const all = Array.from({ length: 25 }, (_, i) =>
       obsRow({ observationDbId: `obs-${i + 1}`, value: String(i) }),
@@ -173,11 +173,11 @@ describe('brapi_find_observations tool', () => {
     );
 
     expect(result.hasMore).toBe(true);
-    expect(result.dataset?.rowCount).toBe(25);
+    expect(result.dataframe?.rowCount).toBe(25);
     expect(result.refinementHint).toMatch(/25 rows exceed loadLimit=10/);
   });
 
-  it('returns the first page with a warning when dataset spillover page pulls fail', async () => {
+  it('returns the first page with a warning when dataframe spillover page pulls fail', async () => {
     const ctx = await connect(fetcher);
     const firstRows = Array.from({ length: 10 }, (_, i) =>
       obsRow({ observationDbId: `obs-${i + 1}`, value: String(i) }),
@@ -199,8 +199,8 @@ describe('brapi_find_observations tool', () => {
     expect(result.returnedCount).toBe(10);
     expect(result.totalCount).toBe(25);
     expect(result.hasMore).toBe(true);
-    expect(result.dataset).toBeUndefined();
-    expect(result.warnings.join('\n')).toContain('Dataset spillover skipped');
+    expect(result.dataframe).toBeUndefined();
+    expect(result.warnings.join('\n')).toContain('Dataframe spillover skipped');
     expect(result.warnings.join('\n')).toContain('upstream page stalled');
   });
 
@@ -397,7 +397,7 @@ describe('brapi_find_observations tool', () => {
     expect(fetcher.mock.calls.length).toBe(1);
     expect(result.returnedCount).toBe(1);
     expect(result.totalCount).toBe(50_000);
-    expect(result.dataset).toBeUndefined();
+    expect(result.dataframe).toBeUndefined();
     expect(
       result.warnings.some((w) =>
         /Preflight detected 50000 observations.*Bulk pull skipped/.test(w),

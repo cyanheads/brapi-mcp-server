@@ -1,7 +1,7 @@
 /**
  * @fileoverview End-to-end tests for `brapi_find_locations` — capability
  * gate, country/type distributions, client-side bbox filter, malformed bbox
- * warnings, dataset spillover.
+ * warnings, dataframe spillover.
  *
  * @module tests/tools/brapi-find-locations.tool.test
  */

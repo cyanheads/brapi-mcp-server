@@ -2,12 +2,15 @@
  * @fileoverview Lightweight fakes for `DataCanvas` and `CanvasInstance`.
  * Drives bridge tests without pulling in DuckDB. Mirrors the framework
  * surface enough for the bridge's call paths — register/drop/describe/query
- * are covered; export and SQL evaluation are stubbed (the bridge doesn't
- * exercise SQL here, only the orchestration around it).
+ * are covered; export honors path targets by writing a small JSON marker
+ * file (enough for the export tool to verify the path round-trip without
+ * actually shelling out to DuckDB COPY).
  *
  * @module tests/services/_fake-canvas
  */
 
+import { mkdir, writeFile } from 'node:fs/promises';
+import { isAbsolute, resolve } from 'node:path';
 import type {
   CanvasInstance,
   ExportResult,
@@ -28,6 +31,7 @@ interface FakeTable {
 interface FakeCanvasState {
   canvasId: string;
   expiresAt: string;
+  exportRoot?: string;
   tables: Map<string, FakeTable>;
   tenantId: string;
 }
@@ -43,7 +47,13 @@ interface FakeCanvasState {
  */
 export class FakeDataCanvas {
   readonly canvases = new Map<string, FakeCanvasState>();
+  /** Sandbox root that path-target exports resolve against. */
+  exportRoot: string | undefined;
   private idCounter = 0;
+
+  constructor(opts: { exportRoot?: string } = {}) {
+    if (opts.exportRoot !== undefined) this.exportRoot = opts.exportRoot;
+  }
 
   async acquire(maybeId: string | undefined, ctx: { tenantId?: string }): Promise<CanvasInstance> {
     const tenantId = ctx.tenantId ?? 'default';
@@ -53,7 +63,7 @@ export class FakeDataCanvas {
         throw notFound(`Canvas ${maybeId} not found.`, { reason: 'canvas_not_found' });
       }
       existing.expiresAt = futureIso(24);
-      return makeInstance(existing, /* isNew */ false);
+      return makeInstance(existing, /* isNew */ false, this.exportRoot);
     }
     this.idCounter += 1;
     const canvasId = `fake_${this.idCounter.toString(36).padStart(6, '0')}`;
@@ -64,7 +74,7 @@ export class FakeDataCanvas {
       tables: new Map(),
     };
     this.canvases.set(canvasId, state);
-    return makeInstance(state, /* isNew */ true);
+    return makeInstance(state, /* isNew */ true, this.exportRoot);
   }
 
   async drop(canvasId: string): Promise<boolean> {
@@ -87,7 +97,11 @@ export class FakeDataCanvas {
   }
 }
 
-function makeInstance(state: FakeCanvasState, isNew: boolean): CanvasInstance {
+function makeInstance(
+  state: FakeCanvasState,
+  isNew: boolean,
+  exportRoot: string | undefined,
+): CanvasInstance {
   return {
     canvasId: state.canvasId,
     tenantId: state.tenantId,
@@ -119,8 +133,39 @@ function makeInstance(state: FakeCanvasState, isNew: boolean): CanvasInstance {
       return result;
     },
 
-    async export(_tableName: string, target: ExportTarget): Promise<ExportResult> {
-      return { format: target.format, rowCount: 0, sizeBytes: 0 };
+    async export(tableName: string, target: ExportTarget): Promise<ExportResult> {
+      const table = state.tables.get(tableName);
+      if (!table) {
+        throw notFound(`Canvas does not contain a table named "${tableName}".`, {
+          reason: 'table_not_found',
+          tableName,
+        });
+      }
+      if ('path' in target) {
+        if (exportRoot === undefined) {
+          throw notFound('Fake canvas has no exportRoot configured.', {
+            reason: 'export_root_unset',
+          });
+        }
+        if (isAbsolute(target.path) || target.path.includes('..')) {
+          throw notFound('Path outside sandbox.', { reason: 'export_path_escapes' });
+        }
+        const root = resolve(exportRoot);
+        await mkdir(root, { recursive: true });
+        const absolute = resolve(root, target.path);
+        const payload = JSON.stringify({
+          format: target.format,
+          rows: table.rows,
+        });
+        await writeFile(absolute, payload, 'utf8');
+        return {
+          format: target.format,
+          path: absolute,
+          rowCount: table.rows.length,
+          sizeBytes: Buffer.byteLength(payload, 'utf8'),
+        };
+      }
+      return { format: target.format, rowCount: table.rows.length, sizeBytes: 0 };
     },
 
     async describe(opts?: { tableName?: string }): Promise<TableInfo[]> {

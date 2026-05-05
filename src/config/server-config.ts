@@ -1,7 +1,7 @@
 /**
  * @fileoverview Server-specific configuration for brapi-mcp-server. Covers
  * default connection details, HTTP client behavior (timeouts, retries,
- * concurrency), async-search polling, dataset lifecycle, and reference-data
+ * concurrency), async-search polling, dataframe lifecycle, and reference-data
  * cache tuning. Lazy-parsed via `parseEnvConfig` so env-var names appear in
  * validation errors.
  *
@@ -41,18 +41,16 @@ const ServerConfigSchema = z.object({
     .int()
     .positive()
     .default(86_400)
-    .describe('TTL for datasets held in DatasetStore (seconds).'),
-  datasetStoreDir: z
-    .string()
-    .optional()
-    .describe('Filesystem path for DatasetStore payloads when filesystem storage is active.'),
+    .describe('TTL for dataframe provenance metadata persisted alongside spilled rows (seconds).'),
 
   loadLimit: z.coerce
     .number()
     .int()
     .positive()
-    .default(200)
-    .describe('Default row cap returned in-context before spilling to DatasetStore.'),
+    .default(1_000)
+    .describe(
+      'Default row cap returned in-context before spilling to a canvas dataframe. Also doubles as the upstream `pageSize` used during spillover walks — the dataframe ceiling is `loadLimit × MAX_SPILLOVER_PAGES (50)`, so the 1,000 default lines up with the documented 50,000-row spillover cap. Operators on small/test BrAPI servers can lower it; raising it above 1,000 is rarely useful because most BrAPI servers cap server-side pageSize at 1,000.',
+    ),
   maxConcurrentRequests: z.coerce
     .number()
     .int()
@@ -126,12 +124,18 @@ const ServerConfigSchema = z.object({
       'Hard ceiling on rows pulled from the upstream BrAPI server in a single brapi_find_genotype_calls invocation. Bounds total page count per query — protects the upstream from unbounded pagination loops. Default 100,000 (≈10 pages at the standard pageSize=10,000); maximum 500,000 (≈50 pages, matching the per-query budget of other find_* tools).',
     ),
 
-  canvasEnabled: z
+  canvasDropEnabled: z
     .enum(['true', 'false'])
-    .default('true')
+    .default('false')
     .transform((v) => v === 'true')
     .describe(
-      'Gate the brapi_dataframe_* tool surface. Effective only when the framework canvas service is also configured (CANVAS_PROVIDER_TYPE=duckdb). Default true — set false to keep the dependency installed but the tools hidden.',
+      'Opt-in flag for `brapi_dataframe_drop`. Off by default — the tool is omitted from `tools/list` unless the operator opts in. Dataframes still expire via TTL when left unmanaged.',
+    ),
+  exportDir: z
+    .string()
+    .optional()
+    .describe(
+      'Filesystem directory for `brapi_dataframe_export` output files. When unset, the export tool is omitted from `tools/list` (no separate enable flag — setting the path *is* the opt-in). The framework reads the resolved path from `CANVAS_EXPORT_PATH`; the entry point bridges `BRAPI_EXPORT_DIR` → `CANVAS_EXPORT_PATH` so operators only need to set the brapi-prefixed name. Stdio-only — under `MCP_TRANSPORT_TYPE=http` the tool stays disabled regardless of this value because the returned path lives on the server, not the user.',
     ),
   canvasMaxRows: z.coerce
     .number()
@@ -163,7 +167,6 @@ export function getServerConfig(): ServerConfig {
     defaultApiKey: 'BRAPI_DEFAULT_API_KEY',
     defaultApiKeyHeader: 'BRAPI_DEFAULT_API_KEY_HEADER',
     datasetTtlSeconds: 'BRAPI_DATASET_TTL_SECONDS',
-    datasetStoreDir: 'BRAPI_DATASET_STORE_DIR',
     loadLimit: 'BRAPI_LOAD_LIMIT',
     maxConcurrentRequests: 'BRAPI_MAX_CONCURRENT_REQUESTS',
     retryMaxAttempts: 'BRAPI_RETRY_MAX_ATTEMPTS',
@@ -176,7 +179,8 @@ export function getServerConfig(): ServerConfig {
     allowPrivateIps: 'BRAPI_ALLOW_PRIVATE_IPS',
     enableWrites: 'BRAPI_ENABLE_WRITES',
     genotypeCallsMaxPull: 'BRAPI_GENOTYPE_CALLS_MAX_PULL',
-    canvasEnabled: 'BRAPI_CANVAS_ENABLED',
+    canvasDropEnabled: 'BRAPI_CANVAS_DROP_ENABLED',
+    exportDir: 'BRAPI_EXPORT_DIR',
     canvasMaxRows: 'BRAPI_CANVAS_MAX_ROWS',
     canvasQueryTimeoutMs: 'BRAPI_CANVAS_QUERY_TIMEOUT_MS',
   });
