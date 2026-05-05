@@ -1,10 +1,20 @@
 /**
  * @fileoverview `brapi_dataframe_query` — execute SQL across in-memory
- * dataframes. Dataframes auto-populate when find_* tools spill to DatasetStore
- * (each becomes `ds_<datasetId>`). Use `registerAs` to materialize a result
- * as a new dataframe — the response carries a bounded `preview` slice plus
- * the full `rowCount`. Read-only enforcement is the framework's three-layer
- * SQL gate (single statement → SELECT only → plan-walk allowlist).
+ * dataframes. Dataframes auto-populate when find_* tools spill (each becomes
+ * `df_<uuid>`). SQL is the primary paging idiom — use `LIMIT/OFFSET` to walk
+ * a large dataframe, projection (`SELECT col1, col2`) to trim rows, and
+ * aggregation (`COUNT`, `GROUP BY`, `AVG`) to summarize without materializing
+ * every row in the LLM context. Use `registerAs` to materialize a result as
+ * a new dataframe — the response carries a bounded `preview` slice plus the
+ * full `rowCount`. Read-only enforcement is the framework's three-layer SQL
+ * gate (single statement → SELECT only → plan-walk allowlist).
+ *
+ * Every query runs under a `registerAs` so DuckDB's describe is the
+ * authoritative type source for the response columns. When the caller
+ * doesn't supply `registerAs`, the handler generates an internal
+ * `_brapi_probe_<uuid>` name, describes the materialized table for types,
+ * then drops it before returning — so types stay consistent with what
+ * `brapi_dataframe_describe` would report.
  *
  * Defaults to a fresh per-tenant default workspace; the agent never passes a
  * canvasId. The bridge resolves it via `ctx.state` so multiple calls in the
@@ -13,14 +23,15 @@
  * @module mcp-server/tools/definitions/brapi-dataframe-query.tool
  */
 
-import { tool, z } from '@cyanheads/mcp-ts-core';
+import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import {
+  inferSchemaFromRows,
   type QueryResult,
   SQL_GATE_REASONS,
   type SqlGateReason,
 } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { type CanvasBridge, getCanvasBridge } from '@/services/canvas-bridge/index.js';
 
 /**
  * Single source of truth for the SQL gate reason strings — re-exported from
@@ -45,7 +56,7 @@ const InputSchema = z.object({
     .string()
     .min(1)
     .describe(
-      'SELECT statement against dataframes. Single statement only — writes, DDL, file reads, and exports are rejected. Use brapi_dataframe_describe to discover available dataframes.',
+      'SELECT statement against dataframes. Single statement only — writes, DDL, file reads, and exports are rejected. Use brapi_dataframe_describe to discover available dataframes. SQL is the primary paging idiom: use `LIMIT/OFFSET` to walk a large dataframe, projection to trim columns, and aggregation (`COUNT`, `GROUP BY`, `AVG`) to summarize without materializing every row.',
     ),
   registerAs: z
     .string()
@@ -73,6 +84,15 @@ const InputSchema = z.object({
     ),
 });
 
+const ColumnInfoSchema = z.object({
+  name: z.string().describe('Column name in projection order.'),
+  type: z
+    .string()
+    .describe(
+      'SQL/DuckDB column type (e.g. VARCHAR, BIGINT, DOUBLE, BOOLEAN, JSON) sourced from DuckDB schema metadata. The same type appears whether or not `registerAs` was supplied — without it, the handler runs an internal probe to recover authoritative types that would otherwise be lost when DuckDB BigInts serialize to JSON strings.',
+    ),
+});
+
 const OutputSchema = z.object({
   rowCount: z
     .number()
@@ -80,8 +100,10 @@ const OutputSchema = z.object({
     .nonnegative()
     .describe('Total rows the query produced (may exceed `rows.length` when capped).'),
   columns: z
-    .array(z.string().describe('Column name in projection order.'))
-    .describe('Column names in projection order.'),
+    .array(ColumnInfoSchema.describe('One column descriptor — name and SQL/DuckDB type.'))
+    .describe(
+      'Column metadata in projection order — name and SQL type. Use this to write follow-up queries without round-tripping through brapi_dataframe_describe.',
+    ),
   rows: z
     .array(
       z
@@ -101,16 +123,9 @@ const OutputSchema = z.object({
 
 export const brapiDataframeQuery = tool('brapi_dataframe_query', {
   description:
-    'Run SQL across in-memory dataframes. Dataframes auto-populate when find_* tools spill (named `ds_<datasetId>`); list them via brapi_dataframe_describe. SELECT only — writes/DDL/COPY/PRAGMA/ATTACH/file-reads are rejected. Use `registerAs` to chain — the result lands as a new dataframe.',
+    'Run SQL across in-memory dataframes. Dataframes auto-populate when find_* tools spill (named `df_<uuid>`); list them via brapi_dataframe_describe. SELECT only — writes/DDL/COPY/PRAGMA/ATTACH/file-reads are rejected. Use SQL as the paging idiom: `LIMIT/OFFSET` to walk results, projection to trim columns, aggregation to summarize. Use `registerAs` to chain — the result lands as a new dataframe.',
   annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
   errors: [
-    {
-      reason: 'dataframe_disabled',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Dataframe surface is not enabled on this deployment',
-      recovery:
-        'Use brapi_manage_dataset (mode=load) to page rows from the underlying dataset — SQL across dataframes is gated off here.',
-    },
     {
       reason: 'sql_rejected',
       code: JsonRpcErrorCode.ValidationError,
@@ -124,16 +139,12 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
 
   async handler(input, ctx) {
     const bridge = getCanvasBridge();
-    if (!bridge.isEnabled()) {
-      throw ctx.fail(
-        'dataframe_disabled',
-        'brapi_dataframe_query is unavailable — dataframes are not enabled on this deployment.',
-        { ...ctx.recoveryFor('dataframe_disabled') },
-      );
-    }
-    const queryOpts: { preview?: number; registerAs?: string; rowLimit?: number } = {};
+    const userRegisterAs = input.registerAs;
+    const probeName = userRegisterAs ?? `_brapi_probe_${crypto.randomUUID().replace(/-/g, '_')}`;
+    const queryOpts: { preview?: number; registerAs: string; rowLimit?: number } = {
+      registerAs: probeName,
+    };
     if (input.preview !== undefined) queryOpts.preview = input.preview;
-    if (input.registerAs !== undefined) queryOpts.registerAs = input.registerAs;
     if (input.rowLimit !== undefined) queryOpts.rowLimit = input.rowLimit;
 
     let result: QueryResult;
@@ -150,23 +161,72 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
         { cause: err },
       );
     }
+
+    let typedColumns: { name: string; type: string }[];
+    try {
+      typedColumns = await resolveTypedColumns(bridge, ctx, result, probeName);
+    } finally {
+      if (userRegisterAs === undefined) {
+        try {
+          await bridge.drop(ctx, probeName);
+        } catch (err) {
+          ctx.log.warning('Failed to drop ephemeral type-probe table', {
+            tableName: probeName,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
     const out: z.infer<typeof OutputSchema> = {
       rowCount: result.rowCount,
-      columns: result.columns,
+      columns: typedColumns,
       rows: result.rows,
     };
-    if (result.tableName !== undefined) out.dataframe = result.tableName;
+    if (userRegisterAs !== undefined) out.dataframe = userRegisterAs;
     return out;
   },
 
   format: (result) => [{ type: 'text', text: renderQuery(result) }],
 });
 
+/**
+ * Build typed column metadata for the response. The handler always runs the
+ * query under a `registerAs` (caller-supplied or an internal `_brapi_probe_*`
+ * temp name), so DuckDB's `describe()` is the authoritative type source —
+ * it preserves BIGINT, DOUBLE, TIMESTAMP, and DECIMAL through the round-trip
+ * that JSON serialization would otherwise flatten to VARCHAR. Falls through
+ * to row inference only when describe can't see the table (test fakes that
+ * don't honor `registerAs`) and finally to UNKNOWN for empty results.
+ */
+async function resolveTypedColumns(
+  bridge: CanvasBridge,
+  ctx: Context,
+  result: QueryResult,
+  tableName: string,
+): Promise<{ name: string; type: string }[]> {
+  const tables = await bridge.describe(ctx, { tableName });
+  const described = tables[0];
+  if (described && described.columns.length > 0) {
+    return described.columns.map((c) => ({ name: c.name, type: c.type }));
+  }
+  if (result.rows.length > 0) {
+    const inferred = inferSchemaFromRows(result.rows);
+    const byName = new Map(inferred.map((c) => [c.name, c.type]));
+    return result.columns.map((name) => ({
+      name,
+      type: byName.get(name) ?? 'VARCHAR',
+    }));
+  }
+  return result.columns.map((name) => ({ name, type: 'UNKNOWN' }));
+}
+
 function renderQuery(result: z.infer<typeof OutputSchema>): string {
   const lines: string[] = [];
   const tableHint = result.dataframe ? ` · registered as \`${result.dataframe}\`` : '';
   lines.push(`# ${result.rowCount} row(s)${tableHint}`);
-  lines.push(`- columns: ${result.columns.join(', ')}`);
+  const columnList = result.columns.map((c) => `${c.name} (${c.type})`).join(', ');
+  lines.push(`- columns: ${columnList}`);
   lines.push(`- returned: ${result.rows.length}`);
   if (result.rows.length === 0) {
     lines.push('');
@@ -179,10 +239,10 @@ function renderQuery(result: z.infer<typeof OutputSchema>): string {
     lines.push('');
     lines.push(`### Row ${i + 1}`);
     for (const col of result.columns) {
-      const value = row[col];
+      const value = row[col.name];
       if (value === undefined || value === null) continue;
       const rendered = typeof value === 'object' ? JSON.stringify(value) : String(value);
-      lines.push(`- **${col}:** ${rendered}`);
+      lines.push(`- **${col.name}:** ${rendered}`);
     }
   }
   return lines.join('\n');

@@ -30,7 +30,7 @@ describe('brapi_meta_analysis prompt', () => {
     expect(text).toContain('brapi_find_variables');
     expect(text).toContain('brapi_find_observations');
     expect(text).toContain('brapi_get_study');
-    expect(text).toContain('brapi_manage_dataset');
+    expect(text).toContain('brapi_dataframe_query');
     expect(text).toContain('brapi_walk_pedigree');
   });
 

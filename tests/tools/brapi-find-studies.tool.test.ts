@@ -1,6 +1,6 @@
 /**
  * @fileoverview End-to-end tests for brapi_find_studies — capability gate,
- * named + extraFilters merge, distribution computation, dataset spillover
+ * named + extraFilters merge, distribution computation, dataframe spillover
  * when the upstream total exceeds loadLimit.
  *
  * @module tests/tools/brapi-find-studies.tool.test
@@ -94,7 +94,7 @@ describe('brapi_find_studies tool', () => {
     expect(result.returnedCount).toBe(3);
     expect(result.totalCount).toBe(3);
     expect(result.hasMore).toBe(false);
-    expect(result.dataset).toBeUndefined();
+    expect(result.dataframe).toBeUndefined();
     expect(result.distributions.programName).toEqual({
       'Cassava Breeding': 2,
       'Yam Breeding': 1,
@@ -170,7 +170,7 @@ describe('brapi_find_studies tool', () => {
     );
   });
 
-  it('spills to DatasetStore when totalCount exceeds loadLimit', async () => {
+  it('spills to a canvas dataframe when totalCount exceeds loadLimit', async () => {
     const ctx = await connect(fetcher);
     const totalCount = 25; // loadLimit from TEST_CONFIG is 10
     // Build 25 rows split across 3 pages of 10 (last page has 5)
@@ -192,8 +192,8 @@ describe('brapi_find_studies tool', () => {
     expect(result.hasMore).toBe(true);
     expect(result.totalCount).toBe(25);
     expect(result.returnedCount).toBe(10); // in-context truncated to loadLimit
-    expect(result.dataset).toBeDefined();
-    expect(result.dataset?.rowCount).toBe(25);
+    expect(result.dataframe).toBeDefined();
+    expect(result.dataframe?.rowCount).toBe(25);
     expect(result.refinementHint).toMatch(/25 rows exceed loadLimit=10/);
     // Distributions computed from full set — 25 programName hits
     expect(Object.values(result.distributions.programName).reduce((a, b) => a + b, 0)).toBe(25);

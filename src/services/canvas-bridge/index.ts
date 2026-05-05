@@ -6,10 +6,10 @@
 
 export {
   CanvasBridge,
-  datasetTableName,
   getCanvasBridge,
   initCanvasBridge,
+  type RegisterDataframeInput,
+  type RegisterDataframeResult,
   resetCanvasBridge,
-  tableNameToDatasetId,
 } from './canvas-bridge.js';
 export type { CanvasTableMeta, DescribedTable } from './types.js';

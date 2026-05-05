@@ -1,19 +1,17 @@
 /**
- * @fileoverview Handler tests for `brapi_dataframe_query`. Covers the
- * dataframe-disabled error path and the happy path through a fake bridge.
+ * @fileoverview Handler tests for `brapi_dataframe_query`. Covers the happy
+ * path through a fake bridge, the SQL-gate rejection mapping, and the typed
+ * column shape on the response.
  *
  * @module tests/tools/brapi-dataframe-query.tool.test
  */
 
+import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { brapiDataframeQuery } from '@/mcp-server/tools/definitions/brapi-dataframe-query.tool.js';
-import {
-  CanvasBridge,
-  initCanvasBridge,
-  resetCanvasBridge,
-} from '@/services/canvas-bridge/index.js';
+import { initCanvasBridge, resetCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { FakeDataCanvas } from '../services/_fake-canvas.js';
 import { TEST_CONFIG } from './_tool-test-helpers.js';
 
@@ -22,33 +20,116 @@ describe('brapi_dataframe_query', () => {
     resetCanvasBridge();
   });
 
-  it('throws dataframe_disabled when the bridge is off', async () => {
-    initCanvasBridge(undefined, { ...TEST_CONFIG, canvasEnabled: false });
-    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
-    const input = brapiDataframeQuery.input.parse({ sql: 'SELECT 1' });
-    await expect(brapiDataframeQuery.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      data: expect.objectContaining({ reason: 'dataframe_disabled' }),
-    });
-  });
-
-  it('runs through to the workspace when enabled and surfaces the dataframe name from registerAs', async () => {
+  it('runs through to the workspace and surfaces the dataframe name from registerAs', async () => {
     const fake = new FakeDataCanvas();
-    initCanvasBridge(fake, { ...TEST_CONFIG, canvasEnabled: true });
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
     const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
     const input = brapiDataframeQuery.input.parse({
-      sql: 'SELECT * FROM ds_foo',
+      sql: 'SELECT * FROM df_foo',
       registerAs: 'derived_t',
     });
     const result = await brapiDataframeQuery.handler(input, ctx);
     expect(result.dataframe).toBe('derived_t');
     expect(result.rowCount).toBe(0);
     expect(result.rows).toEqual([]);
+    // Empty result + registerAs path: describe was called against the
+    // materialized table, but the fake reports zero columns. The handler
+    // surfaces an empty typed-columns array rather than fabricating types.
+    expect(Array.isArray(result.columns)).toBe(true);
+  });
+
+  it('falls back to row inference when describe returns no columns for the probe table', async () => {
+    // Mocking bridge.query short-circuits the FakeDataCanvas registerAs path,
+    // so describe() finds nothing for the probe name and the handler infers
+    // types from the returned rows.
+    const fake = new FakeDataCanvas();
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.spyOn(bridge, 'query').mockResolvedValue({
+      rows: [{ name: 'Cassava', count: 12 }],
+      columns: ['name', 'count'],
+      rowCount: 1,
+    });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({ sql: 'SELECT name, count FROM df_foo' });
+    const result = await brapiDataframeQuery.handler(input, ctx);
+    expect(result.columns).toEqual([
+      { name: 'name', type: 'VARCHAR' },
+      { name: 'count', type: 'BIGINT' },
+    ]);
+    // No `dataframe` is surfaced — the user didn't request registerAs, so the
+    // probe table is internal-only.
+    expect(result.dataframe).toBeUndefined();
+  });
+
+  it('always passes registerAs to bridge.query and drops the probe table when none was requested', async () => {
+    const fake = new FakeDataCanvas();
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    const querySpy = vi.spyOn(bridge, 'query');
+    const dropSpy = vi.spyOn(bridge, 'drop');
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({ sql: 'SELECT 1' });
+    await brapiDataframeQuery.handler(input, ctx);
+    const probeName = querySpy.mock.calls[0]?.[2]?.registerAs;
+    expect(probeName).toMatch(/^_brapi_probe_/);
+    expect(dropSpy).toHaveBeenCalledWith(expect.anything(), probeName);
+  });
+
+  it('does not drop the table when the caller supplied registerAs', async () => {
+    const fake = new FakeDataCanvas();
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    const dropSpy = vi.spyOn(bridge, 'drop');
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({
+      sql: 'SELECT 1',
+      registerAs: 'keep_me',
+    });
+    await brapiDataframeQuery.handler(input, ctx);
+    expect(dropSpy).not.toHaveBeenCalled();
+  });
+
+  it('uses describe-sourced types over row inference when describe returns columns', async () => {
+    const fake = new FakeDataCanvas();
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.spyOn(bridge, 'query').mockResolvedValue({
+      // Row payload mimics what DuckDB's getRowObjectsJson returns for a
+      // BIGINT column — the value is a string. Row inference would say
+      // VARCHAR; describe (mocked here as the framework would surface it)
+      // says BIGINT, and the handler should prefer describe.
+      rows: [{ count: '42' }],
+      columns: ['count'],
+      rowCount: 1,
+    });
+    vi.spyOn(bridge, 'describe').mockResolvedValue([
+      {
+        name: '_brapi_probe_xxx',
+        rowCount: 1,
+        columns: [{ name: 'count', type: 'BIGINT' }],
+      },
+    ]);
+    vi.spyOn(bridge, 'drop').mockResolvedValue(true);
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({ sql: 'SELECT COUNT(*) AS count FROM df_x' });
+    const result = await brapiDataframeQuery.handler(input, ctx);
+    expect(result.columns).toEqual([{ name: 'count', type: 'BIGINT' }]);
+  });
+
+  it('returns columns with type UNKNOWN when result is empty and no table was registered', async () => {
+    const fake = new FakeDataCanvas();
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.spyOn(bridge, 'query').mockResolvedValue({
+      rows: [],
+      columns: ['name'],
+      rowCount: 0,
+    });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({ sql: 'SELECT name FROM df_empty' });
+    const result = await brapiDataframeQuery.handler(input, ctx);
+    expect(result.columns).toEqual([{ name: 'name', type: 'UNKNOWN' }]);
   });
 
   it('translates framework SQL-gate rejections into ctx.fail("sql_rejected")', async () => {
     const fake = new FakeDataCanvas();
-    const bridge = initCanvasBridge(fake, { ...TEST_CONFIG, canvasEnabled: true });
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
     vi.spyOn(bridge, 'query').mockRejectedValue(
       validationError('Query must contain exactly one SQL statement.', {
         reason: 'multi_statement',
@@ -67,7 +148,7 @@ describe('brapi_dataframe_query', () => {
 
   it('passes non-gate errors through unchanged', async () => {
     const fake = new FakeDataCanvas();
-    const bridge = initCanvasBridge(fake, { ...TEST_CONFIG, canvasEnabled: true });
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
     const upstream = new Error('connection refused');
     vi.spyOn(bridge, 'query').mockRejectedValue(upstream);
     const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
@@ -87,10 +168,13 @@ describe('brapi_dataframe_query', () => {
 });
 
 describe('brapi_dataframe_query format', () => {
-  it('renders count, columns, returned, and a row block per result', () => {
+  it('renders count, typed columns, returned, and a row block per result', () => {
     const formatted = brapiDataframeQuery.format?.({
       rowCount: 2,
-      columns: ['name', 'count'],
+      columns: [
+        { name: 'name', type: 'VARCHAR' },
+        { name: 'count', type: 'BIGINT' },
+      ],
       rows: [
         { name: 'Cassava', count: 12 },
         { name: 'Wheat', count: 8 },
@@ -100,7 +184,7 @@ describe('brapi_dataframe_query format', () => {
     const text =
       (formatted ?? [])[0]?.type === 'text' ? (formatted![0] as { text: string }).text : '';
     expect(text).toContain('# 2 row(s)');
-    expect(text).toContain('- columns: name, count');
+    expect(text).toContain('- columns: name (VARCHAR), count (BIGINT)');
     expect(text).toContain('Cassava');
     expect(text).toContain('Wheat');
   });
@@ -108,7 +192,7 @@ describe('brapi_dataframe_query format', () => {
   it('renders the empty marker when rows is []', () => {
     const formatted = brapiDataframeQuery.format?.({
       rowCount: 0,
-      columns: ['x'],
+      columns: [{ name: 'x', type: 'VARCHAR' }],
       rows: [],
     });
     const text =
@@ -116,11 +200,3 @@ describe('brapi_dataframe_query format', () => {
     expect(text).toContain('No rows');
   });
 });
-
-// Reset before each top-level test too — the suite mixes init-with-canvas
-// and init-without-canvas paths and we don't want one test bleeding.
-beforeEach(() => {
-  resetCanvasBridge();
-});
-// Defensive: confirm CanvasBridge module loads without circular issues.
-void CanvasBridge;

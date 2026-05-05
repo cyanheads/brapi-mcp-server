@@ -1,8 +1,8 @@
 /**
  * @fileoverview `brapi_find_images` — filter images by observation unit,
  * study, observation, descriptive ontology, file name, or MIME type. Returns
- * metadata only; pull bytes via `brapi_get_image`. Spills the full set to
- * DatasetStore when the upstream total exceeds loadLimit.
+ * metadata only; pull bytes via `brapi_get_image`. Materializes the full set
+ * as a dataframe when the upstream total exceeds loadLimit.
  *
  * @module mcp-server/tools/definitions/brapi-find-images.tool
  */
@@ -12,8 +12,8 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
@@ -23,7 +23,7 @@ import {
   checkFilterMatchRates,
   collectPassthroughParts,
   computeDistribution,
-  DatasetHandleSchema,
+  DataframeHandleSchema,
   ExtraFiltersInput,
   fkMatchCheck,
   LoadLimitInput,
@@ -31,7 +31,7 @@ import {
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
-  renderDatasetHandle,
+  renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
   resolveFindRoute,
@@ -100,8 +100,8 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe('Suggested next-step query refinement when the result set is large.'),
-  dataset: DatasetHandleSchema.optional().describe(
-    'Dataset handle when the full result set was persisted to DatasetStore.',
+  dataframe: DataframeHandleSchema.optional().describe(
+    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
   ),
   warnings: z
     .array(z.string())
@@ -134,7 +134,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindImages = tool('brapi_find_images', {
   description:
-    'Filter images by observation unit, observation, study, descriptive ontology term, file name, or MIME type. Returns metadata only — use brapi_get_image to fetch bytes inline. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Filter images by observation unit, observation, study, descriptive ontology term, file name, or MIME type. Returns metadata only — use brapi_get_image to fetch bytes inline. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -169,7 +169,7 @@ export const brapiFindImages = tool('brapi_find_images', {
     const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
-    const datasetStore = getDatasetStore();
+    const bridge = getCanvasBridge();
     const config = getServerConfig();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
@@ -214,7 +214,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       ctx,
     );
 
-    const { fullRows, dataset: datasetMeta } = await maybeSpill({
+    const { fullRows, dataframe } = await maybeSpill({
       firstPage,
       client,
       connection,
@@ -224,7 +224,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       source: 'find_images',
       loadLimit,
       ctx,
-      store: datasetStore,
+      bridge,
     });
 
     const distributions = {
@@ -278,7 +278,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
-    if (datasetMeta) result.dataset = datasetMeta;
+    if (dataframe) result.dataframe = dataframe;
     return result;
   },
 
@@ -290,13 +290,13 @@ export const brapiFindImages = tool('brapi_find_images', {
         alias: result.alias,
         returnedCount: result.returnedCount,
         totalCount: result.totalCount,
-        dataset: result.dataset,
+        dataframe: result.dataframe,
       }),
     );
     lines.push('');
     if (result.hasMore) {
       lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataset ? `Full set persisted as dataset \`${result.dataset.datasetId}\`.` : 'Narrow filters or raise loadLimit.'}`,
+        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
       );
       lines.push('');
     }
@@ -357,10 +357,10 @@ export const brapiFindImages = tool('brapi_find_images', {
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
-    if (result.dataset) {
+    if (result.dataframe) {
       lines.push('');
-      lines.push('## Dataset handle');
-      lines.push(...renderDatasetHandle(result.dataset));
+      lines.push('## Dataframe handle');
+      lines.push(...renderDataframeHandle(result.dataframe));
     }
     if (result.warnings.length > 0) {
       lines.push('');

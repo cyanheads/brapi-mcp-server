@@ -3,7 +3,7 @@
  * by country, abbreviation, type, or free-text. Supports a client-side bbox
  * filter (minLat/maxLat/minLon/maxLon) applied after the initial page load,
  * since BrAPI doesn't define a spec-level bounding-box filter. Standard
- * find_* pattern: distributions + dataset spillover.
+ * find_* pattern: distributions + dataframe spillover.
  *
  * @module mcp-server/tools/definitions/brapi-find-locations.tool
  */
@@ -13,8 +13,8 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
@@ -25,7 +25,7 @@ import {
   checkFilterMatchRates,
   collectPassthroughParts,
   computeDistribution,
-  DatasetHandleSchema,
+  DataframeHandleSchema,
   ExtraFiltersInput,
   extractCoordinates,
   hasPointGeometry,
@@ -34,7 +34,7 @@ import {
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
-  renderDatasetHandle,
+  renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
   resolveFindRoute,
@@ -110,8 +110,8 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe('Suggested next-step query refinement when the result set is large.'),
-  dataset: DatasetHandleSchema.optional().describe(
-    'Dataset handle when the full result set was persisted to DatasetStore.',
+  dataframe: DataframeHandleSchema.optional().describe(
+    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
   ),
   warnings: z
     .array(z.string())
@@ -145,7 +145,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindLocations = tool('brapi_find_locations', {
   description:
-    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Optional bbox parameter restricts rows to a latitude/longitude window. When the spec-correct GeoJSON [lon, lat, alt] reading produces zero matches and at least one row carries a Point geometry, the bbox filter retries once with axes swapped (handles non-conformant servers that store [lat, lon, alt]) and surfaces a warning + `coordinateAxisOrder: "swapped"`. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Optional bbox parameter restricts rows to a latitude/longitude window. When the spec-correct GeoJSON [lon, lat, alt] reading produces zero matches and at least one row carries a Point geometry, the bbox filter retries once with axes swapped (handles non-conformant servers that store [lat, lon, alt]) and surfaces a warning + `coordinateAxisOrder: "swapped"`. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -206,7 +206,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
-    const datasetStore = getDatasetStore();
+    const bridge = getCanvasBridge();
     const config = getServerConfig();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
@@ -249,7 +249,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       ctx,
     );
 
-    const { fullRows, dataset: datasetMeta } = await maybeSpill({
+    const { fullRows, dataframe } = await maybeSpill({
       firstPage,
       client,
       connection,
@@ -259,7 +259,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       source: 'find_locations',
       loadLimit,
       ctx,
-      store: datasetStore,
+      bridge,
     });
 
     const bbox = normalizeBbox(input.bbox, warnings);
@@ -344,7 +344,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       coordinateAxisOrder,
     };
     if (refinementHint) result.refinementHint = refinementHint;
-    if (datasetMeta) result.dataset = datasetMeta;
+    if (dataframe) result.dataframe = dataframe;
     return result;
   },
 
@@ -356,14 +356,14 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         alias: result.alias,
         returnedCount: result.returnedCount,
         totalCount: result.totalCount,
-        dataset: result.dataset,
+        dataframe: result.dataframe,
       }),
     );
     lines.push(`**Coordinate axis order:** ${result.coordinateAxisOrder}`);
     lines.push('');
     if (result.hasMore) {
       lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataset ? `Full set persisted as dataset \`${result.dataset.datasetId}\`.` : 'Narrow filters or raise loadLimit.'}`,
+        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
       );
       lines.push('');
     }
@@ -418,10 +418,10 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
-    if (result.dataset) {
+    if (result.dataframe) {
       lines.push('');
-      lines.push('## Dataset handle');
-      lines.push(...renderDatasetHandle(result.dataset));
+      lines.push('## Dataframe handle');
+      lines.push(...renderDataframeHandle(result.dataframe));
     }
     if (result.warnings.length > 0) {
       lines.push('');

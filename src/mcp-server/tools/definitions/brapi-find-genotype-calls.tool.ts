@@ -6,8 +6,8 @@
  * (operator policy, default 100k, max 500k) so a single query can't trigger
  * unbounded sequential paginated GETs against the upstream BrAPI server.
  * `loadLimit` bounds the rows returned inline; when the pull exceeds
- * loadLimit, the full collected set spills to DatasetStore for paged
- * follow-up.
+ * loadLimit, the full collected set is materialized as a dataframe
+ * for SQL-based follow-up.
  *
  * @module mcp-server/tools/definitions/brapi-find-genotype-calls.tool
  */
@@ -17,12 +17,12 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
-import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import {
-  type CreateDatasetInput,
-  type DatasetStore,
-  getDatasetStore,
-} from '@/services/dataset-store/index.js';
+  type CanvasBridge,
+  getCanvasBridge,
+  type RegisterDataframeInput,
+} from '@/services/canvas-bridge/index.js';
+import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
@@ -31,11 +31,11 @@ import {
   buildRequestOptions,
   collectPassthroughParts,
   computeDistribution,
-  DatasetHandleSchema,
-  renderDatasetHandle,
+  DataframeHandleSchema,
+  renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
-  toDatasetHandle,
+  toDataframeHandle,
 } from '../shared/find-helpers.js';
 
 const PAGE_SIZE = 10_000;
@@ -123,13 +123,13 @@ const OutputSchema = z.object({
         .describe('Variant set ID → count of calls from that set.'),
     })
     .describe('Value frequency per field across the full collected call set.'),
-  dataset: DatasetHandleSchema.optional().describe(
-    'Dataset handle when the full collected calls exceed loadLimit and were spilled to DatasetStore.',
+  dataframe: DataframeHandleSchema.optional().describe(
+    'Dataframe handle when the full collected calls exceed loadLimit and were materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
   ),
   truncated: z
     .boolean()
     .describe(
-      'True when the deployment-wide pull limit was reached and more calls exist upstream. Narrow the filters and re-pull, or query the spilled dataset/dataframe.',
+      'True when the deployment-wide pull limit was reached and more calls exist upstream. Narrow the filters and re-pull, or query the spilled dataframe.',
     ),
   warnings: z
     .array(z.string())
@@ -141,7 +141,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
   description:
-    'Pull genotype calls for a germplasm × variant set. Filter to bound cost — at minimum, set `variantSetDbId` or `germplasmDbIds`. The upstream pull is capped by deployment policy (default 100,000 rows, max 500,000); when the pull is truncated, narrow the filters or query the spilled dataframe. `loadLimit` (default 200) bounds the rows returned inline; the full collected set spills to a dataset handle for paged follow-up via brapi_manage_dataset.',
+    'Pull genotype calls for a germplasm × variant set. Filter to bound cost — at minimum, set `variantSetDbId` or `germplasmDbIds`. The upstream pull is capped by deployment policy; when the pull is truncated, narrow the filters or query the spilled dataframe. `loadLimit` bounds the rows returned inline; the full collected set is materialized as a dataframe — query it with brapi_dataframe_query (SQL) instead of paging row-by-row.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -186,7 +186,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       .positive()
       .optional()
       .describe(
-        'Cap on rows returned inline in the response (default 200). When the upstream pull exceeds this, the full collected set spills to a dataset handle and only the first `loadLimit` rows return inline. Use brapi_manage_dataset (paging) or brapi_dataframe_query (SQL) to work with the full set.',
+        'Cap on rows returned inline. Omit for the deployment default. When the collected set exceeds this, the full result lands in a dataframe and only the first `loadLimit` rows return inline — query the dataframe with brapi_dataframe_query (SQL) for the rest. Upstream pageSize is fixed for genotype calls, so this knob only affects the inline preview here (no spillover capacity tradeoff).',
       ),
   }),
   output: OutputSchema,
@@ -195,7 +195,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
-    const datasetStore = getDatasetStore();
+    const bridge = getCanvasBridge();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
 
@@ -217,13 +217,13 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       );
     }
 
-    const maxCalls = getServerConfig().genotypeCallsMaxPull;
-    const loadLimit = input.loadLimit ?? 200;
+    const config = getServerConfig();
+    const maxCalls = config.genotypeCallsMaxPull;
+    const loadLimit = input.loadLimit ?? config.loadLimit;
 
     const searchBody = buildSearchBody(input);
     if (
       !searchBody.variantSetDbIds &&
-      !searchBody.variantSetDbId &&
       !searchBody.germplasmDbIds &&
       !searchBody.callSetDbIds &&
       !searchBody.variantDbIds
@@ -252,17 +252,17 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       variantSetDbId: computeDistribution(collected.rows, (r) => asString(r.variantSetDbId)),
     };
 
-    if (collected.rows.length === 0 && hasNamedFilter(searchBody)) {
+    if (collected.rows.length === 0) {
       warnings.push(
         'Upstream returned 0 calls for the requested filters. The variant set or filter combination may not match any data on this server.',
       );
     }
 
     const shouldSpill = collected.rows.length > loadLimit;
-    let datasetMeta: z.infer<typeof DatasetHandleSchema> | undefined;
+    let dataframeHandle: z.infer<typeof DataframeHandleSchema> | undefined;
     if (shouldSpill) {
-      datasetMeta = await spillCalls({
-        store: datasetStore,
+      dataframeHandle = await spillCalls({
+        bridge,
         ctx,
         connection,
         body: searchBody,
@@ -284,7 +284,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       warnings,
       searchBody,
     };
-    if (datasetMeta) result.dataset = datasetMeta;
+    if (dataframeHandle) result.dataframe = dataframeHandle;
     return result;
   },
 
@@ -295,7 +295,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       alias: result.alias,
       returnedCount: result.returnedCount,
       totalCount: result.totalCount,
-      dataset: result.dataset,
+      dataframe: result.dataframe,
     });
     lines.push(
       result.truncated ? `${headerBase} (truncated at deployment pull limit)` : headerBase,
@@ -341,10 +341,10 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
-    if (result.dataset) {
+    if (result.dataframe) {
       lines.push('');
-      lines.push('## Dataset handle');
-      lines.push(...renderDatasetHandle(result.dataset));
+      lines.push('## Dataframe handle');
+      lines.push(...renderDataframeHandle(result.dataframe));
     }
     if (result.warnings.length > 0) {
       lines.push('');
@@ -466,7 +466,7 @@ async function collectCalls(input: CollectInput): Promise<CollectResult> {
     rows.length = input.maxCalls;
     truncated = true;
     input.warnings.push(
-      `Truncated at the deployment pull limit (${input.maxCalls} rows). Narrow the filters and re-pull; the captured slice is preserved in the spilled dataset.`,
+      `Truncated at the deployment pull limit (${input.maxCalls} rows). Narrow the filters and re-pull; the captured slice is preserved in the spilled dataframe.`,
     );
   }
 
@@ -500,36 +500,25 @@ function consumePage(
 
 interface SpillCallsInput {
   body: Record<string, unknown>;
+  bridge: CanvasBridge;
   connection: RegisteredServer;
   ctx: Context;
   maxRows: number;
   rows: z.infer<typeof CallRowSchema>[];
-  store: DatasetStore;
   truncated: boolean;
 }
 
-async function spillCalls(input: SpillCallsInput): Promise<z.infer<typeof DatasetHandleSchema>> {
-  const createInput: CreateDatasetInput = {
+async function spillCalls(input: SpillCallsInput): Promise<z.infer<typeof DataframeHandleSchema>> {
+  const registerInput: RegisterDataframeInput = {
     source: 'find_genotype_calls',
     baseUrl: input.connection.baseUrl,
     query: input.body,
     rows: input.rows as Record<string, unknown>[],
   };
   if (input.truncated) {
-    createInput.truncated = true;
-    createInput.maxRows = input.maxRows;
+    registerInput.truncated = true;
+    registerInput.maxRows = input.maxRows;
   }
-  const metadata = await input.store.create(input.ctx, createInput);
-  return toDatasetHandle(metadata);
-}
-
-function hasNamedFilter(body: Record<string, unknown>): boolean {
-  const isNonEmptyArray = (v: unknown) => Array.isArray(v) && v.length > 0;
-  return (
-    typeof body.variantSetDbId === 'string' ||
-    isNonEmptyArray(body.variantSetDbIds) ||
-    isNonEmptyArray(body.germplasmDbIds) ||
-    isNonEmptyArray(body.callSetDbIds) ||
-    isNonEmptyArray(body.variantDbIds)
-  );
+  const result = await input.bridge.registerDataframe(input.ctx, registerInput);
+  return toDataframeHandle(result);
 }

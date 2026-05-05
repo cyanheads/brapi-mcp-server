@@ -1,6 +1,6 @@
 /**
  * @fileoverview End-to-end tests for `brapi_find_genotype_calls` — capability
- * gate, sync POST /search/calls happy path, distribution + dataset spillover,
+ * gate, sync POST /search/calls happy path, distribution + dataframe spillover,
  * input validation when no filter is supplied, truncation at the deployment
  * pull limit (BRAPI_GENOTYPE_CALLS_MAX_PULL).
  *
@@ -110,7 +110,7 @@ describe('brapi_find_genotype_calls tool', () => {
     expect(result.searchBody.germplasmDbIds).toEqual(['g-1', 'g-2']);
   });
 
-  it('spills to DatasetStore when collected calls exceed loadLimit', async () => {
+  it('spills to a canvas dataframe when collected calls exceed loadLimit', async () => {
     const ctx = await connect(fetcher);
     const rows = Array.from({ length: 25 }, (_, i) =>
       call({ callSetDbId: `cs-${i + 1}`, variantDbId: `v-${i + 1}` }),
@@ -127,7 +127,7 @@ describe('brapi_find_genotype_calls tool', () => {
 
     expect(result.totalCount).toBe(25);
     expect(result.returnedCount).toBe(10);
-    expect(result.dataset?.rowCount).toBe(25);
+    expect(result.dataframe?.rowCount).toBe(25);
   });
 
   it('throws ValidationError when the active dialect disables /search/calls', async () => {

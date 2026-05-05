@@ -2,11 +2,13 @@
  * @fileoverview Shared test harness for tool-level integration tests. Wires
  * every service on the real implementations with a dependency-injected
  * fetcher so handlers can be exercised end-to-end against scripted
- * responses.
+ * responses. Canvas is wired with an in-memory `FakeDataCanvas` so the
+ * dataframe spillover path runs without pulling in DuckDB.
  *
  * @module tests/tools/_tool-test-helpers
  */
 
+import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import type { Fetcher } from '@/services/brapi-client/index.js';
@@ -20,12 +22,12 @@ import {
   initCapabilityRegistry,
   resetCapabilityRegistry,
 } from '@/services/capability-registry/index.js';
-import { initDatasetStore, resetDatasetStore } from '@/services/dataset-store/index.js';
 import {
   initReferenceDataCache,
   resetReferenceDataCache,
 } from '@/services/reference-data-cache/index.js';
 import { initServerRegistry, resetServerRegistry } from '@/services/server-registry/index.js';
+import { FakeDataCanvas } from '../services/_fake-canvas.js';
 
 export const BASE_URL = 'https://brapi.example.org/brapi/v2';
 
@@ -44,7 +46,7 @@ export const TEST_CONFIG: ServerConfig = {
   allowPrivateIps: false,
   enableWrites: false,
   genotypeCallsMaxPull: 100_000,
-  canvasEnabled: false,
+  canvasDropEnabled: false,
   canvasMaxRows: 10_000,
   canvasQueryTimeoutMs: 30_000,
 };
@@ -71,10 +73,9 @@ export function initTestServices(config: ServerConfig = TEST_CONFIG): MockFetche
   initCapabilityRegistry(config);
   initBrapiDialectRegistry();
   initReferenceDataCache(config);
-  // Canvas off by default in tests; the bridge is wired but not enabled, so
-  // DatasetStore hook calls cleanly no-op without needing real DuckDB.
-  const canvasBridge = initCanvasBridge(undefined, config);
-  initDatasetStore(config, canvasBridge);
+  // Canvas is mandatory at runtime — wire the in-memory fake here so the
+  // spillover path runs without pulling in real DuckDB.
+  initCanvasBridge(new FakeDataCanvas() as unknown as DataCanvas, config);
   initServerRegistry(config);
   return fetcher;
 }
@@ -84,7 +85,6 @@ export function resetTestServices(): void {
   resetCapabilityRegistry();
   resetBrapiDialectRegistry();
   resetReferenceDataCache();
-  resetDatasetStore();
   resetServerRegistry();
   resetCanvasBridge();
 }

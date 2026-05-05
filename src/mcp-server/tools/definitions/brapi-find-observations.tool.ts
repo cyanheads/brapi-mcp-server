@@ -2,8 +2,8 @@
  * @fileoverview `brapi_find_observations` — pull observation records filtered
  * by study, germplasm, variable, season, or observation unit. Matches the
  * find_* pattern: paged single pull capped at loadLimit, distributions across
- * variable/study/germplasm/level, dataset spillover when the upstream total
- * exceeds loadLimit.
+ * variable/study/germplasm/level, dataframe spillover when the upstream
+ * total exceeds loadLimit.
  *
  * @module mcp-server/tools/definitions/brapi-find-observations.tool
  */
@@ -17,8 +17,8 @@ import {
   isDialectAllDropped,
 } from '@/services/brapi-client/index.js';
 import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { getDatasetStore } from '@/services/dataset-store/index.js';
 import {
   DEFAULT_ALIAS,
   getServerRegistry,
@@ -34,7 +34,7 @@ import {
   collectPassthroughParts,
   companionRequestOptions,
   computeDistribution,
-  DatasetHandleSchema,
+  DataframeHandleSchema,
   ExtraFiltersInput,
   extractRows,
   type FindRoute,
@@ -45,7 +45,7 @@ import {
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
-  renderDatasetHandle,
+  renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
   resolveFindRoute,
@@ -143,8 +143,8 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe('Suggested next-step query refinement when the result set is large.'),
-  dataset: DatasetHandleSchema.optional().describe(
-    'Dataset handle when the full result set was persisted to DatasetStore.',
+  dataframe: DataframeHandleSchema.optional().describe(
+    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
   ),
   warnings: z
     .array(z.string())
@@ -195,7 +195,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindObservations = tool('brapi_find_observations', {
   description:
-    'Pull observation records filtered by study, germplasm, variable, season, or observation unit. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Pull observation records filtered by study, germplasm, variable, season, or observation unit. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -231,7 +231,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
-    const datasetStore = getDatasetStore();
+    const bridge = getCanvasBridge();
     const config = getServerConfig();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
@@ -334,8 +334,8 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     }
     firstPage ??= await loadObservations(loadLimit);
 
-    const { fullRows, dataset: datasetMeta } = bulkPullSkipped
-      ? { fullRows: firstPage.rows, dataset: undefined }
+    const { fullRows, dataframe } = bulkPullSkipped
+      ? { fullRows: firstPage.rows, dataframe: undefined }
       : await maybeSpill({
           firstPage,
           client,
@@ -346,7 +346,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
           source: 'find_observations',
           loadLimit,
           ctx,
-          store: datasetStore,
+          bridge,
           warnings,
           spillRequestOptions: {
             timeoutMs: config.companionTimeoutMs,
@@ -415,7 +415,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
-    if (datasetMeta) result.dataset = datasetMeta;
+    if (dataframe) result.dataframe = dataframe;
     return result;
   },
 
@@ -427,13 +427,13 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         alias: result.alias,
         returnedCount: result.returnedCount,
         totalCount: result.totalCount,
-        dataset: result.dataset,
+        dataframe: result.dataframe,
       }),
     );
     lines.push('');
     if (result.hasMore) {
       lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataset ? `Full set persisted as dataset \`${result.dataset.datasetId}\`.` : 'Narrow filters or raise loadLimit.'}`,
+        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
       );
       lines.push('');
     }
@@ -490,10 +490,10 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
-    if (result.dataset) {
+    if (result.dataframe) {
       lines.push('');
-      lines.push('## Dataset handle');
-      lines.push(...renderDatasetHandle(result.dataset));
+      lines.push('## Dataframe handle');
+      lines.push(...renderDataframeHandle(result.dataframe));
     }
     if (result.warnings.length > 0) {
       lines.push('');

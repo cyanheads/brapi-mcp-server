@@ -51,9 +51,9 @@ export const brapiMetaAnalysis = prompt('brapi_meta_analysis', {
       '3. Record the resulting `observationVariableDbId[]` and the scale `dataType` and `scaleName` for each. Numeric scales can be averaged across studies; categorical scales need a mapping table before pooling.',
       '',
       '## Step 2 — Discover studies that measured the trait on the target germplasm',
-      `1. Call \`brapi_find_observations\` with \`germplasm: ${idsLiteral}\` and \`variables: [<resolved variable DbIds from Step 1>]\`${aliasArg}, \`loadLimit: 200\`.`,
+      `1. Call \`brapi_find_observations\` with \`germplasm: ${idsLiteral}\` and \`variables: [<resolved variable DbIds from Step 1>]\`${aliasArg}.`,
       '2. If the response warns that an unanchored observation query stalled, do not retry the same germplasm-only shape. Use study anchors when available: re-call `brapi_find_observations` with both `studies: ["<studyDbId>"]` and the target `germplasm` / `variables` filters, one candidate study at a time.',
-      '3. From `distributions.studyName`, capture the distinct studies returning observations. If `hasMore` is true and a `dataset` handle is returned, page through with `brapi_manage_dataset` (mode: `load`) to materialize the full set.',
+      '3. From `distributions.studyName`, capture the distinct studies returning observations. If `hasMore` is true and a `dataframe` handle is returned, work with the full set via `brapi_dataframe_query` — SQL `LIMIT/OFFSET` is the paging idiom; projection (`SELECT col1, col2`) and aggregation (`COUNT`, `GROUP BY`) summarize without materializing every row.',
       '4. For each study, call `brapi_get_study` to capture program, location, season, and trial context — these are the moderators in the meta-analysis.',
       '',
       '## Step 3 — Build the per-observation table',
@@ -107,7 +107,7 @@ export const brapiMetaAnalysis = prompt('brapi_meta_analysis', {
       '7. **Pedigree notes** — Step 7 if you ran it.',
       '8. **Caveats** — missing data rates, dropped observations, sample-size warnings, capability gaps from the server (e.g. ontology endpoint missing).',
       '',
-      'Reproducibility is non-negotiable: cite the dataset handle returned by every `find_*` call so a future run can reproduce the same upstream snapshot.',
+      'Reproducibility is non-negotiable: cite the dataframe handle (or the full filter map) returned by every `find_*` call so a future run can reproduce the same upstream snapshot.',
     ].join('\n');
 
     return [

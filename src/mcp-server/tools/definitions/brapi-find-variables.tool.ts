@@ -13,8 +13,8 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { getDatasetStore } from '@/services/dataset-store/index.js';
 import {
   getOntologyResolver,
   type OntologyCandidate,
@@ -29,14 +29,14 @@ import {
   checkFilterMatchRates,
   collectPassthroughParts,
   computeDistribution,
-  DatasetHandleSchema,
+  DataframeHandleSchema,
   ExtraFiltersInput,
   LoadLimitInput,
   loadInitialFindPage,
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
-  renderDatasetHandle,
+  renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
   resolveFindRoute,
@@ -151,8 +151,8 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe('Suggested next-step query refinement when the result set is large.'),
-  dataset: DatasetHandleSchema.optional().describe(
-    'Dataset handle when the full result set was persisted to DatasetStore.',
+  dataframe: DataframeHandleSchema.optional().describe(
+    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
   ),
   warnings: z
     .array(z.string())
@@ -188,7 +188,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindVariables = tool('brapi_find_variables', {
   description:
-    'Find observation variables (traits) by name, trait class, ontology term, or free-text query. Free-text queries are ranked against the returned set and may resolve to ontology URIs when the server advertises them. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Find observation variables (traits) by name, trait class, ontology term, or free-text query. Free-text queries are ranked against the returned set and may resolve to ontology URIs when the server advertises them. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -217,7 +217,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       .string()
       .optional()
       .describe(
-        'Free-text query. Ranks the **full upstream union** (the spilled dataset when one is produced, otherwise the first page) via the ontology resolver, then fills the in-context window up to loadLimit with matches first and unmatched rows for context. Use exact filters (`variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`) to actually narrow the upstream pull. Differs from `brapi_find_germplasm.text`, which drops unmatched rows.',
+        'Free-text query. Ranks the **full upstream union** (the spilled dataframe when one is produced, otherwise the first page) via the ontology resolver, then fills the in-context window up to loadLimit with matches first and unmatched rows for context. Use exact filters (`variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`) to actually narrow the upstream pull. Differs from `brapi_find_germplasm.text`, which drops unmatched rows.',
       ),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
@@ -228,7 +228,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
-    const datasetStore = getDatasetStore();
+    const bridge = getCanvasBridge();
     const resolver = getOntologyResolver();
     const config = getServerConfig();
 
@@ -288,7 +288,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       ctx,
     );
 
-    const { fullRows, dataset: datasetMeta } = await maybeSpill({
+    const { fullRows, dataframe } = await maybeSpill({
       firstPage,
       client,
       connection,
@@ -298,7 +298,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       source: 'find_variables',
       loadLimit,
       ctx,
-      store: datasetStore,
+      bridge,
     });
 
     let rankedResults = firstPage.rows;
@@ -387,8 +387,8 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     // and the bloat is pure noise in the in-context view. Objects that
     // carry any non-empty field are kept untouched — including their null
     // siblings — so no information is dropped, only empty containers.
-    // Applied to in-context rows only; the spilled dataset and canvas
-    // dataframe keep the raw upstream shape for research traceability.
+    // Applied to in-context rows only; the dataframe keeps the raw
+    // upstream shape for research traceability.
     const inContextRows = rankedResults.map(pruneEmptyNestedObjects);
 
     const result: Output = {
@@ -403,7 +403,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
-    if (datasetMeta) result.dataset = datasetMeta;
+    if (dataframe) result.dataframe = dataframe;
     return result;
   },
 
@@ -415,13 +415,13 @@ export const brapiFindVariables = tool('brapi_find_variables', {
         alias: result.alias,
         returnedCount: result.returnedCount,
         totalCount: result.totalCount,
-        dataset: result.dataset,
+        dataframe: result.dataframe,
       }),
     );
     lines.push('');
     if (result.hasMore) {
       lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataset ? `Full set persisted as dataset \`${result.dataset.datasetId}\`.` : 'Narrow filters or raise loadLimit.'}`,
+        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
       );
       lines.push('');
     }
@@ -479,10 +479,10 @@ export const brapiFindVariables = tool('brapi_find_variables', {
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
-    if (result.dataset) {
+    if (result.dataframe) {
       lines.push('');
-      lines.push('## Dataset handle');
-      lines.push(...renderDatasetHandle(result.dataset));
+      lines.push('## Dataframe handle');
+      lines.push(...renderDataframeHandle(result.dataframe));
     }
     if (result.warnings.length > 0) {
       lines.push('');

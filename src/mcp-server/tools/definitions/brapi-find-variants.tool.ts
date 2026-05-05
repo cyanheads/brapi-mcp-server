@@ -1,7 +1,7 @@
 /**
  * @fileoverview `brapi_find_variants` — find variant records by variant set,
  * reference, or genomic region. Standard find_* pattern — distributions +
- * dataset spillover. Note: the BrAPI filter catalog uses `start` / `end` as
+ * dataframe spillover. Note: the BrAPI filter catalog uses `start` / `end` as
  * single scalars (1-based inclusive / exclusive) per the spec.
  *
  * @module mcp-server/tools/definitions/brapi-find-variants.tool
@@ -12,8 +12,8 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
@@ -22,14 +22,14 @@ import {
   buildRefinementHint,
   collectPassthroughParts,
   computeDistribution,
-  DatasetHandleSchema,
+  DataframeHandleSchema,
   ExtraFiltersInput,
   LoadLimitInput,
   loadInitialFindPage,
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
-  renderDatasetHandle,
+  renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
   resolveFindRoute,
@@ -107,8 +107,8 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe('Suggested next-step query refinement when the result set is large.'),
-  dataset: DatasetHandleSchema.optional().describe(
-    'Dataset handle when the full result set was persisted to DatasetStore.',
+  dataframe: DataframeHandleSchema.optional().describe(
+    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
   ),
   warnings: z
     .array(z.string())
@@ -137,7 +137,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindVariants = tool('brapi_find_variants', {
   description:
-    'Find variant records by variant set, reference sequence, or genomic region (start/end, 1-based inclusive / exclusive). Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Find variant records by variant set, reference sequence, or genomic region (start/end, 1-based inclusive / exclusive). When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -165,7 +165,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
-    const datasetStore = getDatasetStore();
+    const bridge = getCanvasBridge();
     const config = getServerConfig();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
@@ -212,7 +212,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       ctx,
     );
 
-    const { fullRows, dataset: datasetMeta } = await maybeSpill({
+    const { fullRows, dataframe } = await maybeSpill({
       firstPage,
       client,
       connection,
@@ -222,7 +222,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       source: 'find_variants',
       loadLimit,
       ctx,
-      store: datasetStore,
+      bridge,
     });
 
     const distributions = {
@@ -247,7 +247,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
-    if (datasetMeta) result.dataset = datasetMeta;
+    if (dataframe) result.dataframe = dataframe;
     return result;
   },
 
@@ -259,13 +259,13 @@ export const brapiFindVariants = tool('brapi_find_variants', {
         alias: result.alias,
         returnedCount: result.returnedCount,
         totalCount: result.totalCount,
-        dataset: result.dataset,
+        dataframe: result.dataframe,
       }),
     );
     lines.push('');
     if (result.hasMore) {
       lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataset ? `Full set persisted as dataset \`${result.dataset.datasetId}\`.` : 'Narrow filters or raise loadLimit.'}`,
+        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
       );
       lines.push('');
     }
@@ -317,10 +317,10 @@ export const brapiFindVariants = tool('brapi_find_variants', {
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
-    if (result.dataset) {
+    if (result.dataframe) {
       lines.push('');
-      lines.push('## Dataset handle');
-      lines.push(...renderDatasetHandle(result.dataset));
+      lines.push('## Dataframe handle');
+      lines.push(...renderDataframeHandle(result.dataframe));
     }
     if (result.warnings.length > 0) {
       lines.push('');

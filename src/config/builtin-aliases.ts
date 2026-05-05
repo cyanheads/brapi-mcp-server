@@ -1,7 +1,7 @@
 /**
  * @fileoverview Built-in known-server registry. Curated list of public BrAPI v2
  * endpoints that ship as default connection aliases — operators can call
- * `brapi_connect({ alias: 'cassava' })` (or any other entry) without setting
+ * `brapi_connect({ alias: 'bti-cassava' })` (or any other entry) without setting
  * `BRAPI_<ALIAS>_BASE_URL`. Each entry carries CC-BY attribution metadata so
  * the orientation envelope can surface license + citation alongside the data.
  *

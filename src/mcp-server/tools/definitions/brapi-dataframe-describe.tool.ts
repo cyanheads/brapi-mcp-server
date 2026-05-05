@@ -1,15 +1,18 @@
 /**
  * @fileoverview `brapi_dataframe_describe` — list dataframes (or describe one)
- * with column schema, row count, and originating-dataset provenance.
- * Auto-registered dataset dataframes (`ds_<datasetId>`) carry full source
- * metadata (originating tool, baseUrl, query, expiry); user-derived dataframes
+ * with column schema, row count, and originating-source provenance.
+ * Auto-registered spillover dataframes (`df_<uuid>`) carry full provenance
+ * (originating tool, baseUrl, query, expiry); user-derived dataframes
  * created via `brapi_dataframe_query({ registerAs })` only show structural info.
+ *
+ * Start here after a find_* tool spillover — the dataframe handle on the
+ * find result and `brapi_dataframe_describe` together orient you to schema +
+ * provenance before you write the first SQL query.
  *
  * @module mcp-server/tools/definitions/brapi-dataframe-describe.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 
 const ColumnSchema = z.object({
@@ -19,16 +22,13 @@ const ColumnSchema = z.object({
 });
 
 const ProvenanceSchema = z.object({
-  datasetId: z
+  source: z
     .string()
-    .describe(
-      'Originating dataset ID — pass to brapi_manage_dataset to operate on the underlying rows.',
-    ),
-  source: z.string().describe('Tool/operation that produced the dataset (e.g. find_observations).'),
-  baseUrl: z.string().describe('BrAPI base URL the dataset was pulled from.'),
+    .describe('Tool/operation that produced the dataframe (e.g. find_observations).'),
+  baseUrl: z.string().describe('BrAPI base URL the rows were pulled from.'),
   query: z.unknown().describe('Original filter map / search body.'),
-  createdAt: z.string().describe('ISO 8601 dataset creation time.'),
-  expiresAt: z.string().describe('ISO 8601 expiry — when the dataframe will be evicted.'),
+  createdAt: z.string().describe('ISO 8601 dataframe creation time.'),
+  expiresAt: z.string().describe('ISO 8601 expiry — when the dataframe metadata will be evicted.'),
 });
 
 const DescribedTableSchema = z.object({
@@ -39,7 +39,7 @@ const DescribedTableSchema = z.object({
     .describe('Schema in declaration order.'),
   approxSizeBytes: z.number().int().nonnegative().optional().describe('Approximate size in bytes.'),
   provenance: ProvenanceSchema.optional().describe(
-    'Originating dataset provenance — present only for auto-registered dataframes (`ds_*`).',
+    'Originating-source provenance — present only for auto-registered dataframes (`df_*`).',
   ),
 });
 
@@ -59,29 +59,13 @@ const InputSchema = z.object({
 
 export const brapiDataframeDescribe = tool('brapi_dataframe_describe', {
   description:
-    'List dataframes (or describe one) with columns, row counts, and originating-dataset provenance. Use this to discover what dataframes are available before writing a brapi_dataframe_query.',
+    'Start here after a spillover. Lists dataframes (or describes one) with columns, row counts, and originating-source provenance. The schema and provenance answer "what tool produced this and what filters were used" before you write the first brapi_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
-  errors: [
-    {
-      reason: 'dataframe_disabled',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'Dataframe surface is not enabled on this deployment',
-      recovery:
-        'Use brapi_manage_dataset (mode=list) to enumerate datasets directly — the dataframe surface is gated off here.',
-    },
-  ] as const,
   input: InputSchema,
   output: OutputSchema,
 
   async handler(input, ctx) {
     const bridge = getCanvasBridge();
-    if (!bridge.isEnabled()) {
-      throw ctx.fail(
-        'dataframe_disabled',
-        'brapi_dataframe_describe is unavailable — dataframes are not enabled on this deployment.',
-        { ...ctx.recoveryFor('dataframe_disabled') },
-      );
-    }
     const describeOpts: { tableName?: string } = {};
     if (input.dataframe !== undefined) describeOpts.tableName = input.dataframe;
     const tables = await bridge.describe(ctx, describeOpts);
@@ -97,7 +81,7 @@ function renderDescribe(tables: z.infer<typeof DescribedTableSchema>[]): string 
   if (tables.length === 0) {
     lines.push('');
     lines.push(
-      '_No dataframes. Run a find_* tool that spills to a dataset, or use brapi_dataframe_query with `registerAs` to materialize one._',
+      '_No dataframes. Run a find_* tool whose result exceeds loadLimit, or use brapi_dataframe_query with `registerAs` to materialize one._',
     );
     return lines.join('\n');
   }
@@ -115,7 +99,6 @@ function renderDescribe(tables: z.infer<typeof DescribedTableSchema>[]): string 
     }
     if (table.provenance) {
       lines.push('- provenance:');
-      lines.push(`  - datasetId: \`${table.provenance.datasetId}\``);
       lines.push(`  - source: ${table.provenance.source}`);
       lines.push(`  - baseUrl: ${table.provenance.baseUrl}`);
       lines.push(`  - createdAt: ${table.provenance.createdAt}`);

@@ -2,7 +2,7 @@
  * @fileoverview `brapi_find_germplasm` — search germplasm by name, synonym,
  * accession, attribute, or free text. Matches BrAPI's registered-synonym
  * semantics. Returns distributions for crop / genus / species / collection
- * and spills to DatasetStore when the upstream total exceeds loadLimit.
+ * and spills to a dataframe when the upstream total exceeds loadLimit.
  *
  * @module mcp-server/tools/definitions/brapi-find-germplasm.tool
  */
@@ -12,8 +12,8 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { getDatasetStore } from '@/services/dataset-store/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
@@ -23,7 +23,7 @@ import {
   checkFilterMatchRates,
   collectPassthroughParts,
   computeDistribution,
-  DatasetHandleSchema,
+  DataframeHandleSchema,
   dedupSynonymsByIdentity,
   ExtraFiltersInput,
   LoadLimitInput,
@@ -32,7 +32,7 @@ import {
   maybeSpill,
   mergeFilters,
   renderAppliedFilters,
-  renderDatasetHandle,
+  renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
   resolveFindRoute,
@@ -115,8 +115,8 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe('Suggested next-step query refinement when the result set is large.'),
-  dataset: DatasetHandleSchema.optional().describe(
-    'Dataset handle when the full result set was persisted to DatasetStore.',
+  dataframe: DataframeHandleSchema.optional().describe(
+    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
   ),
   warnings: z
     .array(z.string())
@@ -152,7 +152,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   description:
-    'Find germplasm by name, synonym, accession number, PUI, crop, or free-text query. Matches across registered synonyms. Returns a dataset handle when the upstream total exceeds loadLimit.',
+    'Find germplasm by name, synonym, accession number, PUI, crop, or free-text query. Matches across registered synonyms. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL) instead of paging row-by-row.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -192,7 +192,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
-    const datasetStore = getDatasetStore();
+    const bridge = getCanvasBridge();
     const config = getServerConfig();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
@@ -268,15 +268,15 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       source: 'find_germplasm',
       loadLimit,
       ctx,
-      store: datasetStore,
+      bridge,
       // CassavaBase repeats every synonym entry 11× per record. Dedup at the
-      // spillover layer so the in-context view, the persisted dataset, and
-      // the canvas dataframe all see the cleaned shape consistently.
+      // spillover layer so the in-context view and the dataframe see
+      // the cleaned shape consistently.
       rowMapper: dedupSynonymsByIdentity,
     };
     if (text) spillInput.rowFilter = (row) => rowMatchesText(row, text);
 
-    const { fullRows, dataset: datasetMeta } = await maybeSpill(spillInput);
+    const { fullRows, dataframe } = await maybeSpill(spillInput);
 
     const distributions = {
       commonCropName: computeDistribution(fullRows, (r) => asString(r.commonCropName)),
@@ -338,9 +338,9 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
         warnings.push(
           `Free-text '${text}' matched 0 of ${firstPage.rows.length} returned rows. Use exact filters (\`names\`, \`accessionNumbers\`, \`germplasmDbIds\`) for direct lookup, or check spelling.`,
         );
-      } else if (datasetMeta) {
+      } else if (dataframe) {
         warnings.push(
-          `Free-text '${text}' filtered the dataset to ${datasetMeta.rowCount} matched row(s) across the upstream union.`,
+          `Free-text '${text}' filtered the dataframe to ${dataframe.rowCount} matched row(s) across the upstream union.`,
         );
       } else if (fullRows.length < firstPage.rows.length) {
         warnings.push(
@@ -362,7 +362,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
     if (refinementHint) result.refinementHint = refinementHint;
-    if (datasetMeta) result.dataset = datasetMeta;
+    if (dataframe) result.dataframe = dataframe;
     return result;
   },
 
@@ -374,13 +374,13 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
         alias: result.alias,
         returnedCount: result.returnedCount,
         totalCount: result.totalCount,
-        dataset: result.dataset,
+        dataframe: result.dataframe,
       }),
     );
     lines.push('');
     if (result.hasMore) {
       lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataset ? `Full set persisted as dataset \`${result.dataset.datasetId}\`.` : 'Narrow filters or raise loadLimit.'}`,
+        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
       );
       lines.push('');
     }
@@ -447,10 +447,10 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
-    if (result.dataset) {
+    if (result.dataframe) {
       lines.push('');
-      lines.push('## Dataset handle');
-      lines.push(...renderDatasetHandle(result.dataset));
+      lines.push('## Dataframe handle');
+      lines.push(...renderDataframeHandle(result.dataframe));
     }
     if (result.warnings.length > 0) {
       lines.push('');
