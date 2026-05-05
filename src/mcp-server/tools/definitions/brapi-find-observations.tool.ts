@@ -29,6 +29,7 @@ import {
   applyDialectFiltersOrFail,
   asString,
   type BrapiListResult,
+  buildExtraFilterChecks,
   buildRefinementHint,
   checkFilterMatchRates,
   collectPassthroughParts,
@@ -385,6 +386,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       fkMatchCheck('observationUnits', input.observationUnits, fullRows, 'observationUnitDbId', {
         requireEveryRowMatch: true,
       }),
+      ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;

@@ -21,6 +21,7 @@ import {
   applyDialectFiltersOrFail,
   asString,
   asStringArray,
+  buildExtraFilterChecks,
   buildRefinementHint,
   checkFilterMatchRates,
   collectPassthroughParts,
@@ -115,10 +116,11 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 /** Server-side filter key → user-facing tool param name. Used in format() to
- * render `Applied filters` so the user can correlate what they typed with
- * what got sent upstream. Both plural (BrAPI v2.1 spec) and singular forms
- * are listed because dialect adapters may downcast to singular before the
- * call; the rendered map should still trace back to the user's param. */
+ * render the `Filters sent to server` block so the user can correlate what
+ * they typed with what got sent upstream. Both plural (BrAPI v2.1 spec) and
+ * singular forms are listed because dialect adapters may downcast to
+ * singular before the call; the rendered map should still trace back to the
+ * user's param. */
 const SERVER_TO_USER: Record<string, string> = {
   // Plurals — BrAPI v2.1 spec, used by the `spec` dialect.
   commonCropNames: 'crop',
@@ -259,6 +261,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       fkMatchCheck('locations', input.locations, fullRows, 'locationDbId'),
       fkMatchCheck('programs', input.programs, fullRows, 'programDbId'),
       fkMatchCheck('trials', input.trials, fullRows, 'trialDbId'),
+      ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;

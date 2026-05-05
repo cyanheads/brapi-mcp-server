@@ -170,6 +170,56 @@ describe('brapi_find_studies tool', () => {
     );
   });
 
+  it('warns when an extraFilters key is unhonored by the upstream', async () => {
+    // Repro: agent passes `extraFilters: { locationName: 'Ibadan' }`. The
+    // server doesn't honor it (locationName isn't a valid filter — the spec
+    // key is locationDbIds), returns rows spanning many locations, and the
+    // post-hoc validator must surface the discrepancy as a warning rather
+    // than the trace falsely asserting the filter was applied.
+    const ctx = await connect(fetcher);
+    const rows = [
+      studyRow('s1', { locationName: 'Ibadan' }),
+      studyRow('s2', { locationName: 'Ubiaja' }),
+      studyRow('s3', { locationName: 'Mokwa' }),
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+
+    const result = await brapiFindStudies.handler(
+      brapiFindStudies.input.parse({
+        extraFilters: { locationName: 'Ibadan' },
+      }),
+      ctx,
+    );
+
+    expect(
+      result.warnings.some(
+        (w) =>
+          w.includes("Filter 'extraFilters.locationName'") &&
+          w.includes('returned row(s) carried other values'),
+      ),
+    ).toBe(true);
+  });
+
+  it('warns when an extraFilters key cannot be cross-referenced against rows', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(
+      jsonResponse(envelope({ data: [studyRow('s1')] }, { totalCount: 1 })),
+    );
+
+    const result = await brapiFindStudies.handler(
+      brapiFindStudies.input.parse({
+        extraFilters: { madeUpFilter: 'whatever' },
+      }),
+      ctx,
+    );
+
+    expect(
+      result.warnings.some(
+        (w) => w.includes('Could not verify these extraFilters keys') && w.includes('madeUpFilter'),
+      ),
+    ).toBe(true);
+  });
+
   it('spills to a canvas dataframe when totalCount exceeds loadLimit', async () => {
     const ctx = await connect(fetcher);
     const totalCount = 25; // loadLimit from TEST_CONFIG is 10

@@ -20,6 +20,7 @@ import {
   AliasInput,
   applyDialectFiltersOrFail,
   asString,
+  buildExtraFilterChecks,
   buildRefinementHint,
   type CoordinateAxisOrder,
   checkFilterMatchRates,
@@ -318,6 +319,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         caseInsensitive: true,
         requireEveryRowMatch: true,
       },
+      ...buildExtraFilterChecks(input.extraFilters, filteredFull, warnings),
     ]);
 
     const totalCount = bbox ? filteredFull.length : (firstPage.totalCount ?? firstPage.rows.length);

@@ -19,6 +19,7 @@ import {
   AliasInput,
   applyDialectFiltersOrFail,
   asString,
+  buildExtraFilterChecks,
   buildRefinementHint,
   checkFilterMatchRates,
   collectPassthroughParts,
@@ -252,6 +253,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       },
       fkMatchCheck('studies', input.studies, fullRows, 'studyDbId'),
       fkMatchCheck('observationUnits', input.observationUnits, fullRows, 'observationUnitDbId'),
+      ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;

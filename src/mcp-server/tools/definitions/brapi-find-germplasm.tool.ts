@@ -19,6 +19,7 @@ import {
   AliasInput,
   applyDialectFiltersOrFail,
   asString,
+  buildExtraFilterChecks,
   buildRefinementHint,
   checkFilterMatchRates,
   collectPassthroughParts,
@@ -311,6 +312,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
         distribution: distributions.collection,
         caseInsensitive: true,
       },
+      ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;

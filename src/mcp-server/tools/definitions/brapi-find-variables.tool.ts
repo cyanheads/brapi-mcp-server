@@ -25,6 +25,7 @@ import {
   AliasInput,
   applyDialectFiltersOrFail,
   asString,
+  buildExtraFilterChecks,
   buildRefinementHint,
   checkFilterMatchRates,
   collectPassthroughParts,
@@ -363,6 +364,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
         requestedValues: input.ontologies,
         distribution: distributions.ontologyDbId,
       },
+      ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;

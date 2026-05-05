@@ -317,18 +317,21 @@ export function renderFindHeader(opts: {
 }
 
 /**
- * Render the applied-filters block, optionally translating server-side
- * keys to the user-facing parameter names declared by the tool. Server
- * keys without a user-facing alias (e.g. anything from `extraFilters`) are
- * rendered as-is.
+ * Render the filters-sent-to-server block, optionally translating
+ * server-side keys to the user-facing parameter names declared by the
+ * tool. Server keys without a user-facing alias (e.g. anything from
+ * `extraFilters`) are rendered as-is. The label deliberately says "sent
+ * to server" rather than "applied" — this is the wire-shape payload, not
+ * a verified honor list. Drift between requested and honored values
+ * surfaces in the warnings produced by `checkFilterMatchRates`.
  */
 export function renderAppliedFilters(
   filters: Record<string, unknown>,
   serverToUser: Record<string, string> = {},
 ): string {
   const entries = Object.entries(filters);
-  if (entries.length === 0) return 'Applied filters: `{}`';
-  const lines: string[] = ['Applied filters:'];
+  if (entries.length === 0) return 'Filters sent to server: `{}`';
+  const lines: string[] = ['Filters sent to server:'];
   for (const [serverKey, value] of entries) {
     const userKey = serverToUser[serverKey];
     const label = userKey ? `${userKey} → ${serverKey}` : serverKey;
@@ -1040,6 +1043,74 @@ export function fkMatchCheck(
     distribution: computeDistribution(rows, (r) => asString(r[fieldName])),
     ...options,
   };
+}
+
+/**
+ * Generate `FilterMatchCheck` entries for every key in `extraFilters` that
+ * can be cross-referenced against a top-level column on the returned rows.
+ * Catches the wrong-results class of bug where the agent passes a filter the
+ * upstream silently ignores (e.g. `locationName` on `/studies` — not a valid
+ * filter key, server returns the unfiltered baseline). The named-param
+ * verification path treats requested values as authoritative; this helper
+ * extends that same check across `extraFilters` so the post-hoc validator
+ * runs uniformly regardless of how the filter entered the call.
+ *
+ * Column inference is intentionally narrow — exact match, then a trailing-`s`
+ * strip (`locationDbIds → locationDbId`, `locationNames → locationName`).
+ * Keys that don't resolve to a column produce a single grouped warning
+ * ("could not verify these extraFilters keys: …") so the agent knows the
+ * trace can't speak to whether they were honored.
+ */
+export function buildExtraFilterChecks(
+  extraFilters: Record<string, unknown> | undefined,
+  rows: readonly Record<string, unknown>[],
+  warnings: string[],
+): FilterMatchCheck[] {
+  if (!extraFilters) return [];
+  const checks: FilterMatchCheck[] = [];
+  const unverified: string[] = [];
+  const sample = rows[0];
+  for (const [key, value] of Object.entries(extraFilters)) {
+    if (value == null) continue;
+    const requested = toRequestedValues(value);
+    if (!requested) continue;
+    const field = sample ? inferRowField(key, sample) : undefined;
+    if (!field) {
+      unverified.push(key);
+      continue;
+    }
+    checks.push({
+      paramName: `extraFilters.${key}`,
+      requestedValues: requested,
+      distribution: computeDistribution(rows, (r) => asString(r[field])),
+      caseInsensitive: true,
+      requireEveryRowMatch: true,
+    });
+  }
+  if (unverified.length > 0) {
+    warnings.push(
+      `Could not verify these extraFilters keys against returned rows: ${unverified.map((k) => `'${k}'`).join(', ')}. The server may have silently ignored them — check brapi_describe_filters for the valid filter keys on this endpoint.`,
+    );
+  }
+  return checks;
+}
+
+function toRequestedValues(value: unknown): readonly (string | number | boolean)[] | undefined {
+  const candidates = Array.isArray(value) ? value : [value];
+  const scalars = candidates.filter(
+    (v): v is string | number | boolean =>
+      typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean',
+  );
+  return scalars.length > 0 ? scalars : undefined;
+}
+
+function inferRowField(filterKey: string, sample: Record<string, unknown>): string | undefined {
+  if (filterKey in sample) return filterKey;
+  if (filterKey.endsWith('s')) {
+    const candidate = filterKey.slice(0, -1);
+    if (candidate in sample) return candidate;
+  }
+  return;
 }
 
 export interface RefinementHintOptions {

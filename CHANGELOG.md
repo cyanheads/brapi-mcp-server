@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-05-05
+
+Verify extraFilters honor on every find_* tool and relabel the rendered filters block as `Filters sent to server` so the trace stops implying the upstream applied them.
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-05-05 · ⚠️ Breaking
 
 Consolidate spillover onto canvas-only dataframes — remove brapi_manage_dataset and the brapi://dataset/{id} resource, mandate DuckDB, gate brapi_dataframe_drop opt-in, and return typed columns from brapi_dataframe_query.

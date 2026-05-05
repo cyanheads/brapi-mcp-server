@@ -19,7 +19,9 @@ import {
   AliasInput,
   applyDialectFiltersOrFail,
   asString,
+  buildExtraFilterChecks,
   buildRefinementHint,
+  checkFilterMatchRates,
   collectPassthroughParts,
   computeDistribution,
   DataframeHandleSchema,
@@ -230,6 +232,10 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       referenceName: computeDistribution(fullRows, (r) => asString(r.referenceName)),
       variantSetDbId: computeDistribution(fullRows, (r) => collectVariantSetIds(r)),
     };
+
+    checkFilterMatchRates(warnings, fullRows.length, [
+      ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
+    ]);
 
     const totalCount = firstPage.totalCount ?? firstPage.rows.length;
     const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
