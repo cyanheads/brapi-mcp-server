@@ -61,7 +61,12 @@ describe('brapi_raw_search tool', () => {
 
     const init = fetcher.mock.calls[0]![3] as RequestInit;
     expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body as string)).toEqual({ commonCropNames: ['Cassava'] });
+    // Caller didn't drive paging, so the handler injects pageSize=loadLimit on
+    // the body to align with the spillover walk's pageSize. Original keys are
+    // preserved verbatim alongside it.
+    const body = JSON.parse(init.body as string);
+    expect(body.commonCropNames).toEqual(['Cassava']);
+    expect(typeof body.pageSize).toBe('number');
   });
 
   it('polls when the server returns an async searchResultsDbId', async () => {
@@ -124,5 +129,75 @@ describe('brapi_raw_search tool', () => {
     expect(text).toContain('/search/observations');
     expect(text).toContain('rid-1');
     expect(text).toContain('async');
+  });
+
+  it('spills sync results to a canvas dataframe when totalCount > loadLimit', async () => {
+    const ctx = await connect(fetcher);
+    const totalCount = 15;
+    const allRows = Array.from({ length: totalCount }, (_, i) => ({
+      observationDbId: `o${i + 1}`,
+      value: String(i),
+    }));
+    fetcher.mockImplementation(
+      async (_url: string, _init?: unknown, _signal?: unknown, init?: RequestInit) => {
+        const body = init?.body ? JSON.parse(init.body as string) : {};
+        const page = typeof body.page === 'number' ? body.page : 0;
+        const pageSize = typeof body.pageSize === 'number' ? body.pageSize : 10;
+        return jsonResponse(
+          envelope({ data: allRows.slice(page * pageSize, page * pageSize + pageSize) }, {
+            totalCount,
+          } as unknown as { totalCount: number }),
+        );
+      },
+    );
+    const result = await brapiRawSearch.handler(
+      brapiRawSearch.input.parse({ noun: 'observations', body: {}, loadLimit: 10 }),
+      ctx,
+    );
+    expect(result.kind).toBe('sync');
+    expect(result.dataframe).toBeDefined();
+    expect(result.dataframe?.rowCount).toBe(15);
+    expect(result.dataframe?.tableName).toMatch(/^df_/);
+  });
+
+  it('does not spill when totalCount fits within loadLimit', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(
+      jsonResponse(
+        envelope({ data: [{ observationDbId: 'o-1' }] }, { totalCount: 1 } as unknown as {
+          totalCount: number;
+        }),
+      ),
+    );
+    const result = await brapiRawSearch.handler(
+      brapiRawSearch.input.parse({ noun: 'observations', body: {}, loadLimit: 10 }),
+      ctx,
+    );
+    expect(result.dataframe).toBeUndefined();
+  });
+
+  it('does not spill when the caller drives paging via body.pageSize', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(
+      jsonResponse(
+        envelope({ data: [{ observationDbId: 'o-1' }] }, { totalCount: 9999 } as unknown as {
+          totalCount: number;
+        }),
+      ),
+    );
+    const result = await brapiRawSearch.handler(
+      brapiRawSearch.input.parse({
+        noun: 'observations',
+        body: { pageSize: 5, page: 0 },
+        loadLimit: 10,
+      }),
+      ctx,
+    );
+    expect(result.dataframe).toBeUndefined();
+    // The handler must not have injected pageSize=loadLimit on top of the
+    // caller's choice — it preserves their value verbatim.
+    const init = fetcher.mock.calls[0]![3] as RequestInit;
+    const body = JSON.parse(init.body as string);
+    expect(body.pageSize).toBe(5);
   });
 });

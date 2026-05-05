@@ -1,21 +1,36 @@
 /**
  * @fileoverview `brapi_raw_get` — last-resort passthrough to any BrAPI GET
  * endpoint the goal-shaped tools don't cover (e.g. `/samples`, `/methods`,
- * `/scales`, `/crosses`). Returns the raw upstream envelope, plus a routing
- * nudge when the target endpoint is actually covered by a curated tool.
+ * `/scales`, `/crosses`). Returns the raw upstream envelope plus a routing
+ * nudge when the target endpoint is covered by a curated tool, and spills
+ * to a canvas dataframe when the upstream advertises more rows than fit
+ * in `loadLimit` AND the result is a list shape (`result` array or BrAPI
+ * `result.data` envelope). Spillover is skipped when the caller drives
+ * paging via `params.page` / `params.pageSize` — they're explicitly walking
+ * the result themselves and we don't second-guess.
  *
  * @module mcp-server/tools/definitions/brapi-raw-get.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getServerConfig } from '@/config/server-config.js';
 import {
   type BrapiPagination,
   type BrapiRequestOptions,
   getBrapiClient,
 } from '@/services/brapi-client/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
-import { AliasInput } from '../shared/find-helpers.js';
+import {
+  AliasInput,
+  DataframeHandleSchema,
+  extractListRows,
+  LoadLimitInput,
+  renderDataframeHandle,
+  spillToCanvas,
+  toDataframeHandle,
+} from '../shared/find-helpers.js';
 import { suggestForGet } from '../shared/raw-routing-hints.js';
 
 const PaginationSchema = z
@@ -46,13 +61,16 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe('Emitted when a curated goal-shaped tool covers this endpoint.'),
+  dataframe: DataframeHandleSchema.optional().describe(
+    'Present when the upstream advertised more rows than `loadLimit` AND the result is a list shape. The inline `result` is unchanged; the dataframe carries the full union of pages — query with brapi_dataframe_query.',
+  ),
 });
 
 type Output = z.infer<typeof OutputSchema>;
 
 export const brapiRawGet = tool('brapi_raw_get', {
   description:
-    'Passthrough to any BrAPI GET /{path} endpoint. Returns the raw upstream envelope without enrichment or foreign-key resolution. Emits a `suggestion` field when a curated tool exists for the same data.',
+    'Passthrough to any BrAPI GET /{path} endpoint. Returns the raw upstream envelope without enrichment or foreign-key resolution. Emits a `suggestion` field when a curated tool exists for the same data. Spills to a canvas dataframe when the upstream advertises more rows than `loadLimit` AND the result is a list shape (`result` array or `result.data` envelope); inline `result` is unchanged. Skips spillover when the caller drives paging via `params.page` / `params.pageSize`.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -76,12 +94,15 @@ export const brapiRawGet = tool('brapi_raw_get', {
       )
       .optional()
       .describe('Query parameters to append. Arrays are repeated per BrAPI convention.'),
+    loadLimit: LoadLimitInput,
   }),
   output: OutputSchema,
 
   async handler(input, ctx) {
     const registry = getServerRegistry();
     const client = getBrapiClient();
+    const bridge = getCanvasBridge();
+    const config = getServerConfig();
 
     const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
     // The path is appended to the registered baseUrl; if the caller smuggles a
@@ -93,12 +114,18 @@ export const brapiRawGet = tool('brapi_raw_get', {
       });
     }
     const path = normalizePath(input.path);
+    const loadLimit = input.loadLimit ?? config.loadLimit;
+    // When the caller drives paging themselves, treat the call as a single
+    // explicit page fetch and skip spillover. Otherwise align the first call
+    // with `loadLimit` so the dataframe walk continues at the same pageSize.
+    const userControlsPaging =
+      input.params?.page !== undefined || input.params?.pageSize !== undefined;
+    const params: Record<string, unknown> = { ...(input.params ?? {}) };
+    if (!userControlsPaging) params.pageSize = loadLimit;
 
     const requestOptions: BrapiRequestOptions = {};
     if (connection.resolvedAuth) requestOptions.auth = connection.resolvedAuth;
-    if (input.params) {
-      requestOptions.params = input.params as NonNullable<BrapiRequestOptions['params']>;
-    }
+    requestOptions.params = params as NonNullable<BrapiRequestOptions['params']>;
     const envelope = await client.get<unknown>(connection.baseUrl, path, ctx, requestOptions);
 
     const url = buildDisplayUrl(connection.baseUrl, path, input.params);
@@ -111,6 +138,31 @@ export const brapiRawGet = tool('brapi_raw_get', {
     };
     const suggestion = suggestForGet(path);
     if (suggestion) result.suggestion = suggestion;
+
+    if (!userControlsPaging) {
+      const totalCount = envelope.metadata?.pagination?.totalCount;
+      const rows = extractListRows(envelope.result);
+      if (
+        rows !== null &&
+        rows.length > 0 &&
+        typeof totalCount === 'number' &&
+        totalCount > loadLimit
+      ) {
+        const spill = await spillToCanvas({
+          bridge,
+          client,
+          connection,
+          ctx,
+          firstPage: rows,
+          totalCount,
+          loadLimit,
+          path,
+          filters: (input.params ?? {}) as Record<string, unknown>,
+          source: 'raw_get',
+        });
+        result.dataframe = toDataframeHandle(spill.dataframe);
+      }
+    }
     return result;
   },
 
@@ -129,6 +181,11 @@ export const brapiRawGet = tool('brapi_raw_get', {
     if (result.suggestion) {
       lines.push('');
       lines.push(`**Suggestion:** ${result.suggestion}`);
+    }
+    if (result.dataframe) {
+      lines.push('');
+      lines.push('## Dataframe');
+      lines.push(...renderDataframeHandle(result.dataframe));
     }
     lines.push('');
     lines.push('## Raw result');

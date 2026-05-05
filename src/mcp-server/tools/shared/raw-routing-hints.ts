@@ -15,15 +15,15 @@ const GET_NUDGES: Record<string, string> = {
   studies:
     'This endpoint is also served by `brapi_find_studies` which enriches with program/trial/location FKs and returns distributions in one call.',
   germplasm:
-    'This endpoint is also served by `brapi_find_germplasm` which adds distributions and dataset spillover.',
+    'This endpoint is also served by `brapi_find_germplasm` which adds distributions and dataframe spillover.',
   observations:
-    'This endpoint is also served by `brapi_find_observations` which adds distributions and dataset spillover.',
+    'This endpoint is also served by `brapi_find_observations` which adds distributions and dataframe spillover.',
   variables:
     'This endpoint is also served by `brapi_find_variables` which adds free-text ranking against ontology terms.',
   images:
     'This endpoint is also served by `brapi_find_images`; use `brapi_get_image` to pull bytes inline.',
   variants:
-    'This endpoint is also served by `brapi_find_variants` which handles distributions and dataset spillover.',
+    'This endpoint is also served by `brapi_find_variants` which handles distributions and dataframe spillover.',
   locations:
     'This endpoint is also served by `brapi_find_locations` which adds distributions and optional bounding-box filtering.',
   serverinfo:
@@ -34,12 +34,13 @@ const GET_NUDGES: Record<string, string> = {
 
 const SEARCH_NUDGES: Record<string, string> = {
   studies: 'Consider `brapi_find_studies` — handles async polling + FK resolution automatically.',
-  germplasm: 'Consider `brapi_find_germplasm` — handles distributions + spillover.',
-  observations: 'Consider `brapi_find_observations` — handles spillover and distributions.',
+  germplasm: 'Consider `brapi_find_germplasm` — handles distributions + dataframe spillover.',
+  observations:
+    'Consider `brapi_find_observations` — handles dataframe spillover and distributions.',
   variables:
     'Consider `brapi_find_variables` — ranks results client-side against ontology terms when text is provided.',
   calls:
-    'Consider `brapi_find_genotype_calls` — handles async-search polling, deployment-side pull limit, and dataset spillover automatically.',
+    'Consider `brapi_find_genotype_calls` — handles async-search polling, deployment-side pull limit, and dataframe spillover automatically.',
   images: 'Consider `brapi_find_images`.',
   variants: 'Consider `brapi_find_variants`.',
   locations: 'Consider `brapi_find_locations`.',
