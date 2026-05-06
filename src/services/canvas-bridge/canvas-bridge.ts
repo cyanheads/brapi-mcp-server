@@ -26,7 +26,7 @@ import type {
   RegisterTableResult,
   TableInfo,
 } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type { CanvasTableMeta, DescribedTable } from './types.js';
@@ -187,12 +187,20 @@ export class CanvasBridge {
    * `BRAPI_CANVAS_MAX_ROWS` so a missing/excessive caller value can't bypass
    * the response-size budget. Cancellation flows through `ctx.signal`; the
    * timeout wraps the AbortSignal with a wall-clock cap.
+   *
+   * Pre-gate: rejects SQL that reaches into DuckDB's system catalogs
+   * (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*` metadata
+   * functions). Under shared-tenant deployments the canvas hosts every
+   * caller's dataframes; without this gate, `SELECT * FROM information_schema.tables`
+   * leaks the full df_<uuid> namespace and bypasses brapi_dataframe_describe's
+   * possession-required policy.
    */
   async query(
     ctx: Context,
     sql: string,
     options: { preview?: number; registerAs?: string; rowLimit?: number } = {},
   ): Promise<QueryResult> {
+    assertNoSystemCatalogAccess(sql);
     const instance = await this.getInstance(ctx);
     const cap = this.serverConfig.canvasMaxRows;
     const rowLimit = Math.min(options.rowLimit ?? cap, cap);
@@ -336,6 +344,69 @@ export class CanvasBridge {
  */
 function generateDataframeName(): string {
   return `${DATAFRAME_TABLE_PREFIX}${crypto.randomUUID().replace(/-/g, '_')}`;
+}
+
+/**
+ * Reason string set on `validationError.data.reason` when a query is rejected
+ * for reaching into DuckDB's system catalogs. Exported so the dataframe-query
+ * tool can recognize it alongside the framework's `SQL_GATE_REASONS` and route
+ * it through the typed `sql_rejected` contract.
+ */
+export const SYSTEM_CATALOG_ACCESS_REASON = 'system_catalog_access' as const;
+
+/**
+ * DuckDB metadata views and functions that enumerate the canvas. Catalog
+ * schemas are matched as qualified references (`schema.thing`) so legitimate
+ * column names like `information_schema_id` don't false-positive. DuckDB's
+ * `duckdb_*` introspection functions are matched at the call site (`name(`)
+ * so columns or projected literals carrying the same prefix don't trigger.
+ */
+const SYSTEM_CATALOG_PATTERNS: ReadonlyArray<{ regex: RegExp; label: string }> = [
+  { regex: /\binformation_schema\s*\.\s*\w+/i, label: 'information_schema' },
+  { regex: /\bpg_catalog\s*\.\s*\w+/i, label: 'pg_catalog' },
+  { regex: /\bsqlite_master\b/i, label: 'sqlite_master' },
+  { regex: /\bsqlite_temp_master\b/i, label: 'sqlite_temp_master' },
+  {
+    regex:
+      /\bduckdb_(?:tables|columns|views|databases|schemas|functions|types|secrets|extensions|settings|temporary_files|memory|approx_database_size|optimizers|prepared_statements|sequences|indexes|constraints|keywords|dependencies|log_contexts|logs|temp_files|temp_relations|sql_keywords|lib_versions)\s*\(/i,
+    label: 'duckdb_*',
+  },
+];
+
+/** Strip SQL block and line comments — mirror of the framework gate's helper. */
+function stripSqlComments(sql: string): string {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, '');
+}
+
+/**
+ * Strip standard SQL string literals so values that happen to mention catalog
+ * names (e.g. `WHERE col = 'information_schema.tables'`) don't trigger the
+ * deny. Matches single-quoted strings with `''` escape; mirror of the
+ * framework gate's helper.
+ */
+function stripSqlStringLiterals(sql: string): string {
+  return sql.replace(/'(?:[^']|'')*'/g, "''");
+}
+
+/**
+ * Reject SQL that reaches into DuckDB's system catalogs (information_schema,
+ * pg_catalog, sqlite_master, duckdb_* introspection functions). Possession of
+ * a `df_<uuid>` name is the capability gate for direct queries; system catalogs
+ * would let any caller list every name on the shared canvas, bypassing that
+ * gate. Throws `validationError` with `data.reason = 'system_catalog_access'`
+ * so the dataframe-query tool's contract translator routes it through
+ * `sql_rejected`.
+ */
+function assertNoSystemCatalogAccess(sql: string): void {
+  const stripped = stripSqlStringLiterals(stripSqlComments(sql));
+  for (const { regex, label } of SYSTEM_CATALOG_PATTERNS) {
+    if (regex.test(stripped)) {
+      throw validationError(
+        `Canvas query references a system catalog (${label}). System tables and metadata views are not accessible — use brapi_dataframe_describe with a specific dataframe name to inspect schema.`,
+        { reason: SYSTEM_CATALOG_ACCESS_REASON, catalog: label },
+      );
+    }
+  }
 }
 
 function tableMetaKey(tableName: string): string {

@@ -11,7 +11,7 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
-const ServerConfigSchema = z.object({
+export const ServerConfigSchema = z.object({
   defaultBaseUrl: z
     .string()
     .url()

@@ -31,24 +31,48 @@ import {
   type SqlGateReason,
 } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { type CanvasBridge, getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import {
+  type CanvasBridge,
+  getCanvasBridge,
+  SYSTEM_CATALOG_ACCESS_REASON,
+} from '@/services/canvas-bridge/index.js';
 
 /**
- * Single source of truth for the SQL gate reason strings — re-exported from
- * the framework's `sqlGate` module. When the bridge's `query()` rethrows a
- * gate `validationError`, the handler translates it into the typed
- * `sql_rejected` contract reason while preserving the granular gate reason
- * on `data.gateReason`.
+ * Recognized gate reasons spanning the framework's SQL gate plus the
+ * server-local system-catalog deny ({@link SYSTEM_CATALOG_ACCESS_REASON}).
+ * When `bridge.query()` rethrows a `validationError`, the handler translates
+ * it into the typed `sql_rejected` contract reason while preserving the
+ * granular gate reason on `data.gateReason`.
  */
-const KNOWN_GATE_REASONS: ReadonlySet<SqlGateReason> = new Set(Object.values(SQL_GATE_REASONS));
+type LocalGateReason = SqlGateReason | typeof SYSTEM_CATALOG_ACCESS_REASON;
+const KNOWN_GATE_REASONS: ReadonlySet<LocalGateReason> = new Set<LocalGateReason>([
+  ...Object.values(SQL_GATE_REASONS),
+  SYSTEM_CATALOG_ACCESS_REASON,
+]);
 
-function extractSqlGateReason(err: unknown): SqlGateReason | undefined {
+function extractSqlGateReason(err: unknown): LocalGateReason | undefined {
   if (!(err instanceof McpError)) return;
   if (err.code !== JsonRpcErrorCode.ValidationError) return;
   const reason = (err.data as { reason?: unknown } | undefined)?.reason;
-  return typeof reason === 'string' && KNOWN_GATE_REASONS.has(reason as SqlGateReason)
-    ? (reason as SqlGateReason)
+  return typeof reason === 'string' && (KNOWN_GATE_REASONS as ReadonlySet<string>).has(reason)
+    ? (reason as LocalGateReason)
     : undefined;
+}
+
+/**
+ * Forward the gate's structured context (e.g. `catalog` for system_catalog_access,
+ * `operators` for plan_operator_not_allowed, `statementType` for non_select_statement)
+ * so structured-only consumers see which specific element matched without parsing
+ * the message text. `reason` becomes `gateReason` upstream; `recovery` is
+ * overridden by the contract recovery hint.
+ */
+function extractGateContext(err: unknown): Record<string, unknown> {
+  if (!(err instanceof McpError) || err.data === null || typeof err.data !== 'object') return {};
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(err.data)) {
+    if (k !== 'reason' && k !== 'recovery') out[k] = v;
+  }
+  return out;
 }
 
 const InputSchema = z.object({
@@ -123,7 +147,7 @@ const OutputSchema = z.object({
 
 export const brapiDataframeQuery = tool('brapi_dataframe_query', {
   description:
-    'Run SQL across in-memory dataframes. Dataframes auto-populate when find_* tools spill (named `df_<uuid>`); list them via brapi_dataframe_describe. SELECT only — writes/DDL/COPY/PRAGMA/ATTACH/file-reads are rejected. Use SQL as the paging idiom: `LIMIT/OFFSET` to walk results, projection to trim columns, aggregation to summarize. Use `registerAs` to chain — the result lands as a new dataframe.',
+    'Run SQL across in-memory dataframes. Dataframes auto-populate when find_* tools spill (named `df_<uuid>`) — the dataframe name appears inline on every find_* response that spilled (`result.dataframe.tableName`), so the typical flow is find_* → read the name → query here. Use brapi_dataframe_describe to inspect schema and provenance for a known name. SELECT only — writes/DDL/COPY/PRAGMA/ATTACH/file-reads are rejected. Use SQL as the paging idiom: `LIMIT/OFFSET` to walk results, projection to trim columns, aggregation to summarize. Use `registerAs` to chain — the result lands as a new dataframe.',
   annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
   errors: [
     {
@@ -157,7 +181,7 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
       throw ctx.fail(
         'sql_rejected',
         message,
-        { gateReason, ...ctx.recoveryFor('sql_rejected') },
+        { gateReason, ...extractGateContext(err), ...ctx.recoveryFor('sql_rejected') },
         { cause: err },
       );
     }

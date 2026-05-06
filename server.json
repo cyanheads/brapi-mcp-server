@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/brapi-mcp-server",
-  "description": "BrAPI v2.1 MCP server — studies, germplasm, observations, genotypes, images, and pedigrees.",
+  "description": "Collaborative BrAPI v2.1 MCP workspace — studies, germplasm, genotypes across Breedbase, T3, more.",
   "repository": {
     "url": "https://github.com/cyanheads/brapi-mcp-server",
     "source": "github"
   },
-  "version": "0.5.1",
+  "version": "0.5.2",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/brapi-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.5.1",
+      "version": "0.5.2",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:stdio" }
@@ -49,7 +49,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/brapi-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.5.1",
+      "version": "0.5.2",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:http" }

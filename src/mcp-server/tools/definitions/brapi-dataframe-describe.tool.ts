@@ -13,6 +13,8 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { config } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 
 const ColumnSchema = z.object({
@@ -59,12 +61,30 @@ const InputSchema = z.object({
 
 export const brapiDataframeDescribe = tool('brapi_dataframe_describe', {
   description:
-    'Start here after a spillover. Lists dataframes (or describes one) with columns, row counts, and originating-source provenance. The schema and provenance answer "what tool produced this and what filters were used" before you write the first brapi_dataframe_query.',
+    'Start here after a spillover. Lists dataframes (or describes one) with columns, row counts, and originating-source provenance. The dataframe name appears inline on every find_* response that spilled (`result.dataframe.tableName`) — pass it as `dataframe` to inspect schema and provenance before writing the first brapi_dataframe_query. Listing without a name is gated under shared-tenant HTTP (`MCP_AUTH_MODE=none`); pass a known name instead.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  errors: [
+    {
+      reason: 'list_all_disabled_on_shared_http',
+      code: JsonRpcErrorCode.Forbidden,
+      when: "Running under MCP_AUTH_MODE=none on HTTP transport — listing every dataframe would expose other concurrent clients' workspaces, since all callers resolve to one shared tenant.",
+      recovery:
+        'Pass `dataframe` with a specific name — either from a prior find_* spillover result (`result.dataframe.tableName`) or one you registered via `brapi_dataframe_query` with `registerAs`. Listing all dataframes is not available.',
+    },
+  ] as const,
   input: InputSchema,
   output: OutputSchema,
 
   async handler(input, ctx) {
+    if (
+      input.dataframe === undefined &&
+      ctx.tenantId === 'default' &&
+      config.mcpTransportType === 'http'
+    ) {
+      throw ctx.fail('list_all_disabled_on_shared_http', undefined, {
+        ...ctx.recoveryFor('list_all_disabled_on_shared_http'),
+      });
+    }
     const bridge = getCanvasBridge();
     const describeOpts: { tableName?: string } = {};
     if (input.dataframe !== undefined) describeOpts.tableName = input.dataframe;

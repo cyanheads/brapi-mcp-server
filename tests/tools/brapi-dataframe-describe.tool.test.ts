@@ -7,8 +7,10 @@
  */
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { resetConfig } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { brapiDataframeDescribe } from '@/mcp-server/tools/definitions/brapi-dataframe-describe.tool.js';
 import { initCanvasBridge, resetCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { FakeDataCanvas } from '../services/_fake-canvas.js';
@@ -17,6 +19,8 @@ import { TEST_CONFIG } from './_tool-test-helpers.js';
 describe('brapi_dataframe_describe', () => {
   afterEach(() => {
     resetCanvasBridge();
+    vi.unstubAllEnvs();
+    resetConfig();
   });
 
   it('returns an empty list when no dataframes registered yet', async () => {
@@ -59,6 +63,103 @@ describe('brapi_dataframe_describe', () => {
       (formatted ?? [])[0]?.type === 'text' ? (formatted![0] as { text: string }).text : '';
     expect(text).toContain('# 0 dataframe(s)');
     expect(text).toContain('No dataframes');
+  });
+
+  it('gates list-all under shared-tenant HTTP', async () => {
+    const fake = new FakeDataCanvas();
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.stubEnv('MCP_TRANSPORT_TYPE', 'http');
+    vi.stubEnv('MCP_AUTH_MODE', 'none');
+    resetConfig();
+    const ctx = createMockContext({
+      tenantId: 'default',
+      errors: brapiDataframeDescribe.errors,
+    });
+    await expect(
+      brapiDataframeDescribe.handler(brapiDataframeDescribe.input.parse({}), ctx),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+      data: expect.objectContaining({ reason: 'list_all_disabled_on_shared_http' }),
+    });
+  });
+
+  it('allows list-all under stdio with default tenant (single-process safety)', async () => {
+    const fake = new FakeDataCanvas();
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.stubEnv('MCP_TRANSPORT_TYPE', 'stdio');
+    resetConfig();
+    const ctx = createMockContext({
+      tenantId: 'default',
+      errors: brapiDataframeDescribe.errors,
+    });
+    const result = await brapiDataframeDescribe.handler(
+      brapiDataframeDescribe.input.parse({}),
+      ctx,
+    );
+    expect(result.tables).toEqual([]);
+  });
+
+  it('allows list-all under HTTP with per-user tenant (auth carves isolation)', async () => {
+    const fake = new FakeDataCanvas();
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.stubEnv('MCP_TRANSPORT_TYPE', 'http');
+    vi.stubEnv('MCP_AUTH_MODE', 'jwt');
+    vi.stubEnv('MCP_AUTH_SECRET_KEY', 'x'.repeat(40));
+    resetConfig();
+    const ctx = createMockContext({
+      tenantId: 'alice',
+      errors: brapiDataframeDescribe.errors,
+    });
+    const result = await brapiDataframeDescribe.handler(
+      brapiDataframeDescribe.input.parse({}),
+      ctx,
+    );
+    expect(result.tables).toEqual([]);
+  });
+
+  it('allows specific-dataframe lookup under shared-tenant HTTP (possession of name)', async () => {
+    const fake = new FakeDataCanvas();
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.stubEnv('MCP_TRANSPORT_TYPE', 'http');
+    vi.stubEnv('MCP_AUTH_MODE', 'none');
+    resetConfig();
+    const ctx = createMockContext({
+      tenantId: 'default',
+      errors: brapiDataframeDescribe.errors,
+    });
+    const handle = await bridge.registerDataframe(ctx, {
+      source: 'find_observations',
+      baseUrl: 'https://brapi.example.org/brapi/v2',
+      query: {},
+      rows: [{ observationDbId: 'o1' }],
+    });
+    const result = await brapiDataframeDescribe.handler(
+      brapiDataframeDescribe.input.parse({ dataframe: handle.tableName }),
+      ctx,
+    );
+    expect(result.tables).toHaveLength(1);
+    expect(result.tables[0]?.name).toBe(handle.tableName);
+  });
+
+  it('gate error carries recovery hint pointing at auth-mode and named dataframe', async () => {
+    const fake = new FakeDataCanvas();
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.stubEnv('MCP_TRANSPORT_TYPE', 'http');
+    vi.stubEnv('MCP_AUTH_MODE', 'none');
+    resetConfig();
+    const ctx = createMockContext({
+      tenantId: 'default',
+      errors: brapiDataframeDescribe.errors,
+    });
+    try {
+      await brapiDataframeDescribe.handler(brapiDataframeDescribe.input.parse({}), ctx);
+      expect.fail('expected handler to throw');
+    } catch (err) {
+      expect(err).toBeInstanceOf(McpError);
+      const data = (err as McpError).data as { recovery?: { hint?: string } } | undefined;
+      expect(data?.recovery?.hint).toMatch(/dataframe/);
+      expect(data?.recovery?.hint).toMatch(/find_\*|registerAs/);
+    }
   });
 
   it('renders provenance lines for df_-prefixed dataframes', () => {

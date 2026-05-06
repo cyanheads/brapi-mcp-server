@@ -146,6 +146,111 @@ describe('brapi_dataframe_query', () => {
     });
   });
 
+  it('forwards the framework gate context fields alongside gateReason', async () => {
+    const fake = new FakeDataCanvas();
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.spyOn(bridge, 'query').mockRejectedValue(
+      validationError('Canvas query contains disallowed operators: INSERT.', {
+        reason: 'plan_operator_not_allowed',
+        operators: ['INSERT'],
+      }),
+    );
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({ sql: 'INSERT INTO df_x VALUES (1)' });
+    await expect(brapiDataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: expect.objectContaining({
+        reason: 'sql_rejected',
+        gateReason: 'plan_operator_not_allowed',
+        operators: ['INSERT'],
+      }),
+    });
+  });
+
+  it('rejects information_schema references as system_catalog_access and propagates the catalog label', async () => {
+    const fake = new FakeDataCanvas();
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({
+      sql: 'SELECT * FROM information_schema.tables',
+    });
+    await expect(brapiDataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: expect.objectContaining({
+        reason: 'sql_rejected',
+        gateReason: 'system_catalog_access',
+        catalog: 'information_schema',
+      }),
+    });
+  });
+
+  it('rejects pg_catalog references as system_catalog_access', async () => {
+    const fake = new FakeDataCanvas();
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({
+      sql: 'SELECT * FROM pg_catalog.pg_class',
+    });
+    await expect(brapiDataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      data: expect.objectContaining({
+        reason: 'sql_rejected',
+        gateReason: 'system_catalog_access',
+      }),
+    });
+  });
+
+  it('rejects sqlite_master references as system_catalog_access', async () => {
+    const fake = new FakeDataCanvas();
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({
+      sql: 'SELECT * FROM sqlite_master',
+    });
+    await expect(brapiDataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      data: expect.objectContaining({
+        reason: 'sql_rejected',
+        gateReason: 'system_catalog_access',
+      }),
+    });
+  });
+
+  it('rejects duckdb_tables() metadata-function calls as system_catalog_access', async () => {
+    const fake = new FakeDataCanvas();
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({
+      sql: 'SELECT * FROM duckdb_tables()',
+    });
+    await expect(brapiDataframeQuery.handler(input, ctx)).rejects.toMatchObject({
+      data: expect.objectContaining({
+        reason: 'sql_rejected',
+        gateReason: 'system_catalog_access',
+      }),
+    });
+  });
+
+  it('does not false-positive on a column name shaped like a catalog (no qualifier)', async () => {
+    const fake = new FakeDataCanvas();
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({
+      sql: 'SELECT information_schema_id FROM df_foo',
+    });
+    const result = await brapiDataframeQuery.handler(input, ctx);
+    expect(result.rowCount).toBe(0);
+  });
+
+  it('does not false-positive on a string literal that mentions a catalog', async () => {
+    const fake = new FakeDataCanvas();
+    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiDataframeQuery.errors });
+    const input = brapiDataframeQuery.input.parse({
+      sql: "SELECT * FROM df_foo WHERE name = 'information_schema.tables'",
+    });
+    const result = await brapiDataframeQuery.handler(input, ctx);
+    expect(result.rowCount).toBe(0);
+  });
+
   it('passes non-gate errors through unchanged', async () => {
     const fake = new FakeDataCanvas();
     const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);

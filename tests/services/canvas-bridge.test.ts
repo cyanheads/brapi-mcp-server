@@ -7,6 +7,7 @@
  * @module tests/services/canvas-bridge.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +37,58 @@ const baseConfig: ServerConfig = {
 
 function asCanvas(fake: FakeDataCanvas): DataCanvas {
   return fake as unknown as DataCanvas;
+}
+
+/**
+ * Build N mock contexts that all see the same backing state Map. Mirrors what
+ * the framework does in production under one tenantId — `StorageService` keys
+ * writes by tenant, so two handlers under the same `tid` share the same view.
+ * `createMockContext` gives each call its own private Map by default; this
+ * helper patches them onto a shared store so multi-context collaboration
+ * inside one tenant can be tested faithfully.
+ */
+function createSharedTenantContexts(tenantId: string, count: number): Context[] {
+  const store = new Map<string, unknown>();
+  const expiry = new Map<string, number>();
+
+  const buildState = (): Context['state'] =>
+    ({
+      async get<T>(key: string): Promise<T | null> {
+        const exp = expiry.get(key);
+        if (exp !== undefined && exp <= Date.now()) {
+          store.delete(key);
+          expiry.delete(key);
+          return null;
+        }
+        return (store.get(key) as T | undefined) ?? null;
+      },
+      async set(key: string, value: unknown, opts?: { ttl?: number }): Promise<void> {
+        store.set(key, value);
+        if (opts?.ttl !== undefined) expiry.set(key, Date.now() + opts.ttl * 1000);
+      },
+      async delete(key: string): Promise<void> {
+        store.delete(key);
+        expiry.delete(key);
+      },
+      async deleteMany(): Promise<number> {
+        return 0;
+      },
+      async getMany<T>(): Promise<Map<string, T>> {
+        return new Map();
+      },
+      async list(): Promise<{ items: Array<{ key: string; value: unknown }>; cursor?: string }> {
+        return { items: [] };
+      },
+      async setMany(): Promise<void> {
+        /* unused by CanvasBridge */
+      },
+    }) as unknown as Context['state'];
+
+  return Array.from({ length: count }, () => {
+    const ctx = createMockContext({ tenantId });
+    (ctx as { state: Context['state'] }).state = buildState();
+    return ctx;
+  });
 }
 
 describe('CanvasBridge.getInstance', () => {
@@ -84,6 +137,68 @@ describe('CanvasBridge.getInstance', () => {
   });
 });
 
+describe('CanvasBridge — multi-context tenant scoping', () => {
+  let canvas: FakeDataCanvas;
+  let bridge: CanvasBridge;
+
+  beforeEach(() => {
+    canvas = new FakeDataCanvas();
+    bridge = new CanvasBridge(asCanvas(canvas), baseConfig);
+  });
+
+  it('shares one canvas across two contexts in the same tenant', async () => {
+    const [ctx1, ctx2] = createSharedTenantContexts('alice', 2) as [Context, Context];
+    const first = await bridge.getInstance(ctx1);
+    const second = await bridge.getInstance(ctx2);
+    expect(second.canvasId).toBe(first.canvasId);
+    expect(second.isNew).toBe(false);
+  });
+
+  it('lets a second context in the same tenant see a dataframe registered by the first', async () => {
+    const [registrar, viewer] = createSharedTenantContexts('alice', 2) as [Context, Context];
+    const handle = await bridge.registerDataframe(registrar, {
+      source: 'find_observations',
+      baseUrl: 'https://b/v2',
+      query: { studies: ['422'] },
+      rows: [{ observationDbId: 'o1' }, { observationDbId: 'o2' }],
+    });
+    const tables = await bridge.describe(viewer, { tableName: handle.tableName });
+    expect(tables).toHaveLength(1);
+    expect(tables[0]?.name).toBe(handle.tableName);
+    expect(tables[0]?.rowCount).toBe(2);
+    expect(tables[0]?.provenance?.source).toBe('find_observations');
+    expect(tables[0]?.provenance?.baseUrl).toBe('https://b/v2');
+  });
+
+  it('hides one tenant’s dataframe from another tenant even if the canvasId leaks', async () => {
+    // Register a dataframe under tenant alice.
+    const ctxAlice = createMockContext({ tenantId: 'alice' });
+    const handle = await bridge.registerDataframe(ctxAlice, {
+      source: 'find_observations',
+      baseUrl: 'https://b/v2',
+      query: {},
+      rows: [{ observationDbId: 'o1' }],
+    });
+    const aliceCanvas = await bridge.getInstance(ctxAlice);
+
+    // Simulate a state-poisoning attack — plant alice's canvasId in bob's
+    // tenant-scoped state. The framework's tenant gate (mirrored by
+    // FakeDataCanvas.acquire) rejects the cross-tenant acquire; the bridge's
+    // recovery path then carves bob a fresh canvas under his own tenantId.
+    const ctxBob = createMockContext({ tenantId: 'bob' });
+    await ctxBob.state.set('brapi/canvas/default', aliceCanvas.canvasId);
+
+    const bobCanvas = await bridge.getInstance(ctxBob);
+    expect(bobCanvas.canvasId).not.toBe(aliceCanvas.canvasId);
+
+    // bob's canvas is empty — alice's df_<uuid> is unreachable.
+    const bobTables = await bridge.describe(ctxBob);
+    expect(bobTables).toEqual([]);
+    const namedLookup = await bridge.describe(ctxBob, { tableName: handle.tableName });
+    expect(namedLookup).toEqual([]);
+  });
+});
+
 describe('CanvasBridge.registerDataframe', () => {
   let canvas: FakeDataCanvas;
   let bridge: CanvasBridge;
@@ -109,13 +224,17 @@ describe('CanvasBridge.registerDataframe', () => {
     expect(result.tableName.startsWith('df_')).toBe(true);
     expect(result.rowCount).toBe(2);
     expect(result.columns).toEqual(['observationDbId', 'value']);
-    expect(typeof result.createdAt).toBe('string');
-    expect(typeof result.expiresAt).toBe('string');
+
+    // expiresAt - createdAt must equal datasetTtlSeconds (24h by default) —
+    // pins the README's "24h TTL caps blast radius" claim against drift.
+    const elapsedSeconds = (Date.parse(result.expiresAt) - Date.parse(result.createdAt)) / 1000;
+    expect(elapsedSeconds).toBe(baseConfig.datasetTtlSeconds);
 
     const stored = await ctx.state.get(`brapi/canvas/tablemeta/${result.tableName}`);
     expect(stored).toMatchObject({
       source: 'find_observations',
       baseUrl: 'https://brapi.example.org/brapi/v2',
+      query: { studies: ['422'] },
     });
   });
 
