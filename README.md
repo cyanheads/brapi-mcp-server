@@ -17,7 +17,7 @@
 
 ## Tools
 
-22 tools grouped by shape — connection tools bootstrap a session, `find_*` tools return a summarized page plus distributions and spill overflow rows into a canvas dataframe that any agent can query or hand off by ID, `get_*` tools fetch a single record with companion counts, plus pedigree walking, an embedded SQL workspace over spilled rows (DuckDB-backed), file export for human handoff, an additive write surface for observations, and raw passthrough escape hatches.
+22 tools grouped by shape — connection tools bootstrap a session, `find_*` tools return a summarized page plus distributions and spill overflow rows into a canvas dataframe that agents on the same session can query or hand off by ID, `get_*` tools fetch a single record with companion counts, plus pedigree walking, an embedded SQL workspace over spilled rows (DuckDB-backed), file export for human handoff, an additive write surface for observations, and raw passthrough escape hatches.
 
 ### Orient
 
@@ -108,7 +108,7 @@ Within one (tenant, session), dataframes act as a self-cleaning shared notebook:
 
 **Default (isolated) shape.** Under `MCP_AUTH_MODE=none` + HTTP stateful (the default), each MCP session carves its own connection state and its own canvas. Two researchers connected to the same host don't see each other's `brapi_connect` aliases, exchanged SGN/OAuth tokens, or spilled `df_<uuid>` rows. Stdio always behaves as one session (single-process, no concurrency).
 
-**Legacy shared-workspace shape.** Set `BRAPI_SESSION_ISOLATION=false` for cross-session collaboration in one tenant — multiple MCP sessions then share connection state and one default canvas, the way pre-0.6 deployments behaved. Useful when planning, analysis, and writeup agents run as separate MCP clients but operate as one researcher on shared upstream credentials.
+**Legacy shared-workspace shape.** Set `BRAPI_SESSION_ISOLATION=false` for cross-session collaboration in one tenant — multiple MCP sessions then share connection state and one default canvas, the way pre-0.5.3 deployments behaved. Useful when planning, analysis, and writeup agents run as separate MCP clients but operate as one researcher on shared upstream credentials.
 
 **On privileged data.** The `df_<uuid>` name is a capability token within a canvas — not row-level access control. Anyone holding the name within the same (tenant, session) bucket can read its rows. Under default isolation, that bucket is one MCP session. Under `BRAPI_SESSION_ISOLATION=false`, the bucket widens to the whole tenant (all callers under `auth=none`, or one user's sessions under `jwt`/`oauth`). Treat dataframe names like authenticated share links — pass within the bucket, not externally. The 24h TTL caps blast radius; the provenance trail (originating tool, baseUrl, query) supports audit. Belt-and-braces: `brapi_dataframe_describe` requires an explicit `dataframe` name on shared-trust HTTP (no list-all enumeration), and `brapi_dataframe_query` rejects system-catalog reads (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*`) — so a caller without a known `df_<uuid>` name can't fish through either surface.
 
@@ -295,7 +295,7 @@ docker build -t brapi-mcp-server .
 docker run --rm -p 3010:3010 brapi-mcp-server
 ```
 
-Defaults to HTTP transport, stateful session mode (engages `mcp-session-id` lifecycle and hijack protection), logs to `/var/log/brapi-mcp-server`. OTel peer deps are installed by default — `--build-arg OTEL_ENABLED=false` to omit.
+Defaults to HTTP transport, stateful session mode (engages the `mcp-session-id` lifecycle — precondition for `BRAPI_SESSION_ISOLATION=true`; hijack protection requires layering `MCP_AUTH_MODE=jwt|oauth` on top), logs to `/var/log/brapi-mcp-server`. OTel peer deps are installed by default — `--build-arg OTEL_ENABLED=false` to omit.
 
 ### Deployment shapes
 
@@ -310,7 +310,7 @@ Defaults to HTTP transport, stateful session mode (engages `mcp-session-id` life
 **Shape selection guide:**
 
 - **Multi-user public/institutional HTTP, no SSO.** Use the per-session default. Each researcher's stateful HTTP session is isolated even though they all resolve to `tenantId='default'`.
-- **Multi-user with institutional SSO.** Layer JWT or OAuth on top of per-session: `MCP_AUTH_MODE=jwt` (HS256, `MCP_AUTH_SECRET_KEY`) or `oauth` (JWKS, `OAUTH_ISSUER_URL` + `OAUTH_AUDIENCE`). Each user's `tid` carves a tenant; `BRAPI_SESSION_ISOLATION=true` then sub-scopes inside it for users running parallel sessions.
+- **Multi-user with institutional SSO.** `MCP_AUTH_MODE=jwt` (HS256, `MCP_AUTH_SECRET_KEY`) or `oauth` (JWKS, `OAUTH_ISSUER_URL` + `OAUTH_AUDIENCE`). Each user's `tid` claim carves a tenant — the outer scope. `BRAPI_SESSION_ISOLATION=true` (default) then sub-scopes inside each tenant for users running parallel sessions, and JWT/OAuth identity binding gives real session-hijack protection on top.
 - **One researcher, parallel agents.** If multiple agents (planner, analyst, writeup) connect as separate MCP clients but should share one workspace, set `BRAPI_SESSION_ISOLATION=false` and rely on shared trust. This is the legacy shape.
 - **Stdio.** Always one session; isolation is moot. The flag has no effect.
 
