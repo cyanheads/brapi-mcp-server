@@ -6,6 +6,7 @@
  * @module tests/services/server-registry.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -28,6 +29,7 @@ const baseConfig: ServerConfig = {
   searchPollIntervalMs: 1,
   allowPrivateIps: false,
   enableWrites: false,
+  sessionIsolation: true,
 };
 
 describe('ServerRegistry', () => {
@@ -233,6 +235,115 @@ describe('ServerRegistry', () => {
       await registry.register(ctx, { baseUrl: BASE_URL, alias: 'a' });
       await registry.unregister(ctx, 'a');
       expect(await registry.getOptional(ctx, 'a')).toBeNull();
+    });
+  });
+
+  /**
+   * Session isolation tests. Production behavior under HTTP stateful/auto +
+   * BRAPI_SESSION_ISOLATION=true (default): same tenant, distinct sessions
+   * each carve their own connection bucket. Stdio and stateless HTTP fall
+   * back to per-tenant keying.
+   */
+  describe('session isolation', () => {
+    /**
+     * Build N contexts that share one tenant-scoped state Map but each carry
+     * a distinct sessionId. Mirrors what the framework produces in production
+     * under one tenantId across multiple stateful HTTP sessions: one shared
+     * `ctx.state` view, but each request envelope carries its own session ID.
+     */
+    function createSharedTenantContextsWithSessions(
+      tenantId: string,
+      sessionIds: ReadonlyArray<string | undefined>,
+    ): Context[] {
+      const store = new Map<string, unknown>();
+      const buildState = () =>
+        ({
+          async get<T>(key: string) {
+            return (store.get(key) as T | undefined) ?? null;
+          },
+          async set(key: string, value: unknown) {
+            store.set(key, value);
+          },
+          async delete(key: string) {
+            store.delete(key);
+          },
+          async list(prefix: string) {
+            const items: Array<{ key: string; value: unknown }> = [];
+            for (const [key, value] of store) {
+              if (key.startsWith(prefix)) items.push({ key, value });
+            }
+            return { items };
+          },
+          async deleteMany() {
+            return 0;
+          },
+          async getMany() {
+            return new Map();
+          },
+          async setMany() {
+            /* unused */
+          },
+        }) as unknown as Context['state'];
+
+      return sessionIds.map((sessionId) => {
+        const opts: { tenantId: string; sessionId?: string } = { tenantId };
+        if (sessionId !== undefined) opts.sessionId = sessionId;
+        const ctx = createMockContext(opts);
+        (ctx as { state: Context['state'] }).state = buildState();
+        return ctx;
+      });
+    }
+
+    it('isolates the same alias across distinct sessions in the same tenant', async () => {
+      const [ctxA, ctxB] = createSharedTenantContextsWithSessions('t1', ['sess-A', 'sess-B']);
+      if (!ctxA || !ctxB) throw new Error('test setup');
+      await registry.register(ctxA, { baseUrl: 'https://a.example.org/brapi/v2' });
+      await registry.register(ctxB, { baseUrl: 'https://b.example.org/brapi/v2' });
+
+      // Each session sees its own baseUrl under the same alias.
+      expect((await registry.get(ctxA)).baseUrl).toBe('https://a.example.org/brapi/v2');
+      expect((await registry.get(ctxB)).baseUrl).toBe('https://b.example.org/brapi/v2');
+    });
+
+    it('lists only the current session’s connections', async () => {
+      const [ctxA, ctxB] = createSharedTenantContextsWithSessions('t1', ['sess-A', 'sess-B']);
+      if (!ctxA || !ctxB) throw new Error('test setup');
+      await registry.register(ctxA, { baseUrl: BASE_URL, alias: 'a-only' });
+      await registry.register(ctxB, { baseUrl: BASE_URL, alias: 'b-only' });
+
+      expect((await registry.list(ctxA)).map((s) => s.alias)).toEqual(['a-only']);
+      expect((await registry.list(ctxB)).map((s) => s.alias)).toEqual(['b-only']);
+    });
+
+    it('one session’s alias is NotFound from another session', async () => {
+      const [ctxA, ctxB] = createSharedTenantContextsWithSessions('t1', ['sess-A', 'sess-B']);
+      if (!ctxA || !ctxB) throw new Error('test setup');
+      await registry.register(ctxA, { baseUrl: BASE_URL, alias: 'private' });
+      await expect(registry.get(ctxB, 'private')).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+      });
+    });
+
+    it('falls back to per-tenant keying when sessionId is undefined (stdio path)', async () => {
+      const [ctxA, ctxB] = createSharedTenantContextsWithSessions('t1', [undefined, undefined]);
+      if (!ctxA || !ctxB) throw new Error('test setup');
+      await registry.register(ctxA, { baseUrl: BASE_URL, alias: 'shared' });
+      // Without a sessionId, both contexts hash to the same key — second sees first's state.
+      const fetched = await registry.get(ctxB, 'shared');
+      expect(fetched.baseUrl).toBe(BASE_URL);
+    });
+
+    it('shares state across sessions when isolation is disabled', async () => {
+      const sharedRegistry = new ServerRegistry(
+        { ...baseConfig, sessionIsolation: false },
+        tokenFetcher as unknown as TokenFetcher,
+      );
+      const [ctxA, ctxB] = createSharedTenantContextsWithSessions('t1', ['sess-A', 'sess-B']);
+      if (!ctxA || !ctxB) throw new Error('test setup');
+      await sharedRegistry.register(ctxA, { baseUrl: BASE_URL, alias: 'collab' });
+      // Legacy collaboration mode: session B sees session A's registration.
+      const fetched = await sharedRegistry.get(ctxB, 'collab');
+      expect(fetched.baseUrl).toBe(BASE_URL);
     });
   });
 });

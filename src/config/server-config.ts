@@ -151,6 +151,14 @@ export const ServerConfigSchema = z.object({
     .positive()
     .default(30_000)
     .describe('Per-query wall-clock timeout for brapi_dataframe_query.'),
+
+  sessionIsolation: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true')
+    .describe(
+      'When true (default) and an MCP session ID is present (HTTP stateful/auto), scope ServerRegistry connection state and the CanvasBridge default canvas to the session. Concurrent HTTP callers under MCP_AUTH_MODE=none then operate in isolated workspaces — registered aliases, exchanged tokens, and df_<uuid> namespaces do not cross sessions. Set to false to share state across sessions in one tenant (the pre-0.6 multi-agent collaboration model). No effect on stdio (no session) or HTTP stateless without exposeStatelessSessionId; both fall back to per-tenant keying. Under MCP_AUTH_MODE=jwt|oauth, tenants already isolate — sessions add a sub-scope inside each tenant.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -183,6 +191,7 @@ export function getServerConfig(): ServerConfig {
     exportDir: 'BRAPI_EXPORT_DIR',
     canvasMaxRows: 'BRAPI_CANVAS_MAX_ROWS',
     canvasQueryTimeoutMs: 'BRAPI_CANVAS_QUERY_TIMEOUT_MS',
+    sessionIsolation: 'BRAPI_SESSION_ISOLATION',
   });
   return _config;
 }

@@ -25,6 +25,7 @@ import type { AuthMode, ConnectAuth, RegisteredServer } from './types.js';
 export const DEFAULT_ALIAS = 'default';
 
 const CONN_PREFIX = 'brapi/conn/';
+const SESSION_CONN_PREFIX = 'brapi/conn/sess/';
 
 export interface RegisterInput {
   alias?: string;
@@ -58,13 +59,13 @@ export class ServerRegistry {
     const resolvedAuth = await this.resolveAuth(auth, registered.baseUrl, ctx);
     if (resolvedAuth) registered.resolvedAuth = resolvedAuth;
 
-    await ctx.state.set(connKey(alias), registered);
+    await ctx.state.set(this.connKey(ctx, alias), registered);
     return registered;
   }
 
   /** Fetch a registered connection or throw `NotFound`. */
   async get(ctx: Context, alias: string = DEFAULT_ALIAS): Promise<RegisteredServer> {
-    const entry = await ctx.state.get<RegisteredServer>(connKey(alias));
+    const entry = await ctx.state.get<RegisteredServer>(this.connKey(ctx, alias));
     if (!entry) {
       throw notFound(
         `No BrAPI connection registered under alias '${alias}'. Call brapi_connect first.`,
@@ -76,16 +77,17 @@ export class ServerRegistry {
 
   /** Non-throwing variant of `get`. */
   getOptional(ctx: Context, alias: string = DEFAULT_ALIAS): Promise<RegisteredServer | null> {
-    return ctx.state.get<RegisteredServer>(connKey(alias));
+    return ctx.state.get<RegisteredServer>(this.connKey(ctx, alias));
   }
 
   async list(ctx: Context): Promise<RegisteredServer[]> {
     const servers: RegisteredServer[] = [];
     let cursor: string | undefined;
+    const prefix = this.scopePrefix(ctx);
     do {
       const listOpts: { cursor?: string; limit: number } = { limit: 100 };
       if (cursor !== undefined) listOpts.cursor = cursor;
-      const page = await ctx.state.list(CONN_PREFIX, listOpts);
+      const page = await ctx.state.list(prefix, listOpts);
       for (const item of page.items) {
         if (isRegisteredServer(item.value)) servers.push(item.value);
       }
@@ -95,7 +97,27 @@ export class ServerRegistry {
   }
 
   async unregister(ctx: Context, alias: string = DEFAULT_ALIAS): Promise<void> {
-    await ctx.state.delete(connKey(alias));
+    await ctx.state.delete(this.connKey(ctx, alias));
+  }
+
+  /**
+   * Resolve the state-key prefix for the current ctx. Under
+   * `BRAPI_SESSION_ISOLATION=true` (default) and a present `ctx.sessionId`
+   * (HTTP stateful/auto), folds the session ID in so concurrent sessions in
+   * the same tenant don't share connection state. Falls back to the bare
+   * tenant prefix for stdio, stateless HTTP without opt-in, or when
+   * isolation is explicitly disabled. Used by both `connKey` (single-alias
+   * keys) and `list` (prefix scans).
+   */
+  private scopePrefix(ctx: Context): string {
+    if (this.serverConfig.sessionIsolation && ctx.sessionId) {
+      return `${SESSION_CONN_PREFIX}${ctx.sessionId}/`;
+    }
+    return CONN_PREFIX;
+  }
+
+  private connKey(ctx: Context, alias: string): string {
+    return `${this.scopePrefix(ctx)}${alias}`;
   }
 
   private async resolveAuth(
@@ -263,10 +285,6 @@ const defaultTokenFetcher: TokenFetcher = async (url, body, ctx, options) => {
     );
   }
 };
-
-function connKey(alias: string): string {
-  return `${CONN_PREFIX}${alias}`;
-}
 
 function validateAlias(alias: string): void {
   if (!/^[a-zA-Z0-9_-]+$/.test(alias)) {

@@ -1,10 +1,12 @@
 /**
  * @fileoverview CanvasBridge — server-side adapter over the framework's
  * `DataCanvas` primitive. Owns three concerns the framework leaves to the
- * consumer: (1) per-tenant default canvas resolution (the agent never passes
- * `canvas_id`; the bridge caches and reuses it via `ctx.state`), (2) generating
- * SQL-safe `df_<uuid>` table names for spilled find_* results, and (3) tracking
- * originating-source provenance so `brapi_dataframe_describe` can surface it.
+ * consumer: (1) default canvas resolution (per-session under
+ * `BRAPI_SESSION_ISOLATION=true` with a present `ctx.sessionId`, per-tenant
+ * otherwise; the agent never passes `canvas_id`, the bridge caches and reuses
+ * it via `ctx.state`), (2) generating SQL-safe `df_<uuid>` table names for
+ * spilled find_* results, and (3) tracking originating-source provenance so
+ * `brapi_dataframe_describe` can surface it.
  *
  * Canvas is mandatory — `core.canvas` must be configured (DuckDB) for the
  * server to start. There is no on/off toggle; spillover always lands on the
@@ -48,8 +50,20 @@ function asRequestContext(ctx: Context): RequestContext {
   return rc;
 }
 
-/** State key holding the per-tenant default canvasId (opaque 10-char token). */
+/**
+ * State keys holding the default canvasId (opaque 10-char token).
+ *
+ * `DEFAULT_CANVAS_KEY` keys the per-tenant default canvas — the legacy
+ * shared workspace; used for stdio, stateless HTTP without opt-in, and any
+ * deployment where `BRAPI_SESSION_ISOLATION=false`.
+ *
+ * `SESSION_CANVAS_PREFIX` keys per-session canvases when isolation is on
+ * and `ctx.sessionId` is present. Each session gets its own canvas and
+ * therefore its own `df_<uuid>` namespace, so concurrent HTTP callers
+ * under `MCP_AUTH_MODE=none` don't see each other's spilled rows.
+ */
 const DEFAULT_CANVAS_KEY = 'brapi/canvas/default';
+const SESSION_CANVAS_PREFIX = 'brapi/canvas/sess/';
 
 /** Prefix for per-table provenance entries — keyed by canvas table name. */
 const TABLE_META_PREFIX = 'brapi/canvas/tablemeta/';
@@ -94,7 +108,11 @@ export interface RegisterDataframeResult {
   truncated?: boolean;
 }
 
-/** Bridge for `core.canvas` that adds per-tenant default-canvas semantics. */
+/**
+ * Bridge for `core.canvas` that adds default-canvas semantics — session-scoped
+ * under `BRAPI_SESSION_ISOLATION=true` with a present `ctx.sessionId`,
+ * tenant-scoped otherwise.
+ */
 export class CanvasBridge {
   constructor(
     private readonly canvas: DataCanvas,
@@ -102,29 +120,50 @@ export class CanvasBridge {
   ) {}
 
   /**
-   * Acquire the per-tenant default canvas. The canvasId is cached in
-   * `ctx.state` so subsequent calls reuse the same canvas (sliding TTL on the
-   * canvas itself keeps it warm). On stale-id errors (NotFound), clears the
-   * cache and acquires a fresh canvas — matches the spirit of the framework's
-   * "omit on retry" recovery hint without surfacing the token to the agent.
+   * Acquire the default canvas for the current request. The canvasId is cached
+   * in `ctx.state` so subsequent calls reuse the same canvas (sliding TTL on
+   * the canvas itself keeps it warm). On stale-id errors (NotFound), clears
+   * the cache and acquires a fresh canvas — matches the spirit of the
+   * framework's "omit on retry" recovery hint without surfacing the token to
+   * the agent.
+   *
+   * Scope follows `BRAPI_SESSION_ISOLATION`: when true (default) and
+   * `ctx.sessionId` is present, the canvas is session-scoped — the cache key
+   * folds the session ID in, so concurrent HTTP sessions in the same tenant
+   * end up on distinct canvases. When isolation is disabled or no session ID
+   * is available (stdio, stateless HTTP without opt-in), falls back to the
+   * legacy per-tenant shared canvas.
    */
   async getInstance(ctx: Context): Promise<CanvasInstance> {
-    const cached = await ctx.state.get<string>(DEFAULT_CANVAS_KEY);
+    const key = this.defaultCanvasKey(ctx);
+    const cached = await ctx.state.get<string>(key);
     try {
       const instance = await this.canvas.acquire(cached ?? undefined, asRequestContext(ctx));
       if (!cached || instance.isNew) {
-        await ctx.state.set(DEFAULT_CANVAS_KEY, instance.canvasId);
+        await ctx.state.set(key, instance.canvasId);
       }
       return instance;
     } catch (err) {
       if (cached && isCanvasNotFound(err)) {
-        await ctx.state.delete(DEFAULT_CANVAS_KEY);
+        await ctx.state.delete(key);
         const fresh = await this.canvas.acquire(undefined, asRequestContext(ctx));
-        await ctx.state.set(DEFAULT_CANVAS_KEY, fresh.canvasId);
+        await ctx.state.set(key, fresh.canvasId);
         return fresh;
       }
       throw err;
     }
+  }
+
+  /**
+   * Resolve the cache key for the default-canvas pointer. Session-scoped when
+   * `BRAPI_SESSION_ISOLATION=true` and `ctx.sessionId` is present; per-tenant
+   * otherwise. See `getInstance` for the full scoping rules.
+   */
+  private defaultCanvasKey(ctx: Context): string {
+    if (this.serverConfig.sessionIsolation && ctx.sessionId) {
+      return `${SESSION_CANVAS_PREFIX}${ctx.sessionId}`;
+    }
+    return DEFAULT_CANVAS_KEY;
   }
 
   /**
@@ -183,7 +222,8 @@ export class CanvasBridge {
   }
 
   /**
-   * Run a SQL query against the per-tenant default canvas. Caps `rowLimit` to
+   * Run a SQL query against the default canvas (see `getInstance` for the
+   * session-vs-tenant scoping rules). Caps `rowLimit` to
    * `BRAPI_CANVAS_MAX_ROWS` so a missing/excessive caller value can't bypass
    * the response-size budget. Cancellation flows through `ctx.signal`; the
    * timeout wraps the AbortSignal with a wall-clock cap.

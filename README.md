@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.5.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.5.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
@@ -97,29 +97,26 @@ Multi-step BrAPI workflow templates — pure user-message generators, no side ef
 
 ## Multi-agent workflows
 
-The server has two layers, both tenant-scoped:
+The server has two stateful layers and two scoping axes:
 
-| Layer | Scope | Why |
-|:------|:------|:----|
-| **Connection state** (aliases, exchanged tokens, capability cache) | Per-tenant via `ctx.state` | Holds credentials. Tenant keys never cross. |
-| **Dataframes** (`df_<uuid>` tables) | Per-tenant via the framework's canvas registry | Within one tenant, agents share by `df_<uuid>` name — possession grants full read/write/drop, auto-expires in 24h, provenance recorded. The underlying canvas is tenant-gated by the framework, so names from one tenant don't resolve in another. |
+| Layer | Default scope | Why |
+|:------|:--------------|:----|
+| **Connection state** (aliases, exchanged tokens) | Tenant + session | Credentials and live tokens. Tenant gates by user (`jwt`/`oauth`) or collapses to `'default'` (`none`). Session sub-scope (`BRAPI_SESSION_ISOLATION=true`, default) prevents concurrent HTTP sessions in one tenant from sharing each other's tokens. |
+| **Dataframes** (`df_<uuid>` tables) | Tenant + session | Within one (tenant, session), agents share by `df_<uuid>` name — possession grants full read/write/drop, auto-expires in 24h, provenance recorded. The underlying canvas is tenant-gated by the framework; the session sub-scope is enforced by the bridge's keying. |
 
-Within one tenant, dataframes act as a self-cleaning shared notebook: hand the `df_<uuid>` name between parallel agents, persist it across a multi-step workflow, query / project / aggregate / join from any position. Address-by-name, time-bounded, scoped to one tenant.
+Within one (tenant, session), dataframes act as a self-cleaning shared notebook: hand the `df_<uuid>` name between parallel agents on the same MCP session, persist it across a multi-step workflow, query / project / aggregate / join from any position. Address-by-name, time-bounded, scoped to that session.
 
-**Concrete patterns:**
+**Default (isolated) shape.** Under `MCP_AUTH_MODE=none` + HTTP stateful (the default), each MCP session carves its own connection state and its own canvas. Two researchers connected to the same host don't see each other's `brapi_connect` aliases, exchanged SGN/OAuth tokens, or spilled `df_<uuid>` rows. Stdio always behaves as one session (single-process, no concurrency).
 
-1. **Parallel agents, same researcher** — a planning agent, an analysis agent, and a writeup agent all reference the same `df_<uuid>` without re-pulling from the upstream BrAPI server. Works in every deployment shape.
-2. **Pipeline accumulation** — `find_studies` → `find_observations` → `find_variables` builds up multiple dataframes in one workspace; SQL joins them; export materializes the result. Works in every deployment shape.
-3. **Cross-server analysis** — pull germplasm from Breedbase and trait data from Triticeae Toolbox in one session; join in DuckDB; no copy-paste. Works in every deployment shape.
-4. **Cross-user handoff** — under `MCP_AUTH_MODE=none` (shared trust), every client resolves to one tenant and shares the dataframe namespace. Under `jwt` / `oauth`, each user has their own tenant and dataframe names don't cross — see [Deployment shapes](#deployment-shapes).
+**Legacy shared-workspace shape.** Set `BRAPI_SESSION_ISOLATION=false` for cross-session collaboration in one tenant — multiple MCP sessions then share connection state and one default canvas, the way pre-0.6 deployments behaved. Useful when planning, analysis, and writeup agents run as separate MCP clients but operate as one researcher on shared upstream credentials.
 
-**On privileged data.** The `df_<uuid>` name is a capability token within a canvas, scoped per tenant — not row-level access control. Each tenant gets one default canvas; under `auth=none` HTTP every caller resolves to `tenantId='default'` and shares it, while under `jwt` / `oauth` each user carves their own. Once rows from a privileged upstream session land in a dataframe, anyone in the same tenant with the name can read them. Treat dataframe names like authenticated share links — share within the team, not externally. The 24h TTL caps blast radius; the provenance trail (originating tool, baseUrl, query) supports audit. To isolate dataframes between users on a shared host, run under `MCP_AUTH_MODE=jwt` or `oauth` so each caller carves their own tenant; under shared-trust HTTP, `brapi_dataframe_describe` is gated against list-all enumeration, and `brapi_dataframe_query` rejects system-catalog reads (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*`) — so a caller without a known `df_<uuid>` name can't fish through either surface.
+**On privileged data.** The `df_<uuid>` name is a capability token within a canvas — not row-level access control. Anyone holding the name within the same (tenant, session) bucket can read its rows. Under default isolation, that bucket is one MCP session. Under `BRAPI_SESSION_ISOLATION=false`, the bucket widens to the whole tenant (all callers under `auth=none`, or one user's sessions under `jwt`/`oauth`). Treat dataframe names like authenticated share links — pass within the bucket, not externally. The 24h TTL caps blast radius; the provenance trail (originating tool, baseUrl, query) supports audit. Belt-and-braces: `brapi_dataframe_describe` requires an explicit `dataframe` name on shared-trust HTTP (no list-all enumeration), and `brapi_dataframe_query` rejects system-catalog reads (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*`) — so a caller without a known `df_<uuid>` name can't fish through either surface.
 
 ---
 
 ## BrAPI-specific features
 
-- **Dataframe spillover** — `find_*` tools cap in-context rows at `loadLimit` and materialize larger unions (up to 50k rows / 50 pages) as DuckDB-backed `df_<uuid>` canvas dataframes. Discover with `brapi_dataframe_describe`, query with `brapi_dataframe_query` (SQL paging via `LIMIT/OFFSET`, projection, aggregation). Read-only enforcement at the SQL gate; tenant-scoped — agents in the same tenant share by `df_<uuid>` name (see [Multi-agent workflows](#multi-agent-workflows)).
+- **Dataframe spillover** — `find_*` tools cap in-context rows at `loadLimit` and materialize larger unions (up to 50k rows / 50 pages) as DuckDB-backed `df_<uuid>` canvas dataframes. Discover with `brapi_dataframe_describe`, query with `brapi_dataframe_query` (SQL paging via `LIMIT/OFFSET`, projection, aggregation). Read-only enforcement at the SQL gate; session-scoped by default (tenant-scoped under `BRAPI_SESSION_ISOLATION=false`) — see [Multi-agent workflows](#multi-agent-workflows).
 - **Multi-server session** — `ServerRegistry` maps aliases to live BrAPI connections; one session can span Breedbase, T3, and Sweetpotatobase in parallel.
 - **Built-in known-server registry** — `bti-cassava`, `bti-sweetpotato`, `bti-breedbase-demo`, `t3-wheat`, `t3-oat`, `t3-barley` resolve out-of-the-box without env vars; orientation envelope carries CC-BY attribution.
 - **Capability-aware calls** — `CapabilityRegistry` caches `/serverinfo` per connection and guards every tool call against unsupported endpoints. Falls back to `/calls` when `/serverinfo` is sparse.
@@ -139,7 +136,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp
 
 When a `find_*` tool's upstream total exceeds `loadLimit`, the full union materializes as a canvas dataframe and the response carries an inline `dataframe` handle (`{ tableName, rowCount, columns, createdAt, expiresAt, … }`). SQL is the paging idiom — use `LIMIT/OFFSET` to walk pages, projection (`SELECT col1, col2`) to trim columns, and aggregation (`COUNT`, `GROUP BY`, `AVG`) to summarize without materializing every row.
 
-Dataframe names are tenant-scoped capability tokens — pass `tableName` to any sibling agent in the same tenant (or a downstream step in the same workflow) and they query the same workspace by name without re-pulling from the upstream. See [Multi-agent workflows](#multi-agent-workflows) for cross-user / cross-tenant rules.
+Dataframe names are session-scoped capability tokens by default — pass `tableName` to any other agent on the same MCP session (or a downstream step in the same workflow) and they query the same workspace by name without re-pulling from the upstream. The `brapi_dataframe_*` tools offer SQL manipulation and more. See [Multi-agent workflows](#multi-agent-workflows) for cross-session / cross-tenant rules.
 
 ```text
 1. brapi_find_observations { studies: ["s-422"] }
@@ -213,8 +210,9 @@ Every variable is optional.
 | `BRAPI_CANVAS_DROP_ENABLED` | Opt-in for `brapi_dataframe_drop` registration. Off by default; dataframes expire via TTL when left unmanaged. | `false` |
 | `BRAPI_EXPORT_DIR` | Directory for `brapi_dataframe_export` output files. Setting a path is the opt-in (no separate enable flag); unset leaves the tool out of `tools/list`. Stdio-only — the tool stays disabled under HTTP transport regardless of this value. Bridged to the framework's `CANVAS_EXPORT_PATH` automatically. | — |
 | `BRAPI_CANVAS_MAX_ROWS` / `BRAPI_CANVAS_QUERY_TIMEOUT_MS` | Per-query response row cap and wall-clock timeout for `brapi_dataframe_query`. | `10000` / `30000` |
-| `MCP_TRANSPORT_TYPE` / `MCP_HTTP_PORT` | Transport (`stdio` \| `http`) + HTTP port. | `stdio` / `3010` |
+| `MCP_TRANSPORT_TYPE` / `MCP_HTTP_PORT` / `MCP_SESSION_MODE` | Transport (`stdio` \| `http`), HTTP port, session mode (`stateful` \| `stateless` \| `auto`). | `stdio` / `3010` / `auto` |
 | `MCP_AUTH_MODE` / `MCP_LOG_LEVEL` / `STORAGE_PROVIDER_TYPE` / `OTEL_ENABLED` | Auth mode (`none` \| `jwt` \| `oauth`), log level, storage backend, OpenTelemetry. | `none` / `info` / `in-memory` / `false` |
+| `BRAPI_SESSION_ISOLATION` | When `true`, scope ServerRegistry connection state and the CanvasBridge default canvas to `ctx.sessionId` (HTTP stateful/auto). Concurrent callers under `MCP_AUTH_MODE=none` operate in isolated workspaces. Set `false` for the legacy shared-workspace collaboration model. No effect on stdio. | `true` |
 
 Per-alias overrides follow the `BRAPI_<ALIAS>_*` pattern — see [`.env.example`](./.env.example) for every override and inline comments.
 
@@ -297,22 +295,26 @@ docker build -t brapi-mcp-server .
 docker run --rm -p 3010:3010 brapi-mcp-server
 ```
 
-Defaults to HTTP transport, stateless session mode, logs to `/var/log/brapi-mcp-server`. OTel peer deps are installed by default — `--build-arg OTEL_ENABLED=false` to omit.
+Defaults to HTTP transport, stateful session mode (engages `mcp-session-id` lifecycle and hijack protection), logs to `/var/log/brapi-mcp-server`. OTel peer deps are installed by default — `--build-arg OTEL_ENABLED=false` to omit.
 
 ### Deployment shapes
 
-`brapi-mcp-server` runs in two shapes — pick the one that matches your trust domain.
+`brapi-mcp-server` runs in three shapes — pick the one that matches your trust domain. The differentiator is what isolates **connection state** (registered aliases, cached upstream tokens) and **dataframes**: nothing, the MCP session, or the auth tenant.
 
-| Shape | Auth | Connection state | Dataframes | Best for |
-|:------|:-----|:-----------------|:-----------|:---------|
-| **Shared trust** | `MCP_AUTH_MODE=none` | One bucket — all callers share aliases and cached upstream tokens | One shared workspace — every caller can query any `df_<uuid>` name they hold | Solo, lab, or hosting where users share upstream credentials |
-| **Per-user credentials** | `MCP_AUTH_MODE=jwt` or `oauth` | JWT `tid` claim scopes per user | Per-tenant — names don't resolve across users (framework gates the canvas by tenant) | One institution, multi-user, separate upstream identities |
+| Shape | Settings | Isolation | Best for |
+|:------|:---------|:----------|:---------|
+| **Per-session (default)** | `MCP_AUTH_MODE=none` + HTTP stateful + `BRAPI_SESSION_ISOLATION=true` | Each MCP session carves its own connection state and canvas. Concurrent HTTP callers don't see each other's aliases, exchanged tokens, or `df_<uuid>` rows. | Multi-user host without SSO. Default for institutional / public deployment under shared-trust auth. |
+| **Per-user credentials** | `MCP_AUTH_MODE=jwt` or `oauth` (+ HTTP stateful) | Each user's JWT `tid` claim carves a tenant. Sessions sub-scope inside each tenant when isolation is on. Cross-user spillover impossible at the framework level. | Multi-user host with institutional SSO (Shibboleth, Okta, etc.) — strongest separation. |
+| **Shared workspace (legacy)** | `MCP_AUTH_MODE=none` + `BRAPI_SESSION_ISOLATION=false` | All callers in one tenant share connection state and one canvas. Possession of a `df_<uuid>` name = full read/write across the workspace. | Solo, lab, or hosting where every caller is one researcher running parallel agents on shared upstream credentials. |
 
-The differentiator is whether **connection state** (registered aliases, cached upstream tokens) is isolated per user. **Shared trust** is right when your users share BrAPI credentials anyway — dataframes accumulate in one workspace. **Per-user credentials** is right when each user authenticates separately to upstream BrAPI servers — each gets their own workspace and dataframe names don't cross.
+**Shape selection guide:**
 
-Under shared-trust HTTP, `brapi_dataframe_describe` requires an explicit `dataframe` name — list-all is gated so a caller without a known name can't enumerate other concurrent clients' workspaces. The dataframe name is the capability token; possession proves it.
+- **Multi-user public/institutional HTTP, no SSO.** Use the per-session default. Each researcher's stateful HTTP session is isolated even though they all resolve to `tenantId='default'`.
+- **Multi-user with institutional SSO.** Layer JWT or OAuth on top of per-session: `MCP_AUTH_MODE=jwt` (HS256, `MCP_AUTH_SECRET_KEY`) or `oauth` (JWKS, `OAUTH_ISSUER_URL` + `OAUTH_AUDIENCE`). Each user's `tid` carves a tenant; `BRAPI_SESSION_ISOLATION=true` then sub-scopes inside it for users running parallel sessions.
+- **One researcher, parallel agents.** If multiple agents (planner, analyst, writeup) connect as separate MCP clients but should share one workspace, set `BRAPI_SESSION_ISOLATION=false` and rely on shared trust. This is the legacy shape.
+- **Stdio.** Always one session; isolation is moot. The flag has no effect.
 
-For HTTP, set `MCP_AUTH_MODE=jwt` (HS256, `MCP_AUTH_SECRET_KEY`) or `oauth` (JWKS, `OAUTH_ISSUER_URL` + `OAUTH_AUDIENCE`) so each caller's `tid` carves its own connection state. Without this, all callers resolve to `tenantId='default'` and registered aliases — including SGN-exchanged bearer tokens — share one bucket.
+**Belt-and-braces under shared trust.** Even with `BRAPI_SESSION_ISOLATION=false`, `brapi_dataframe_describe` requires an explicit `dataframe` name on HTTP (no list-all enumeration), and `brapi_dataframe_query` rejects system-catalog reads (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*`). The dataframe name is the capability token; possession proves it.
 
 ---
 

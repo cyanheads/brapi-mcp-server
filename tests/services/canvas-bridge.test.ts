@@ -33,6 +33,7 @@ const baseConfig: ServerConfig = {
   canvasDropEnabled: false,
   canvasMaxRows: 100,
   canvasQueryTimeoutMs: 30_000,
+  sessionIsolation: true,
 };
 
 function asCanvas(fake: FakeDataCanvas): DataCanvas {
@@ -196,6 +197,130 @@ describe('CanvasBridge — multi-context tenant scoping', () => {
     expect(bobTables).toEqual([]);
     const namedLookup = await bridge.describe(ctxBob, { tableName: handle.tableName });
     expect(namedLookup).toEqual([]);
+  });
+});
+
+/**
+ * Build N contexts in one tenant, each with a distinct (or undefined)
+ * sessionId, sharing one backing state Map. Mirrors what the framework
+ * produces under HTTP stateful: many concurrent sessions, one tenant view
+ * of state, distinct sessionIds per request envelope.
+ */
+function createSharedTenantContextsWithSessions(
+  tenantId: string,
+  sessionIds: ReadonlyArray<string | undefined>,
+): Context[] {
+  const store = new Map<string, unknown>();
+  const expiry = new Map<string, number>();
+  const buildState = () =>
+    ({
+      async get<T>(key: string): Promise<T | null> {
+        const exp = expiry.get(key);
+        if (exp !== undefined && exp <= Date.now()) {
+          store.delete(key);
+          expiry.delete(key);
+          return null;
+        }
+        return (store.get(key) as T | undefined) ?? null;
+      },
+      async set(key: string, value: unknown, opts?: { ttl?: number }): Promise<void> {
+        store.set(key, value);
+        if (opts?.ttl !== undefined) expiry.set(key, Date.now() + opts.ttl * 1000);
+      },
+      async delete(key: string): Promise<void> {
+        store.delete(key);
+        expiry.delete(key);
+      },
+      async deleteMany(): Promise<number> {
+        return 0;
+      },
+      async getMany<T>(): Promise<Map<string, T>> {
+        return new Map();
+      },
+      async list(): Promise<{ items: Array<{ key: string; value: unknown }>; cursor?: string }> {
+        return { items: [] };
+      },
+      async setMany(): Promise<void> {
+        /* unused */
+      },
+    }) as unknown as Context['state'];
+
+  return sessionIds.map((sessionId) => {
+    const opts: { tenantId: string; sessionId?: string } = { tenantId };
+    if (sessionId !== undefined) opts.sessionId = sessionId;
+    const ctx = createMockContext(opts);
+    (ctx as { state: Context['state'] }).state = buildState();
+    return ctx;
+  });
+}
+
+describe('CanvasBridge — session isolation', () => {
+  let canvas: FakeDataCanvas;
+  let bridge: CanvasBridge;
+
+  beforeEach(() => {
+    canvas = new FakeDataCanvas();
+    bridge = new CanvasBridge(asCanvas(canvas), baseConfig);
+  });
+
+  it('carves a distinct canvas per session in the same tenant', async () => {
+    const [ctxA, ctxB] = createSharedTenantContextsWithSessions('alice', ['sess-A', 'sess-B']) as [
+      Context,
+      Context,
+    ];
+    const a = await bridge.getInstance(ctxA);
+    const b = await bridge.getInstance(ctxB);
+    expect(a.canvasId).not.toBe(b.canvasId);
+  });
+
+  it('shares one canvas across requests in the same session', async () => {
+    const [ctx1, ctx2] = createSharedTenantContextsWithSessions('alice', ['sess-A', 'sess-A']) as [
+      Context,
+      Context,
+    ];
+    const first = await bridge.getInstance(ctx1);
+    const second = await bridge.getInstance(ctx2);
+    expect(second.canvasId).toBe(first.canvasId);
+    expect(second.isNew).toBe(false);
+  });
+
+  it('hides session A’s dataframe from session B', async () => {
+    const [ctxA, ctxB] = createSharedTenantContextsWithSessions('alice', ['sess-A', 'sess-B']) as [
+      Context,
+      Context,
+    ];
+    const handle = await bridge.registerDataframe(ctxA, {
+      source: 'find_observations',
+      baseUrl: 'https://b/v2',
+      query: { studies: ['422'] },
+      rows: [{ observationDbId: 'o1' }],
+    });
+    const tablesB = await bridge.describe(ctxB, { tableName: handle.tableName });
+    expect(tablesB).toEqual([]);
+  });
+
+  it('falls back to the shared default canvas when sessionId is undefined (stdio path)', async () => {
+    const [ctx1, ctx2] = createSharedTenantContextsWithSessions('alice', [
+      undefined,
+      undefined,
+    ]) as [Context, Context];
+    const first = await bridge.getInstance(ctx1);
+    const second = await bridge.getInstance(ctx2);
+    expect(second.canvasId).toBe(first.canvasId);
+  });
+
+  it('shares one canvas across distinct sessions when isolation is disabled', async () => {
+    const sharedBridge = new CanvasBridge(asCanvas(canvas), {
+      ...baseConfig,
+      sessionIsolation: false,
+    });
+    const [ctxA, ctxB] = createSharedTenantContextsWithSessions('alice', ['sess-A', 'sess-B']) as [
+      Context,
+      Context,
+    ];
+    const a = await sharedBridge.getInstance(ctxA);
+    const b = await sharedBridge.getInstance(ctxB);
+    expect(a.canvasId).toBe(b.canvasId);
   });
 });
 

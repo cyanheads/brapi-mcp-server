@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.5.1
+**Version:** 0.5.3
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -130,6 +130,7 @@ const ServerConfigSchema = z.object({
   retryMaxAttempts: z.coerce.number().int().min(0).default(3),
   datasetTtlSeconds: z.coerce.number().int().positive().default(86_400),
   referenceCacheTtlSeconds: z.coerce.number().int().positive().default(3_600),
+  sessionIsolation: z.enum(['true', 'false']).default('true').transform((v) => v === 'true'),
   // …see src/config/server-config.ts for the full schema
 });
 
@@ -160,10 +161,11 @@ Handlers receive a unified `ctx` object. Currently used surface:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
-| `ctx.state` | Tenant-scoped KV — used by `ServerRegistry` (connection aliases), `CanvasBridge` (per-tenant default canvasId + per-table provenance), and `CapabilityRegistry` (cached profiles). Spilled `find_*` rows live on the canvas (DuckDB), not in `ctx.state`. |
+| `ctx.state` | Tenant-scoped KV — used by `ServerRegistry` (connection aliases), `CanvasBridge` (default canvas pointer + per-table provenance), and `CapabilityRegistry` (cached profiles). Spilled `find_*` rows live on the canvas (DuckDB), not in `ctx.state`. |
+| `ctx.sessionId` | Mcp-Session-Id (HTTP stateful/auto); `undefined` for stdio and stateless HTTP unless `exposeStatelessSessionId` is opted in. Composed into `ServerRegistry.connKey` and `CanvasBridge.defaultCanvasKey` when `BRAPI_SESSION_ISOLATION=true` (default), so concurrent HTTP sessions in the same tenant don't share connection state or canvas. Discovery / scoping key on top of tenant-keyed state — not an authorization principal. |
 | `ctx.signal` | `AbortSignal` — threaded into every BrAPI HTTP call so client-side cancellation aborts the upstream request. |
 | `ctx.requestId` | Unique request ID — auto-attached to every `ctx.log` entry. |
-| `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio — scopes all `ctx.state` reads/writes. |
+| `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio / HTTP+`auth=none` — outer scope on all `ctx.state` reads/writes. |
 
 `ctx.elicit` is used by `brapi_submit_observations` to gate apply-mode writes behind user confirmation (with explicit `force: true` as the bypass). `ctx.sample` and `ctx.progress` are not used yet — they'll show up when long-running workflows (pedigree traversal, genotype-call pulls) need progress reporting or LLM sampling. `ctx.fail(reason, …)` is the typed thrower keyed off declared `errors[]` contracts — used by 8 tools and 3 resources today. `ctx.recoveryFor(reason)` resolves the matching contract entry's recovery hint into `data.recovery.hint` so it surfaces on the wire.
 
@@ -224,11 +226,11 @@ src/
     brapi-client/                         # HTTP client — retry, concurrency cap, async-search poll, private-IP guard, binary fetch, POST/PUT
     brapi-dialect/                        # Per-server filter / payload adapters (spec, cassavabase) — translates plural→singular, drops searchText, declares known-dead POST /search routes; envelope surfaces id + source + disabled-search nouns
     brapi-filters/                        # Static v2.1 filter catalog
-    canvas-bridge/                        # Per-tenant default-canvas resolver, df_<uuid> table generator, provenance store
+    canvas-bridge/                        # Default-canvas resolver (per-session when BRAPI_SESSION_ISOLATION=true; per-tenant otherwise), df_<uuid> table generator, provenance store
     capability-registry/                  # Per-connection /serverinfo cache + call guard
     ontology-resolver/                    # Free-text → ontology-term matcher for variables
     reference-data-cache/                 # Programs / trials / locations / crops lookup cache
-    server-registry/                      # Alias → live connection map with auth resolution
+    server-registry/                      # Alias → live connection map with auth resolution; session-scoped under BRAPI_SESSION_ISOLATION=true
   mcp-server/
     tools/
       definitions/
