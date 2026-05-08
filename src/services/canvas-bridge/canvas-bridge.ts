@@ -53,9 +53,9 @@ function asRequestContext(ctx: Context): RequestContext {
 /**
  * State keys holding the default canvasId (opaque 10-char token).
  *
- * `DEFAULT_CANVAS_KEY` keys the per-tenant default canvas — the legacy
- * shared workspace; used for stdio, stateless HTTP without opt-in, and any
- * deployment where `BRAPI_SESSION_ISOLATION=false`.
+ * `DEFAULT_CANVAS_KEY` keys the per-tenant default canvas — the
+ * tenant-shared workspace; used for stdio, stateless HTTP without opt-in,
+ * and any deployment where `BRAPI_SESSION_ISOLATION=false`.
  *
  * `SESSION_CANVAS_PREFIX` keys per-session canvases when isolation is on
  * and `ctx.sessionId` is present. Each session gets its own canvas and
@@ -132,7 +132,7 @@ export class CanvasBridge {
    * folds the session ID in, so concurrent HTTP sessions in the same tenant
    * end up on distinct canvases. When isolation is disabled or no session ID
    * is available (stdio, stateless HTTP without opt-in), falls back to the
-   * legacy per-tenant shared canvas.
+   * tenant-shared canvas.
    */
   async getInstance(ctx: Context): Promise<CanvasInstance> {
     const key = this.defaultCanvasKey(ctx);

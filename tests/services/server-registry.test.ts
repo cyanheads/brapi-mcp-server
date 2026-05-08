@@ -341,7 +341,7 @@ describe('ServerRegistry', () => {
       const [ctxA, ctxB] = createSharedTenantContextsWithSessions('t1', ['sess-A', 'sess-B']);
       if (!ctxA || !ctxB) throw new Error('test setup');
       await sharedRegistry.register(ctxA, { baseUrl: BASE_URL, alias: 'collab' });
-      // Legacy collaboration mode: session B sees session A's registration.
+      // Shared collaboration mode: session B sees session A's registration.
       const fetched = await sharedRegistry.get(ctxB, 'collab');
       expect(fetched.baseUrl).toBe(BASE_URL);
     });

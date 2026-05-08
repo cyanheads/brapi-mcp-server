@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.4](changelog/0.5.x/0.5.4.md) — 2026-05-08
+
+Patch maintenance — drop misleading 'legacy' label from the shared-workspace shape; adopt framework 0.8.19 (engines bump, Docker base 1.3, api-telemetry skill).
+
 ## [0.5.3](changelog/0.5.x/0.5.3.md) — 2026-05-05
 
 Per-session isolation on ServerRegistry connection state and the CanvasBridge default canvas — concurrent HTTP callers under MCP_AUTH_MODE=none now operate in isolated workspaces by default.
