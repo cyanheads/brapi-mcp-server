@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: brapi-mcp-server
+abstract: "Model Context Protocol (MCP) server bridging BrAPI v2.1 plant breeding servers (Breedbase, T3, Sweetpotatobase, and any BrAPI v2-compliant endpoint), providing studies, germplasm, observations, variables, locations, images, variants, and genotype calls across multiple servers in one session, with pedigree traversal, an embedded SQL workspace (DuckDB) for cross-study analysis over spilled rows, and additive observation writes."
+type: software
+authors:
+  - family-names: Hand
+    given-names: Casey
+    orcid: "https://orcid.org/0009-0009-3726-568X"
+repository-code: "https://github.com/cyanheads/brapi-mcp-server"
+license: Apache-2.0
+keywords:
+  - mcp
+  - model-context-protocol
+  - brapi
+  - plant-breeding
+  - agricultural-research
+  - germplasm

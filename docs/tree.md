@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-05-16 17:01:49
+Generated on: 2026-05-16 19:22:40
 
 ```text
 brapi-mcp-server/
@@ -253,6 +253,7 @@ brapi-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
