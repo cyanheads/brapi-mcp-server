@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.5](changelog/0.5.x/0.5.5.md) — 2026-05-16
+
+Adopt framework 0.9.1 — wire `instructions` field for server-level orientation, port two raw schemas off `z.url()` and three off `.nullish()` unions to clear the new cross-vendor portability lint family (`schema-format-portability`, `schema-anyof-needs-type`).
+
 ## [0.5.4](changelog/0.5.x/0.5.4.md) — 2026-05-08
 
 Patch maintenance — drop misleading 'legacy' label from the shared-workspace shape; adopt framework 0.8.19 (engines bump, Docker base 1.3, api-telemetry skill).

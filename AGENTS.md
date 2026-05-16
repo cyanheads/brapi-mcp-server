@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.5.4
+**Version:** 0.5.5
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -306,13 +306,17 @@ Available skills:
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
+| `tool-defs-analysis` | Read-only audit of MCP definition language across the surface (12 categories) |
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
 | `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
+| `release-and-publish` | Post-wrapup ship workflow: verification gate, push, publish to npm / MCP Registry / GHCR |
+| `migrate-mcp-ts-template` | Migrate legacy `mcp-ts-template` fork to package dependency |
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
 | `report-issue-local` | File a bug or feature request against this server's own repo via `gh` CLI |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
+| `api-linter` | Definition lint rule reference (`format-parity`, `schema-*`, `name-*`, `server-json-*`, …) |
 | `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
 | `api-config` | AppConfig, parseConfig, env vars |
 | `api-context` | Context interface, logger, state, progress |
@@ -357,15 +361,18 @@ Each per-version file opens with YAML frontmatter:
 
 ```markdown
 ---
-summary: One-line headline, ≤250 chars  # required — powers the rollup index
+summary: One-line headline, ≤350 chars  # required — powers the rollup index
 breaking: false                          # optional — true flags breaking changes
+security: false                          # optional — true flags security fixes
 ---
 
 # 0.1.0 — YYYY-MM-DD
 ...
 ```
 
-`breaking: true` renders a `· ⚠️ Breaking` badge in the rollup — use it when consumers must update code on upgrade (signature changes, removed APIs, config renames).
+`breaking: true` renders a `· ⚠️ Breaking` badge — use it when consumers must update code on upgrade (signature changes, removed APIs, config renames). `security: true` renders a `· 🛡️ Security` badge and pairs with a `## Security` body section. When both are set, badges render `· ⚠️ Breaking · 🛡️ Security`.
+
+**Section order** (Keep a Changelog): Added, Changed, Deprecated, Removed, Fixed, Security. Include only sections with entries — don't ship empty headers.
 
 ---
 

@@ -86,8 +86,9 @@ const ObservationRowSchema = z
               .union([
                 z.string().describe('Calendar year as a string (e.g. "2024").'),
                 z.number().describe('Calendar year as an integer (e.g. 2024).'),
+                z.null().describe('Field present but null on the upstream.'),
               ])
-              .nullish()
+              .optional()
               .describe('Calendar year — accepts string or numeric form depending on server.'),
             season: z.string().nullish().describe('Season label (e.g. "wet", "dry", "Q1").'),
             seasonName: z
@@ -97,8 +98,9 @@ const ObservationRowSchema = z
           })
           .passthrough()
           .describe('Structured season block per BrAPI v2.1.'),
+        z.null().describe('Field present but null on the upstream.'),
       ])
-      .nullish()
+      .optional()
       .describe(
         'Season — either a flat string or a structured `{seasonDbId, year, season}` object depending on the server.',
       ),

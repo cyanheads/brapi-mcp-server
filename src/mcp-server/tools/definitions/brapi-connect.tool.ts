@@ -57,10 +57,9 @@ export const brapiConnect = tool('brapi_connect', {
   input: z.object({
     baseUrl: z
       .string()
-      .url()
       .optional()
       .describe(
-        'BrAPI v2 base URL including any path prefix — e.g. https://test-server.brapi.org/brapi/v2. Omit to use the configured default for this alias.',
+        'BrAPI v2 base URL (absolute URL) including any path prefix — e.g. https://test-server.brapi.org/brapi/v2. Omit to use the configured default for this alias.',
       ),
     auth: ConnectAuthSchema.optional().describe(
       'Auth payload. Omit to use credentials configured server-side for this alias (or no auth when none are configured).',

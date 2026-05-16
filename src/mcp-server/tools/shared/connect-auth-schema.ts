@@ -58,9 +58,10 @@ export const ConnectAuthSchema = z
         clientSecret: z.string().min(1).describe('OAuth2 client secret paired with the clientId.'),
         tokenUrl: z
           .string()
-          .url()
           .optional()
-          .describe('OAuth2 token endpoint URL. Defaults derived from the base URL when omitted.'),
+          .describe(
+            'OAuth2 token endpoint (absolute URL). Defaults derived from the base URL when omitted.',
+          ),
       })
       .describe('OAuth2 client-credentials variant.'),
   ])

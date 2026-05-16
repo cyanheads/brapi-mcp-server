@@ -50,8 +50,9 @@ const VariantRowSchema = z
         z
           .array(z.string().describe('One variant-set FK.'))
           .describe('Variant-set FK array — a variant may belong to multiple sets.'),
+        z.null().describe('Field present but null on the upstream.'),
       ])
-      .nullish()
+      .optional()
       .describe(
         'FK to the variant set(s) this variant belongs to. May be a string or string[] depending on server.',
       ),
