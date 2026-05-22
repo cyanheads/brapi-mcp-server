@@ -97,12 +97,33 @@ export function detectDialectFromName(
     haystack.includes('boyce thompson');
   const isBrapiTestHost = (haystack: string) =>
     haystack.includes('brapi test') || haystack.includes('community test server');
+  /*
+   * BMS (Breeding Management System) reports its server name in a handful of
+   * forms — `BMS`, `BMSAPI`, or the full label "Breeding Management System".
+   * Organization-name matches the major CGIAR centers that run BMS at scale
+   * — those names give a high-confidence dialect inference even when the
+   * server name is generic or absent. False-positive risk: an unrelated
+   * "BMS" substring in an arbitrary org name. The match is bounded by word
+   * delimiters (regex below) to keep "MBMS" or "BMSC" from triggering.
+   */
+  const isBmsName = (haystack: string) =>
+    /\bbms\b/.test(haystack) ||
+    /\bbmsapi\b/.test(haystack) ||
+    haystack.includes('breeding management system');
+  const isBmsOrg = (haystack: string) =>
+    haystack.includes('cimmyt') ||
+    haystack.includes('irri') ||
+    haystack.includes('icrisat') ||
+    haystack.includes('iita') ||
+    /\bcip\b/.test(haystack);
   if (isCassavaBase(lowerName)) return { id: 'cassavabase', source: 'server-name' };
   if (isCassavaBase(lowerOrg)) return { id: 'cassavabase', source: 'organization-name' };
   if (isBreedbaseHost(lowerName)) return { id: 'breedbase', source: 'server-name' };
   if (isBreedbaseHost(lowerOrg)) return { id: 'breedbase', source: 'organization-name' };
   if (isBrapiTestHost(lowerName)) return { id: 'brapi-test', source: 'server-name' };
   if (isBrapiTestHost(lowerOrg)) return { id: 'brapi-test', source: 'organization-name' };
+  if (isBmsName(lowerName)) return { id: 'bms', source: 'server-name' };
+  if (isBmsOrg(lowerOrg)) return { id: 'bms', source: 'organization-name' };
   return { id: 'spec', source: 'fallback' };
 }
 
