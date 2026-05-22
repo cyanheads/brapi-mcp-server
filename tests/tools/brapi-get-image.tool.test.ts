@@ -241,6 +241,122 @@ describe('brapi_get_image tool', () => {
     expect(fetchedUrl).toBe('https://cdn.example.org/plot.jpg');
   });
 
+  it('collapses double slashes in the resolved imageURL pathname', async () => {
+    const ctx = await connect(fetcher, ['images']);
+    let fetchedUrl = '';
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/images/img-dbl')) {
+        return jsonResponse(
+          envelope({
+            imageDbId: 'img-dbl',
+            // T3 ships absolute URLs with a stray double slash between host
+            // and path — verbatim fetch 404s; the resolver normalizes them.
+            imageURL: 'https://wheat.triticeaetoolbox.org//data/images/abc.jpg',
+            mimeType: 'image/jpeg',
+          }),
+        );
+      }
+      fetchedUrl = String(url);
+      if (fetchedUrl.startsWith('https://wheat.triticeaetoolbox.org/')) return pngResponse();
+      throw new Error(`Unexpected path: ${url}`);
+    });
+
+    const result = await brapiGetImage.handler(
+      brapiGetImage.input.parse({ imageDbIds: ['img-dbl'] }),
+      ctx,
+    );
+    expect(result.images).toHaveLength(1);
+    expect(fetchedUrl).toBe('https://wheat.triticeaetoolbox.org/data/images/abc.jpg');
+  });
+
+  it('strips null metadata fields on SGN-family dialects before output validation', async () => {
+    // Server-name matches the CassavaBase dialect; the normalizer must run
+    // on the singleton /images/{id} response so `description: null` doesn't
+    // reach z.string().optional() and trigger output-schema rejection.
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/serverinfo')) {
+        return jsonResponse(
+          envelope({
+            serverName: 'CassavaBase',
+            calls: [
+              { service: 'images', methods: ['GET'], versions: ['2.1'] },
+              {
+                service: 'images/{imageDbId}/imagecontent',
+                methods: ['GET'],
+                versions: ['2.1'],
+              },
+            ],
+          }),
+        );
+      }
+      if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiGetImage.errors });
+    await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
+    fetcher.mockReset();
+
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/images/img-sparse')) {
+        return jsonResponse(
+          envelope({
+            imageDbId: 'img-sparse',
+            imageName: 'plot-7',
+            description: null,
+            copyright: null,
+            mimeType: 'image/png',
+          }),
+        );
+      }
+      if (path.endsWith('/images/img-sparse/imagecontent')) return pngResponse();
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiGetImage.handler(
+      brapiGetImage.input.parse({ imageDbIds: ['img-sparse'] }),
+      ctx,
+    );
+    expect(result.images).toHaveLength(1);
+    expect(result.errors).toHaveLength(0);
+    expect(result.images[0]?.metadata.description).toBeUndefined();
+    expect(result.images[0]?.metadata.copyright).toBeUndefined();
+  });
+
+  it('coerces numeric-string imageHeight/imageWidth into numbers', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/images/img-coerce')) {
+        return jsonResponse(
+          envelope({
+            imageDbId: 'img-coerce',
+            // T3 / Breedbase commonly serialize these as strings; the schema
+            // coerces so output validation doesn't reject the payload.
+            imageHeight: '480',
+            imageWidth: '640',
+            mimeType: 'image/png',
+          }),
+        );
+      }
+      if (path.endsWith('/images/img-coerce/imagecontent')) return pngResponse();
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiGetImage.handler(
+      brapiGetImage.input.parse({ imageDbIds: ['img-coerce'] }),
+      ctx,
+    );
+    // The framework parses output at the boundary; verify the schema does the
+    // coercion so a string-typed upstream doesn't fail output validation.
+    const parsed = brapiGetImage.output.parse(result);
+    expect(parsed.images).toHaveLength(1);
+    expect(parsed.images[0]?.metadata.imageHeight).toBe(480);
+    expect(parsed.images[0]?.metadata.imageWidth).toBe(640);
+  });
+
   it('concatenates baseUrl when imageURL is a root-relative path', async () => {
     const ctx = await connect(fetcher, ['images']);
     let fetchedUrl = '';

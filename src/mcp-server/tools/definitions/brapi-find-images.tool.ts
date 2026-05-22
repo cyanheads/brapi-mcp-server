@@ -44,9 +44,20 @@ const ImageRowSchema = z
     imageDbId: z.string().describe('Server-side identifier for the image.'),
     imageName: z.string().nullish().describe('Display name.'),
     imageFileName: z.string().nullish().describe('Original uploaded filename.'),
-    imageFileSize: z.number().nullish().describe('File size in bytes.'),
-    imageHeight: z.number().nullish().describe('Pixel height.'),
-    imageWidth: z.number().nullish().describe('Pixel width.'),
+    imageFileSize: z.coerce
+      .number()
+      .nullish()
+      .describe(
+        'File size in bytes. Coerced from string when the upstream emits a numeric string.',
+      ),
+    imageHeight: z.coerce
+      .number()
+      .nullish()
+      .describe('Pixel height. Coerced from string when the upstream emits a numeric string.'),
+    imageWidth: z.coerce
+      .number()
+      .nullish()
+      .describe('Pixel width. Coerced from string when the upstream emits a numeric string.'),
     mimeType: z.string().nullish().describe('MIME type (e.g. "image/jpeg").'),
     imageTimeStamp: z.string().nullish().describe('ISO 8601 capture timestamp.'),
     imageURL: z

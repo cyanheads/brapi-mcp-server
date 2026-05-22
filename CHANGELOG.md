@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-05-22
+
+Three field-test fixes against T3 / Breedbase image surfaces: collapse double slashes in resolved imageURL paths, wire the SGN row normalizer through brapi_get_image, and coerce numeric-string image dimensions at schema-validation time.
+
 ## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-05-22
 
 BMS dialect for the CGIAR crop community, route escalation to POST /search when GET would downcast multi-value filters, walk_pedigree `direction` field, plus fixes for bbox spillover ordering, schemeless `imageURL` resolution, singleton-fetch 5xx retry storms, and large inline JSON in `find_*` text rows.

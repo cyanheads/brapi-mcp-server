@@ -150,6 +150,34 @@ describe('brapi_find_images tool', () => {
     expect(result.results[0]?.imageTimeStamp).toBeNull();
   });
 
+  it('coerces numeric-string imageHeight/imageWidth/imageFileSize at output validation', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(
+      jsonResponse(
+        envelope(
+          {
+            data: [
+              {
+                imageDbId: 'img-coerce',
+                // T3 / Breedbase emit dimensions as strings; the schema coerces
+                // so output validation doesn't reject the payload.
+                imageHeight: '480',
+                imageWidth: '640',
+                imageFileSize: '12345',
+              },
+            ],
+          },
+          { totalCount: 1 },
+        ),
+      ),
+    );
+    const result = await brapiFindImages.handler(brapiFindImages.input.parse({}), ctx);
+    const parsed = brapiFindImages.output.parse(result);
+    expect(parsed.results[0]?.imageHeight).toBe(480);
+    expect(parsed.results[0]?.imageWidth).toBe(640);
+    expect(parsed.results[0]?.imageFileSize).toBe(12345);
+  });
+
   it('downcasts plural filters to singular when connected to a CassavaBase server', async () => {
     const ctx = await connect(fetcher, ['images'], 'CassavaBase');
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));

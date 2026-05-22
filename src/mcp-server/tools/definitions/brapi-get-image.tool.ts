@@ -11,6 +11,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
+import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
@@ -28,8 +29,14 @@ const ImageMetadataSchema = z
     imageDbId: z.string().describe('Server-side identifier for the image.'),
     imageName: z.string().optional().describe('Display name.'),
     imageFileName: z.string().optional().describe('Original uploaded filename.'),
-    imageHeight: z.number().optional().describe('Pixel height.'),
-    imageWidth: z.number().optional().describe('Pixel width.'),
+    imageHeight: z.coerce
+      .number()
+      .optional()
+      .describe('Pixel height. Coerced from string when the upstream emits a numeric string.'),
+    imageWidth: z.coerce
+      .number()
+      .optional()
+      .describe('Pixel width. Coerced from string when the upstream emits a numeric string.'),
     mimeType: z.string().optional().describe('MIME type (e.g. "image/jpeg").'),
     imageURL: z.string().optional().describe('URL where the bytes live.'),
     observationUnitDbId: z
@@ -136,8 +143,10 @@ export const brapiGetImage = tool('brapi_get_image', {
           imagecontentDescriptor.methods.includes('GET')),
     );
 
+    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
     const loaded = await Promise.all(
-      input.imageDbIds.map((id) => fetchOne(id, hasImageContent, connection, client, ctx)),
+      input.imageDbIds.map((id) => fetchOne(id, hasImageContent, connection, dialect, client, ctx)),
     );
 
     const images: z.infer<typeof ImagePayloadSchema>[] = [];
@@ -252,6 +261,7 @@ async function fetchOne(
   imageDbId: string,
   hasImageContent: boolean,
   connection: RegisteredServer,
+  dialect: BrapiDialect,
   client: BrapiClient,
   ctx: Parameters<typeof client.get>[2],
 ): Promise<FetchResult> {
@@ -263,10 +273,13 @@ async function fetchOne(
       ctx,
       buildRequestOptions(connection),
     );
-    const metadata = metaEnv.result;
-    if (!metadata || typeof metadata !== 'object' || !metadata.imageDbId) {
+    const rawMetadata = metaEnv.result;
+    if (!rawMetadata || typeof rawMetadata !== 'object' || !rawMetadata.imageDbId) {
       return { kind: 'error', imageDbId, error: 'Image metadata missing or malformed.' };
     }
+    const metadata = dialect.normalizeRow
+      ? dialect.normalizeRow('images', rawMetadata)
+      : rawMetadata;
 
     const fetched = await fetchBytes({
       client,
@@ -361,7 +374,7 @@ async function fetchBytes(
 
 /**
  * Resolve an `imageURL` metadata value to an absolute fetchable URL.
- * Three input shapes are handled:
+ * Four input shapes are handled:
  *   1. Absolute URL (`https://host/path`, `http://host/path`) — returned as-is.
  *   2. Schemeless protocol-relative (`//host/path`) — prefixed with `https:`.
  *   3. Schemeless domain-shaped (`host.tld/path`, e.g. Breedbase's
@@ -369,14 +382,29 @@ async function fetchBytes(
  *   4. Root-relative or relative path (`/path` or `path`) — concatenated with
  *      the BrAPI baseUrl. This is the legitimate "image is hosted on the same
  *      BrAPI server" case.
+ *
+ * After resolution, multiple consecutive slashes in the pathname are
+ * collapsed to a single slash. Several upstreams (T3 family) emit
+ * `imageURL` values with stray double slashes (`host//data/...`) that
+ * 404 verbatim; the cleanup keeps query string and fragment intact.
  */
 function resolveImageUrl(baseUrl: string, imageUrl: string): string {
-  if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) return imageUrl;
-  if (imageUrl.startsWith('//')) return `https:${imageUrl}`;
-  if (SCHEMELESS_DOMAIN.test(imageUrl)) return `https://${imageUrl}`;
-  const trimmed = baseUrl.replace(/\/$/, '');
-  const prefixed = imageUrl.startsWith('/') ? imageUrl : `/${imageUrl}`;
-  return `${trimmed}${prefixed}`;
+  let resolved: string;
+  if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) resolved = imageUrl;
+  else if (imageUrl.startsWith('//')) resolved = `https:${imageUrl}`;
+  else if (SCHEMELESS_DOMAIN.test(imageUrl)) resolved = `https://${imageUrl}`;
+  else {
+    const trimmed = baseUrl.replace(/\/$/, '');
+    const prefixed = imageUrl.startsWith('/') ? imageUrl : `/${imageUrl}`;
+    resolved = `${trimmed}${prefixed}`;
+  }
+  try {
+    const url = new URL(resolved);
+    url.pathname = url.pathname.replace(/\/{2,}/g, '/');
+    return url.toString();
+  } catch {
+    return resolved;
+  }
 }
 
 /**
