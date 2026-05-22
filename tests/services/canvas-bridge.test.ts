@@ -393,6 +393,17 @@ describe('CanvasBridge.registerDataframe', () => {
     });
     expect(a.tableName).not.toBe(b.tableName);
   });
+
+  it('uses the short df_XXXXX_XXXXX format (14 chars, alphanumeric)', async () => {
+    const ctx = createMockContext({ tenantId: 't1' });
+    const result = await bridge.registerDataframe(ctx, {
+      source: 'find_observations',
+      baseUrl: 'https://b/v2',
+      query: {},
+      rows: [{ a: 1 }],
+    });
+    expect(result.tableName).toMatch(/^df_[A-Z0-9]{5}_[A-Z0-9]{5}$/);
+  });
 });
 
 describe('CanvasBridge.query', () => {
