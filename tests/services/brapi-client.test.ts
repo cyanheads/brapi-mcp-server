@@ -186,6 +186,31 @@ describe('BrapiClient', () => {
       });
     });
 
+    it('reclassifies 5xx as NotFound when singleton=true (#30)', async () => {
+      // Breedbase serves HTTP 500 for unknown `/studies/{id}` instead of 404.
+      // With singleton=true the client must fast-fail as NotFound so the
+      // calling tool can route through its `*_not_found` contract instead of
+      // burning the full retry budget on a record that doesn't exist.
+      fetcher.mockRejectedValue(httpError(500, 'Internal Server Error'));
+      const ctx = createMockContext();
+
+      await expect(
+        client.get(BASE_URL, '/studies/does-not-exist', ctx, { singleton: true }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'upstream_not_found', upstreamStatus: 500 },
+      });
+    });
+
+    it('still surfaces 5xx as ServiceUnavailable on non-singleton GETs', async () => {
+      fetcher.mockRejectedValue(httpError(500));
+      const ctx = createMockContext();
+
+      await expect(client.get(BASE_URL, '/studies', ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+      });
+    });
+
     it('rejects payloads that are not a BrAPI envelope', async () => {
       fetcher.mockResolvedValue(jsonResponse({ notAnEnvelope: true }));
       const ctx = createMockContext();
