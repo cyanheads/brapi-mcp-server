@@ -12,9 +12,13 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
-import { AliasInput, appendPassthroughLines, buildRequestOptions } from '../shared/find-helpers.js';
+import {
+  AliasInput,
+  appendPassthroughLines,
+  buildRequestOptions,
+  requireRegisteredConnection,
+} from '../shared/find-helpers.js';
 
 const MAX_IMAGES_PER_CALL = 5;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -84,6 +88,13 @@ export const brapiGetImage = tool('brapi_get_image', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No connection has been registered under the requested alias',
+      recovery:
+        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_get_image.',
+    },
+    {
       reason: 'images_unsupported',
       code: JsonRpcErrorCode.NotFound,
       when: 'BrAPI server does not advertise /images in /serverinfo',
@@ -102,11 +113,10 @@ export const brapiGetImage = tool('brapi_get_image', {
   output: OutputSchema,
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
@@ -349,12 +359,35 @@ async function fetchBytes(
   };
 }
 
+/**
+ * Resolve an `imageURL` metadata value to an absolute fetchable URL.
+ * Three input shapes are handled:
+ *   1. Absolute URL (`https://host/path`, `http://host/path`) — returned as-is.
+ *   2. Schemeless protocol-relative (`//host/path`) — prefixed with `https:`.
+ *   3. Schemeless domain-shaped (`host.tld/path`, e.g. Breedbase's
+ *      `breedbase.org/data/images/.../medium.jpg`) — prefixed with `https://`.
+ *   4. Root-relative or relative path (`/path` or `path`) — concatenated with
+ *      the BrAPI baseUrl. This is the legitimate "image is hosted on the same
+ *      BrAPI server" case.
+ */
 function resolveImageUrl(baseUrl: string, imageUrl: string): string {
   if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) return imageUrl;
+  if (imageUrl.startsWith('//')) return `https:${imageUrl}`;
+  if (SCHEMELESS_DOMAIN.test(imageUrl)) return `https://${imageUrl}`;
   const trimmed = baseUrl.replace(/\/$/, '');
   const prefixed = imageUrl.startsWith('/') ? imageUrl : `/${imageUrl}`;
   return `${trimmed}${prefixed}`;
 }
+
+/**
+ * Matches values that look like `domain.tld/path` or just `domain.tld` — a
+ * leading character that isn't `/`, followed by at least one DNS-style label
+ * with a TLD of two-plus letters. Excludes leading slashes (path) and IPv4
+ * dotted-quads (rare in `imageURL`, and the surrounding flow treats them as
+ * paths under baseUrl just fine).
+ */
+const SCHEMELESS_DOMAIN =
+  /^(?!\/)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?:[/:?#]|$)/i;
 
 function toBase64(bytes: Uint8Array): string {
   if (typeof Buffer !== 'undefined') {

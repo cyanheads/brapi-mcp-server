@@ -183,6 +183,91 @@ describe('brapi_get_image tool', () => {
     expect(result.warnings[0]?.warning).toContain('text/html');
   });
 
+  it('prefixes https:// when imageURL is schemeless but domain-shaped', async () => {
+    const ctx = await connect(fetcher, ['images']); // no imagecontent
+    let fetchedUrl = '';
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/images/img-bare')) {
+        return jsonResponse(
+          envelope({
+            imageDbId: 'img-bare',
+            // Real Breedbase shape: schemeless host + absolute path on that host.
+            imageURL: 'breedbase.org/data/images/abc/medium.jpg',
+            mimeType: 'image/jpeg',
+          }),
+        );
+      }
+      fetchedUrl = String(url);
+      if (fetchedUrl.startsWith('https://breedbase.org/')) return pngResponse();
+      throw new Error(`Unexpected path: ${url}`);
+    });
+
+    const result = await brapiGetImage.handler(
+      brapiGetImage.input.parse({ imageDbIds: ['img-bare'] }),
+      ctx,
+    );
+    expect(result.images).toHaveLength(1);
+    expect(result.errors).toHaveLength(0);
+    // The fallback must have rewritten the schemeless domain to https://, not
+    // concatenated it under the baseUrl.
+    expect(fetchedUrl).toBe('https://breedbase.org/data/images/abc/medium.jpg');
+  });
+
+  it('prefixes https: when imageURL is protocol-relative (//host/path)', async () => {
+    const ctx = await connect(fetcher, ['images']);
+    let fetchedUrl = '';
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/images/img-protorel')) {
+        return jsonResponse(
+          envelope({
+            imageDbId: 'img-protorel',
+            imageURL: '//cdn.example.org/plot.jpg',
+            mimeType: 'image/jpeg',
+          }),
+        );
+      }
+      fetchedUrl = String(url);
+      if (fetchedUrl.startsWith('https://cdn.example.org/')) return pngResponse();
+      throw new Error(`Unexpected path: ${url}`);
+    });
+
+    const result = await brapiGetImage.handler(
+      brapiGetImage.input.parse({ imageDbIds: ['img-protorel'] }),
+      ctx,
+    );
+    expect(result.images).toHaveLength(1);
+    expect(fetchedUrl).toBe('https://cdn.example.org/plot.jpg');
+  });
+
+  it('concatenates baseUrl when imageURL is a root-relative path', async () => {
+    const ctx = await connect(fetcher, ['images']);
+    let fetchedUrl = '';
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/images/img-rel')) {
+        return jsonResponse(
+          envelope({
+            imageDbId: 'img-rel',
+            imageURL: '/files/plot.jpg',
+            mimeType: 'image/jpeg',
+          }),
+        );
+      }
+      fetchedUrl = String(url);
+      if (fetchedUrl.endsWith('/files/plot.jpg')) return pngResponse();
+      throw new Error(`Unexpected path: ${url}`);
+    });
+
+    const result = await brapiGetImage.handler(
+      brapiGetImage.input.parse({ imageDbIds: ['img-rel'] }),
+      ctx,
+    );
+    expect(result.images).toHaveLength(1);
+    expect(fetchedUrl).toBe(`${BASE_URL}/files/plot.jpg`);
+  });
+
   it('format() emits text + image content blocks', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockImplementation(async (url: string) => {
