@@ -198,6 +198,76 @@ describe('brapi_walk_pedigree tool', () => {
     expect(result.warnings.join('\n')).toContain('/germplasm/{id}/progeny');
   });
 
+  it('tags nodes with their direction relative to the root', async () => {
+    const ctx = await connect(fetcher, ['germplasm/{germplasmDbId}/progeny']);
+    // g-1's parent is g-2; g-1's child is g-3. Walking from g-1 with
+    // direction=both should produce nodes tagged root / ancestor / descendant.
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      const ped = path.match(/\/germplasm\/([^/]+)\/pedigree$/);
+      if (ped) {
+        const id = decodeURIComponent(ped[1]!);
+        if (id === 'g-1') return jsonResponse(envelope({ parents: [{ germplasmDbId: 'g-2' }] }));
+        return jsonResponse(envelope({ parents: [] }));
+      }
+      const prog = path.match(/\/germplasm\/([^/]+)\/progeny$/);
+      if (prog) {
+        const id = decodeURIComponent(prog[1]!);
+        if (id === 'g-1') return jsonResponse(envelope({ data: [{ germplasmDbId: 'g-3' }] }));
+        return jsonResponse(envelope({ data: [] }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiWalkPedigree.handler(
+      brapiWalkPedigree.input.parse({
+        germplasmDbIds: ['g-1'],
+        direction: 'both',
+        maxDepth: 2,
+      }),
+      ctx,
+    );
+
+    const byId = new Map(result.nodes.map((n) => [n.germplasmDbId, n] as const));
+    expect(byId.get('g-1')?.direction).toBe('root');
+    expect(byId.get('g-2')?.direction).toBe('ancestor');
+    expect(byId.get('g-3')?.direction).toBe('descendant');
+  });
+
+  it('tags a node as `both` when it appears as ancestor and descendant', async () => {
+    const ctx = await connect(fetcher, ['germplasm/{germplasmDbId}/progeny']);
+    // g-2 is BOTH a parent and a child of g-1 — describes a degenerate
+    // backcross/selfing scenario, but the node-tagging contract must handle it.
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      const ped = path.match(/\/germplasm\/([^/]+)\/pedigree$/);
+      if (ped) {
+        const id = decodeURIComponent(ped[1]!);
+        if (id === 'g-1') return jsonResponse(envelope({ parents: [{ germplasmDbId: 'g-2' }] }));
+        return jsonResponse(envelope({ parents: [] }));
+      }
+      const prog = path.match(/\/germplasm\/([^/]+)\/progeny$/);
+      if (prog) {
+        const id = decodeURIComponent(prog[1]!);
+        if (id === 'g-1') return jsonResponse(envelope({ data: [{ germplasmDbId: 'g-2' }] }));
+        return jsonResponse(envelope({ data: [] }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiWalkPedigree.handler(
+      brapiWalkPedigree.input.parse({
+        germplasmDbIds: ['g-1'],
+        direction: 'both',
+        maxDepth: 2,
+      }),
+      ctx,
+    );
+
+    const g2 = result.nodes.find((n) => n.germplasmDbId === 'g-2');
+    expect(g2?.direction).toBe('both');
+  });
+
   it('does not count inverse-edge backtracks as cycles when direction=both', async () => {
     const ctx = await connect(fetcher, ['germplasm/{germplasmDbId}/progeny']);
     // g-1 ← parent of g-3; g-2 ← parent of g-3.
