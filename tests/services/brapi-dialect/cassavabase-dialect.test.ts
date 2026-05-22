@@ -302,4 +302,93 @@ describe('cassavabaseDialect', () => {
       expect(result.warnings).toEqual([]);
     });
   });
+
+  describe('mappingSummary (#5)', () => {
+    it('exposes a verified-vs-inferred count', () => {
+      const summary = cassavabaseDialect.mappingSummary;
+      expect(summary).toBeDefined();
+      // Five entries are tagged with verified (// observed: works) — the
+      // four on /studies (commonCropNames, programDbIds, trialDbIds,
+      // seasonDbIds) plus studyDbIds on /observations.
+      expect(summary?.verified).toBeGreaterThanOrEqual(5);
+      // Inferred set is large by design: most v2.1 plurals follow the same
+      // naming pattern but only a handful have been live-narrowed.
+      expect(summary?.inferred).toBeGreaterThan(summary?.verified ?? 0);
+    });
+
+    it('emits a softened warning when an inferred mapping downcasts', () => {
+      // synonyms on /germplasm is inferred (no // observed: works marker).
+      const result = cassavabaseDialect.adaptGetFilters('germplasm', {
+        synonyms: ['alpha', 'beta'],
+      });
+      expect(result.warnings[0]).toMatch(/mapping inferred/);
+    });
+
+    it('does NOT add the inferred-mapping suffix on a verified downcast', () => {
+      // commonCropNames → commonCropName is verified.
+      const result = cassavabaseDialect.adaptGetFilters('studies', {
+        commonCropNames: ['Cassava', 'Sweet Potato'],
+      });
+      expect(result.warnings[0]).not.toMatch(/mapping inferred/);
+    });
+  });
+
+  describe('normalizeRow (#6)', () => {
+    it('strips top-level null values from upstream rows', () => {
+      const row = {
+        locationDbId: 'loc-1',
+        locationName: 'Ibadan',
+        countryCode: 'NGA',
+        latitude: null,
+        longitude: null,
+        altitude: null,
+        documentationURL: null,
+      };
+      const normalized = cassavabaseDialect.normalizeRow?.('locations', row);
+      expect(normalized).toEqual({
+        locationDbId: 'loc-1',
+        locationName: 'Ibadan',
+        countryCode: 'NGA',
+      });
+    });
+
+    it('recurses into nested objects and arrays', () => {
+      const row = {
+        observationVariableDbId: 'v1',
+        trait: { traitDbId: 'T1', traitName: 'yield', synonyms: null },
+        scale: null,
+        synonyms: [{ synonym: 'syn1', type: null }, { synonym: null, type: 'COMMON' }, null],
+      };
+      const normalized = cassavabaseDialect.normalizeRow?.('variables', row);
+      expect(normalized).toEqual({
+        observationVariableDbId: 'v1',
+        trait: { traitDbId: 'T1', traitName: 'yield' },
+        synonyms: [{ synonym: 'syn1' }, { type: 'COMMON' }],
+      });
+    });
+
+    it('preserves non-null falsy values (empty string, 0, false)', () => {
+      const row = {
+        germplasmDbId: 'g1',
+        active: false,
+        count: 0,
+        notes: '',
+        nothing: null,
+      };
+      const normalized = cassavabaseDialect.normalizeRow?.('germplasm', row);
+      expect(normalized).toEqual({
+        germplasmDbId: 'g1',
+        active: false,
+        count: 0,
+        notes: '',
+      });
+    });
+
+    it('does not mutate the input row', () => {
+      const row = { a: 1, b: null };
+      const before = JSON.stringify(row);
+      cassavabaseDialect.normalizeRow?.('whatever', row);
+      expect(JSON.stringify(row)).toBe(before);
+    });
+  });
 });

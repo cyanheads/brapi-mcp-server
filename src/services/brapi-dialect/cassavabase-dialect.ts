@@ -24,8 +24,14 @@
  * @module services/brapi-dialect/cassavabase-dialect
  */
 
-import { createSingularizingDialect } from './singularizing-dialect.js';
+import {
+  createSingularizingDialect,
+  type DialectFilterMappingInput,
+} from './singularizing-dialect.js';
 import type { BrapiDialect } from './types.js';
+
+/** Shorthand for marking a mapping as live-verified. */
+const verified = (target: string): DialectFilterMappingInput => ({ target, verified: true });
 
 /**
  * Plural BrAPI v2.1 filter key → singular form CassavaBase honors. Keyed by
@@ -39,16 +45,19 @@ import type { BrapiDialect } from './types.js';
  * in `find-helpers` will surface a warning when a translation doesn't reduce
  * the result set as expected.
  */
-const CASSAVABASE_PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
+const CASSAVABASE_PLURAL_TO_SINGULAR: Record<
+  string,
+  Readonly<Record<string, DialectFilterMappingInput>>
+> = {
   studies: {
-    commonCropNames: 'commonCropName', // observed: works
+    commonCropNames: verified('commonCropName'),
     studyTypes: 'studyType',
-    programDbIds: 'programDbId', // observed: works
+    programDbIds: verified('programDbId'),
     programNames: 'programName',
-    trialDbIds: 'trialDbId', // observed: works
+    trialDbIds: verified('trialDbId'),
     trialNames: 'trialName',
     locationNames: 'locationName',
-    seasonDbIds: 'seasonDbId', // observed: works
+    seasonDbIds: verified('seasonDbId'),
     studyDbIds: 'studyDbId',
     studyNames: 'studyName',
     studyCodes: 'studyCode',
@@ -70,7 +79,7 @@ const CASSAVABASE_PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, str
     externalReferenceIds: 'externalReferenceId',
   },
   observations: {
-    studyDbIds: 'studyDbId', // observed: works
+    studyDbIds: verified('studyDbId'),
     germplasmDbIds: 'germplasmDbId',
     observationVariableDbIds: 'observationVariableDbId',
     observationUnitDbIds: 'observationUnitDbId',
@@ -133,7 +142,10 @@ const CASSAVABASE_PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, str
   },
 };
 
-const BREEDBASE_PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
+const BREEDBASE_PLURAL_TO_SINGULAR: Record<
+  string,
+  Readonly<Record<string, DialectFilterMappingInput>>
+> = {
   ...CASSAVABASE_PLURAL_TO_SINGULAR,
   // Sweetpotatobase (SPB) honors the BrAPI v2 plural location filters and
   // silently ignores singular locationDbId/locationName/countryCode/
@@ -191,7 +203,7 @@ const SGN_NOTES = [
 function createSgnFamilyDialect(
   id: string,
   label: string,
-  pluralToSingular: Record<string, Readonly<Record<string, string>>>,
+  pluralToSingular: Record<string, Readonly<Record<string, DialectFilterMappingInput>>>,
 ): BrapiDialect {
   return createSingularizingDialect({
     id,
@@ -200,7 +212,38 @@ function createSgnFamilyDialect(
     droppedFilters: DROPPED_FILTERS,
     disabledSearchEndpoints: DISABLED_SEARCH_ENDPOINTS,
     notes: SGN_NOTES,
+    normalizeRow: normalizeSgnRow,
   });
+}
+
+/**
+ * SGN-family servers emit `null` for many optional fields where the BrAPI
+ * v2.1 spec says the field should be omitted. This pre-validation coercion
+ * walks one row and removes any key whose value is `null`, recursing one
+ * level into nested objects (the only depth our schemas care about) and into
+ * arrays of objects. Returns a fresh object; never mutates the input.
+ *
+ * Intentionally narrow: we don't strip `""` (some servers use empty strings
+ * as legitimate values) and we don't strip the `'NA'` sentinel (some
+ * accession codes legitimately contain "NA"). Add curated allowlist later
+ * when a sparse-shape pattern shows up in field tests.
+ */
+function normalizeSgnRow(_endpoint: string, row: Record<string, unknown>): Record<string, unknown> {
+  return stripNulls(row) as Record<string, unknown>;
+}
+
+function stripNulls(value: unknown): unknown {
+  if (value === null) return;
+  if (Array.isArray(value)) {
+    return value.map(stripNulls).filter((v) => v !== undefined);
+  }
+  if (typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    const coerced = stripNulls(val);
+    if (coerced !== undefined) out[key] = coerced;
+  }
+  return out;
 }
 
 export const cassavabaseDialect = createSgnFamilyDialect(
