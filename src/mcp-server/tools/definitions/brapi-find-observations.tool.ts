@@ -19,11 +19,7 @@ import {
 import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import {
-  DEFAULT_ALIAS,
-  getServerRegistry,
-  type RegisteredServer,
-} from '@/services/server-registry/index.js';
+import type { RegisteredServer } from '@/services/server-registry/index.js';
 import {
   AliasInput,
   applyDialectFiltersOrFail,
@@ -36,6 +32,7 @@ import {
   companionRequestOptions,
   computeDistribution,
   DataframeHandleSchema,
+  dialectRowMapper,
   ExtraFiltersInput,
   extractRows,
   type FindRoute,
@@ -49,6 +46,7 @@ import {
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
 
@@ -202,6 +200,13 @@ export const brapiFindObservations = tool('brapi_find_observations', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No connection has been registered under the requested alias',
+      recovery:
+        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_observations.',
+    },
+    {
       reason: 'all_filters_dropped',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The active dialect dropped every filter the agent supplied — the upstream server does not honor any of the requested scope filters on this endpoint, so the call would silently widen to the unfiltered baseline.',
@@ -231,13 +236,12 @@ export const brapiFindObservations = tool('brapi_find_observations', {
   output: OutputSchema,
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
     const bridge = getCanvasBridge();
     const config = getServerConfig();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
@@ -264,7 +268,8 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       warnings,
     );
 
-    const filters = applyDialectFiltersOrFail(ctx, dialect, 'observations', merged, warnings);
+    const adapted = applyDialectFiltersOrFail(ctx, dialect, 'observations', merged, warnings);
+    const filters = adapted.filters;
     const route = resolveFindRoute({
       profile,
       dialect,
@@ -272,11 +277,20 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       filters,
       searchBody: merged,
       warnings,
+      ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
     });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
+    const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'observations');
     const loadObservations = (pageSize: number) =>
-      loadInitialFindPage<Record<string, unknown>>(client, connection, route, pageSize, ctx);
+      loadInitialFindPage<Record<string, unknown>>(
+        client,
+        connection,
+        route,
+        pageSize,
+        ctx,
+        normalizeRow ? { normalizeRow } : {},
+      );
 
     /**
      * Danger pattern: querying `/observations` without one of the four
@@ -351,6 +365,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
           ctx,
           bridge,
           warnings,
+          ...(normalizeRow ? { normalizeRow } : {}),
           spillRequestOptions: {
             timeoutMs: config.companionTimeoutMs,
             retryMaxAttempts: 0,

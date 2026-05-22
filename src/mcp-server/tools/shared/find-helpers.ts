@@ -18,7 +18,7 @@ import type {
   BrapiRequestOptions,
   ResolvedAuth,
 } from '@/services/brapi-client/index.js';
-import type { BrapiDialect } from '@/services/brapi-dialect/index.js';
+import type { BrapiDialect, DialectAdaptation } from '@/services/brapi-dialect/index.js';
 import type {
   CanvasBridge,
   RegisterDataframeInput,
@@ -26,10 +26,39 @@ import type {
 } from '@/services/canvas-bridge/index.js';
 import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
+import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 
 /** True when the thrown value is an upstream 404 surfaced by the BrAPI client. */
 export function isUpstreamNotFound(err: unknown): boolean {
   return err instanceof McpError && err.code === JsonRpcErrorCode.NotFound;
+}
+
+/**
+ * Resolve a registered BrAPI connection by alias, throwing the calling tool's
+ * `'unknown_alias'` contract on miss so the wire-level error carries
+ * `data.recovery.hint` from the tool's `errors[]` entry. Use this instead of
+ * `registry.get(...)` whenever the calling tool/resource declares the
+ * `unknown_alias` reason — `registry.get` throws a bare `notFound()` factory
+ * that the contract recovery resolver can't reach.
+ *
+ * Every caller MUST declare an `errors[]` entry whose `reason` is
+ * `'unknown_alias'`; the type signature enforces this at compile time.
+ */
+export async function requireRegisteredConnection(
+  ctx: HandlerContext<'unknown_alias'>,
+  alias: string | undefined,
+): Promise<RegisteredServer> {
+  const resolved = alias ?? DEFAULT_ALIAS;
+  const registry = getServerRegistry();
+  const connection = await registry.getOptional(ctx, resolved);
+  if (!connection) {
+    throw ctx.fail(
+      'unknown_alias',
+      `No BrAPI connection registered under alias '${resolved}'. Call brapi_connect first.`,
+      { alias: resolved, ...ctx.recoveryFor('unknown_alias') },
+    );
+  }
+  return connection;
 }
 
 /** Upper cap on how many rows we'll pull for canvas dataframe spillover per call. */
@@ -42,7 +71,9 @@ export const AliasInput = z
   .string()
   .regex(/^[a-zA-Z0-9_-]+$/)
   .optional()
-  .describe('Connection alias registered via brapi_connect. Omit to use the default connection.');
+  .describe(
+    'Connection alias registered via brapi_connect. Omit to read the connection registered under alias `default` — i.e. a prior brapi_connect call that did not specify an alias. Calls that used a non-default alias must pass that same alias here.',
+  );
 
 export const LoadLimitInput = z
   .number()
@@ -96,6 +127,11 @@ export function mergeFilters(
  * spreads it into `data` so the wire-level shape stays consistent across the
  * find_* surface. The bare-baseline call (no filters supplied) is exempt:
  * `dropped` is empty so the all-dropped predicate is false.
+ *
+ * Returns the full {@link DialectAdaptation} so callers can read
+ * `requiresEscalation` and prefer POST /search when GET would lose multi-value
+ * semantics (#15). Most call sites destructure `.filters` for the route
+ * resolver and forward `.requiresEscalation` verbatim.
  */
 export function applyDialectFiltersOrFail(
   ctx: HandlerContext<'all_filters_dropped'>,
@@ -103,7 +139,7 @@ export function applyDialectFiltersOrFail(
   endpoint: string,
   filters: Readonly<Record<string, unknown>>,
   warnings: string[],
-): Record<string, unknown> {
+): DialectAdaptation {
   const adapted = dialect.adaptGetFilters(endpoint, filters);
   warnings.push(...adapted.warnings);
   if (adapted.dropped.length > 0 && Object.keys(adapted.filters).length === 0) {
@@ -117,7 +153,7 @@ export function applyDialectFiltersOrFail(
       },
     );
   }
-  return adapted.filters;
+  return adapted;
 }
 
 export type FindRoute =
@@ -139,6 +175,15 @@ export interface ResolveFindRouteInput {
   endpoint: string;
   filters: Record<string, unknown>;
   profile: CapabilityProfile;
+  /**
+   * Set by the dialect adapter when at least one multi-value array filter
+   * was downcast to a single scalar on the GET wire. When true and a working
+   * POST `/search/{noun}` is advertised, the route resolver escalates to
+   * search to preserve the original multi-value semantics — without this
+   * the agent would silently see a result set narrowed to the first value
+   * only. See {@link DialectAdaptation.requiresEscalation}.
+   */
+  requiresEscalation?: boolean;
   searchBody: Record<string, unknown>;
   searchNoun?: string;
   service?: string;
@@ -151,6 +196,11 @@ export interface ResolveFindRouteInput {
  * and can run through dialect-specific query-string adapters. When a server
  * exposes only POST `/search/{noun}`, the same semantic filters are sent as a
  * search body instead.
+ *
+ * Escalation: when the dialect signals `requiresEscalation` (one or more
+ * multi-value filters got downcast on the GET path) AND POST /search is
+ * available and not disabled, the resolver picks search — the search body
+ * preserves the multi-value semantics the GET wire shape would have lost.
  */
 export function resolveFindRoute(input: ResolveFindRouteInput): FindRoute {
   const service = input.service ?? input.endpoint;
@@ -162,15 +212,22 @@ export function resolveFindRoute(input: ResolveFindRouteInput): FindRoute {
   const getSupported = supportsMethod(getDescriptor, 'GET');
   const searchSupported = supportsMethod(searchDescriptor, 'POST');
   const searchDisabled = Boolean(input.dialect.disabledSearchEndpoints?.has(searchNoun));
+  const escalate = input.requiresEscalation === true && searchSupported && !searchDisabled;
 
-  if (getSupported) {
+  if (getSupported && !escalate) {
     return { kind: 'get', service, path, filters: input.filters };
   }
 
   if (searchSupported && !searchDisabled) {
-    input.warnings.push(
-      `Route selected: POST /search/${searchNoun} because GET ${path} was not advertised by this server.`,
-    );
+    if (escalate) {
+      input.warnings.push(
+        `Route escalated to POST /search/${searchNoun} because GET ${path} would have downcast multi-value filters under the active '${input.dialect.id}' dialect; POST /search preserves the original multi-value semantics.`,
+      );
+    } else {
+      input.warnings.push(
+        `Route selected: POST /search/${searchNoun} because GET ${path} was not advertised by this server.`,
+      );
+    }
     return {
       kind: 'search',
       service: searchService,
@@ -367,6 +424,21 @@ export interface LoadedRows<T> {
 }
 
 /**
+ * Build a row mapper that runs `dialect.normalizeRow` per row, when the
+ * dialect declares one. Returns `undefined` on dialects with no normalizer
+ * — caller can pass the result straight to a `MaybeSpillInput.rowMapper`
+ * field with no extra branching.
+ */
+export function dialectRowMapper<T extends Record<string, unknown>>(
+  dialect: BrapiDialect,
+  endpoint: string,
+): ((row: T) => T) | undefined {
+  const normalize = dialect.normalizeRow;
+  if (!normalize) return;
+  return (row) => normalize(endpoint, row) as T;
+}
+
+/**
  * Pull rows up to `loadLimit` on a single page. If the server reports more
  * rows than the limit, leave the rest behind — callers decide whether to
  * spill via `spillToCanvas`.
@@ -388,16 +460,26 @@ export async function loadInitialPage<T>(
   );
 }
 
-/** Pull the first page for either a GET list endpoint or POST /search route. */
+/**
+ * Pull the first page for either a GET list endpoint or POST /search route.
+ * Optionally applies a per-row normalizer (typically built via
+ * `dialectRowMapper`) to each row before returning so the caller sees the
+ * canonical shape that matches what the dataframe materialization will hold.
+ */
 export async function loadInitialFindPage<T>(
   client: BrapiClient,
   connection: RegisteredServer,
   route: FindRoute,
   loadLimit: number,
   ctx: Context,
+  options: { normalizeRow?: (row: T) => T } = {},
 ): Promise<LoadedRows<T>> {
   const envelope = await fetchFindRoutePage<T>(client, connection, route, loadLimit, 0, ctx);
-  const rows = extractRows<T>(envelope.result);
+  let rows = extractRows<T>(envelope.result);
+  if (options.normalizeRow) {
+    const normalize = options.normalizeRow;
+    rows = rows.map(normalize);
+  }
   const pagination = envelope.metadata?.pagination;
   const totalCount = pagination?.totalCount;
   const hasMore = typeof totalCount === 'number' && totalCount > rows.length && totalCount > 0;
@@ -459,6 +541,15 @@ export interface SpillInput<T> {
   /** First-page rows already loaded. Avoids a re-fetch. */
   firstPage: T[];
   loadLimit: number;
+  /**
+   * Optional dialect-level per-row normalizer applied to each spilled page's
+   * rows immediately after `extractRows` — used to coerce server-specific
+   * "missing" encodings (e.g. SGN's `null` → `undefined`) into the canonical
+   * shape the schemas expect. First-page rows are normalized by the loader
+   * before they reach `spillToCanvas`; this is the parallel hook for the
+   * page walk.
+   */
+  normalizeRow?: (row: T) => T;
   /** Optional request overrides for spillover page pulls. */
   pageRequestOptions?: BrapiRequestOptions;
   path: string;
@@ -594,6 +685,13 @@ export interface MaybeSpillInput<T> {
   filters: Record<string, unknown>;
   firstPage: LoadedRows<T>;
   loadLimit: number;
+  /**
+   * Optional dialect-level per-row normalizer applied to each spilled page's
+   * rows. Mirrors `SpillInput.normalizeRow` — forwarded verbatim. First-page
+   * rows must already be normalized by the loader; this only catches the
+   * page walk.
+   */
+  normalizeRow?: (row: T) => T;
   path: string;
   route?: FindRoute;
   /**
@@ -656,6 +754,7 @@ export async function maybeSpill<T extends Record<string, unknown>>(
   };
   if (rowMapper) spillInput.rowMapper = rowMapper;
   if (rowFilter) spillInput.rowFilter = rowFilter;
+  if (input.normalizeRow) spillInput.normalizeRow = input.normalizeRow;
   if (input.route) spillInput.route = input.route;
   if (input.spillRequestOptions) spillInput.pageRequestOptions = input.spillRequestOptions;
   try {
@@ -722,7 +821,8 @@ export async function spillToCanvas<T extends Record<string, unknown>>(
     } catch (err) {
       throw new SpillPageFetchError(formatSpillError(err), { cause: err });
     }
-    const pageRows = extractRows<T>(envelope.result);
+    let pageRows = extractRows<T>(envelope.result);
+    if (input.normalizeRow) pageRows = pageRows.map(input.normalizeRow);
     rows.push(...pageRows);
     pagesFetched += 1;
     if (pageRows.length < pageSize) break;
@@ -1158,10 +1258,40 @@ export function buildRefinementHint(
 }
 
 /**
+ * Inline JSON over this many characters renders as a `<N keys, Xkb — see
+ * structuredContent>` placeholder instead of the raw stringified value. Picked
+ * to keep a single bulleted row under one display line while still showing
+ * small objects (`{traitDbId: "...", traitName: "..."}`) inline. Structured
+ * clients (Codex Desktop) still receive the full object via
+ * `structuredContent.results[]`; this cap only affects the `content[]` text
+ * surface that Claude Desktop reads.
+ */
+const MAX_INLINE_JSON = 240;
+
+/**
+ * Render a value for the row/line passthrough surface. Scalars are stringified
+ * via `String(value)`; objects/arrays are JSON-encoded and replaced with a
+ * size-aware placeholder when they exceed `MAX_INLINE_JSON`.
+ */
+function renderPassthroughValue(value: unknown): string {
+  if (typeof value !== 'object') return String(value);
+  const json = JSON.stringify(value);
+  if (json.length <= MAX_INLINE_JSON) return json;
+  const kb = (json.length / 1024).toFixed(1);
+  if (Array.isArray(value)) {
+    return `<${value.length} entries, ${kb}KB — see structuredContent>`;
+  }
+  const keyCount = Object.keys(value as Record<string, unknown>).length;
+  return `<${keyCount} keys, ${kb}KB — see structuredContent>`;
+}
+
+/**
  * Collect `key=value` strings for every top-level key in a passthrough row
  * that was not explicitly rendered by the caller. Ensures format() /
  * structuredContent parity — server fields beyond the declared schema are
  * still emitted to text-only clients (Claude Desktop sees content[] only).
+ * Large nested objects (over `MAX_INLINE_JSON` chars when stringified) collapse
+ * to a size-aware placeholder; the full payload remains in `structuredContent`.
  */
 export function collectPassthroughParts(
   row: Record<string, unknown>,
@@ -1170,8 +1300,7 @@ export function collectPassthroughParts(
   const parts: string[] = [];
   for (const [key, value] of Object.entries(row)) {
     if (renderedKeys.has(key) || value === undefined || value === null) continue;
-    const rendered = typeof value === 'object' ? JSON.stringify(value) : String(value);
-    parts.push(`${key}=${rendered}`);
+    parts.push(`${key}=${renderPassthroughValue(value)}`);
   }
   return parts;
 }
@@ -1180,7 +1309,8 @@ export function collectPassthroughParts(
  * Append `- **key:** value` lines for every top-level key in a passthrough
  * record that was not explicitly rendered. Companion to
  * `collectPassthroughParts` for detail-view (get_*) tools that use a
- * line-per-field layout instead of bullet-part lists.
+ * line-per-field layout instead of bullet-part lists. Honors the same inline
+ * JSON cap.
  */
 export function appendPassthroughLines(
   lines: string[],
@@ -1189,8 +1319,7 @@ export function appendPassthroughLines(
 ): void {
   for (const [key, value] of Object.entries(record)) {
     if (renderedKeys.has(key) || value === undefined || value === null) continue;
-    const rendered = typeof value === 'object' ? JSON.stringify(value) : String(value);
-    lines.push(`- **${key}:** ${rendered}`);
+    lines.push(`- **${key}:** ${renderPassthroughValue(value)}`);
   }
 }
 

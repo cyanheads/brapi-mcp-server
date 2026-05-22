@@ -375,6 +375,46 @@ describe('brapi_find_locations tool', () => {
     expect(result.warnings.join('\n')).toContain('Verify the latitude/longitude window');
   });
 
+  it('materializes the post-bbox set in the spillover dataframe (#28)', async () => {
+    const ctx = await connect(fetcher);
+    // 5 rows total; loadLimit=2 forces spillover. Two rows fall inside the
+    // bbox, three fall outside. The dataframe must hold the 2 inside rows
+    // (post-bbox), not the 5 unfiltered upstream rows — SQL on the handle
+    // must agree with the inline result.
+    const inside = [
+      locRow({ locationDbId: 'in-1', latitude: 35, longitude: -78 }),
+      locRow({ locationDbId: 'in-2', latitude: 36, longitude: -77 }),
+    ];
+    const outside = [
+      locRow({ locationDbId: 'out-1', latitude: 7, longitude: 3 }),
+      locRow({ locationDbId: 'out-2', latitude: 50, longitude: 10 }),
+      locRow({ locationDbId: 'out-3', latitude: -10, longitude: -10 }),
+    ];
+    const allRows = [...inside, ...outside];
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const page = Number(u.searchParams.get('page') ?? '0');
+      const pageSize = Number(u.searchParams.get('pageSize') ?? '2');
+      const start = page * pageSize;
+      const slice = allRows.slice(start, start + pageSize);
+      return jsonResponse(envelope({ data: slice }, { totalCount: allRows.length }));
+    });
+
+    const result = await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({
+        bbox: { minLat: 30, maxLat: 40, minLon: -90, maxLon: -70 },
+        loadLimit: 2,
+      }),
+      ctx,
+    );
+
+    expect(result.dataframe).toBeDefined();
+    // rowCount must reflect the in-bbox set, not the upstream union.
+    expect(result.dataframe?.rowCount).toBe(2);
+    // The inline totalCount mirrors the dataframe size — both are post-bbox.
+    expect(result.totalCount).toBe(2);
+  });
+
   it('bbox honors GeoJSON coordinates and excludes outside-window points', async () => {
     const ctx = await connect(fetcher);
     const rows = [

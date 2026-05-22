@@ -256,14 +256,21 @@ describe('brapi_find_studies tool', () => {
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
   });
 
-  it('throws NotFound when no connection exists for the alias', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+  it('throws NotFound with unknown_alias recovery hint when no connection exists for the alias', async () => {
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiFindStudies.errors });
     await expect(
       brapiFindStudies.handler(
         brapiFindStudies.input.parse({ alias: 'missing', crop: 'Cassava' }),
         ctx,
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'unknown_alias',
+        alias: 'missing',
+        recovery: { hint: expect.stringContaining('brapi_connect') },
+      },
+    });
   });
 
   it('downcasts plural filters to singular when connected to a CassavaBase server', async () => {
