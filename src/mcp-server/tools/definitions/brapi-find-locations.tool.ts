@@ -15,7 +15,6 @@ import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
   applyDialectFiltersOrFail,
@@ -27,6 +26,7 @@ import {
   collectPassthroughParts,
   computeDistribution,
   DataframeHandleSchema,
+  dialectRowMapper,
   ExtraFiltersInput,
   extractCoordinates,
   hasPointGeometry,
@@ -38,6 +38,7 @@ import {
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
 
@@ -150,6 +151,13 @@ export const brapiFindLocations = tool('brapi_find_locations', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No connection has been registered under the requested alias',
+      recovery:
+        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_locations.',
+    },
+    {
       reason: 'all_filters_dropped',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The active dialect dropped every filter the agent supplied — the upstream server does not honor any of the requested scope filters on this endpoint, so the call would silently widen to the unfiltered baseline.',
@@ -204,13 +212,12 @@ export const brapiFindLocations = tool('brapi_find_locations', {
   output: OutputSchema,
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
     const bridge = getCanvasBridge();
     const config = getServerConfig();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
@@ -231,7 +238,8 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       warnings,
     );
 
-    const filters = applyDialectFiltersOrFail(ctx, dialect, 'locations', merged, warnings);
+    const adapted = applyDialectFiltersOrFail(ctx, dialect, 'locations', merged, warnings);
+    const filters = adapted.filters;
     const route = resolveFindRoute({
       profile,
       dialect,
@@ -239,18 +247,54 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       filters,
       searchBody: merged,
       warnings,
+      ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
     });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
+    const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'locations');
     const firstPage = await loadInitialFindPage<Record<string, unknown>>(
       client,
       connection,
       route,
       loadLimit,
       ctx,
+      normalizeRow ? { normalizeRow } : {},
     );
 
-    const { fullRows, dataframe } = await maybeSpill({
+    const bbox = normalizeBbox(input.bbox, warnings);
+    /*
+     * Axis-order pick runs before spillover so the rowFilter we hand to
+     * `maybeSpill` materializes the dataframe under the right coordinate
+     * interpretation from the start — historically this ran after spillover
+     * and the dataframe held the pre-bbox upstream union, which made SQL on
+     * the handle silently bypass the bbox (#28).
+     *
+     * Decision is made over already-fetched first-page rows: try `spec`
+     * (RFC 7946 [lon, lat]); if that yields zero matches and at least one
+     * row carries a Point geometry, retry under `swapped` ([lat, lon]) and
+     * commit to it for the spill walk. If both produce zero we still go with
+     * `spec` — the warning then says "bbox excluded everything" rather than
+     * silently flipping the axis interpretation on no evidence.
+     */
+    let coordinateAxisOrder: CoordinateAxisOrder = 'spec';
+    if (bbox && firstPage.rows.length > 0) {
+      const specMatches = firstPage.rows.filter((r) => insideBbox(r, bbox, 'spec'));
+      if (specMatches.length === 0 && firstPage.rows.some(hasPointGeometry)) {
+        const swappedMatches = firstPage.rows.filter((r) => insideBbox(r, bbox, 'swapped'));
+        if (swappedMatches.length > 0) {
+          coordinateAxisOrder = 'swapped';
+          warnings.push(
+            `Server appears to store GeoJSON coordinates as [lat, lon, alt] rather than the spec-required [lon, lat, alt]. Bbox matches returned under the swapped interpretation; the upstream coordinate convention is non-conformant and should be flagged.`,
+          );
+        }
+      }
+    }
+    const axisOrder = coordinateAxisOrder;
+    const bboxFilter = bbox
+      ? (r: Record<string, unknown>) => insideBbox(r, bbox, axisOrder)
+      : undefined;
+
+    const spillInput: Parameters<typeof maybeSpill<Record<string, unknown>>>[0] = {
       firstPage,
       client,
       connection,
@@ -261,42 +305,28 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       loadLimit,
       ctx,
       bridge,
-    });
+    };
+    if (normalizeRow) spillInput.normalizeRow = normalizeRow;
+    if (bboxFilter) spillInput.rowFilter = bboxFilter;
+    const { fullRows, dataframe } = await maybeSpill(spillInput);
 
-    const bbox = normalizeBbox(input.bbox, warnings);
-    let coordinateAxisOrder: CoordinateAxisOrder = 'spec';
-    let filteredFull = bbox ? fullRows.filter((r) => insideBbox(r, bbox, 'spec')) : fullRows;
-    let filteredReturned = bbox
-      ? firstPage.rows.filter((r) => insideBbox(r, bbox, 'spec'))
-      : firstPage.rows;
-    if (bbox && fullRows.length > 0 && filteredFull.length === 0) {
-      // Spec pass excluded everything. If at least one row carries a Point
-      // geometry, the server may store coordinates as [lat, lon, alt] rather
-      // than the GeoJSON-standard [lon, lat, alt] (the BrAPI Community Test
-      // Server is a known offender). Retry once with axes swapped — the
-      // retry is in-memory over already-fetched rows. If the swap recovers
-      // matches, surface a loud warning so operators can chase the upstream
-      // quirk; if it still produces zero, fall through to the existing
-      // verify-coordinate-convention warning.
-      const swappedFull = fullRows.some(hasPointGeometry)
-        ? fullRows.filter((r) => insideBbox(r, bbox, 'swapped'))
-        : [];
-      if (swappedFull.length > 0) {
-        coordinateAxisOrder = 'swapped';
-        filteredFull = swappedFull;
-        filteredReturned = firstPage.rows.filter((r) => insideBbox(r, bbox, 'swapped'));
-        warnings.push(
-          `Server appears to store GeoJSON coordinates as [lat, lon, alt] rather than the spec-required [lon, lat, alt]. Bbox matches returned under the swapped interpretation; the upstream coordinate convention is non-conformant and should be flagged.`,
-        );
-      } else {
-        warnings.push(
-          `bbox excluded all ${fullRows.length} upstream location(s). Verify the latitude/longitude window matches the server's coordinate convention.`,
-        );
-      }
-    } else if (bbox && filteredFull.length < fullRows.length) {
+    // fullRows is already post-bbox when a bbox filter was supplied — the
+    // dataframe and SQL surface see the same set. Compute the returned slice
+    // (first-page rows that passed bbox) the same way.
+    const filteredFull = fullRows;
+    const filteredReturned = bboxFilter ? firstPage.rows.filter(bboxFilter) : firstPage.rows;
+
+    if (bbox && firstPage.rows.length > 0 && filteredFull.length === 0) {
       warnings.push(
-        `bbox excluded ${fullRows.length - filteredFull.length} of ${fullRows.length} upstream location(s).`,
+        `bbox excluded all ${firstPage.rows.length} upstream location(s) returned on the first page. Verify the latitude/longitude window matches the server's coordinate convention.`,
       );
+    } else if (
+      bbox &&
+      typeof firstPage.totalCount === 'number' &&
+      filteredFull.length < firstPage.totalCount
+    ) {
+      const excluded = firstPage.totalCount - filteredFull.length;
+      warnings.push(`bbox excluded ${excluded} of ${firstPage.totalCount} upstream location(s).`);
     }
 
     const distributions = {

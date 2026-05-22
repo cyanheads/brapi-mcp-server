@@ -23,7 +23,6 @@ import {
   type RegisterDataframeInput,
 } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
   AliasInput,
@@ -35,6 +34,7 @@ import {
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  requireRegisteredConnection,
   toDataframeHandle,
 } from '../shared/find-helpers.js';
 
@@ -145,6 +145,13 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No connection has been registered under the requested alias',
+      recovery:
+        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_genotype_calls.',
+    },
+    {
       reason: 'no_filters',
       code: JsonRpcErrorCode.ValidationError,
       when: 'No variant set, germplasm, call set, or variant filter was provided',
@@ -192,12 +199,11 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
   output: OutputSchema,
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
     const bridge = getCanvasBridge();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;

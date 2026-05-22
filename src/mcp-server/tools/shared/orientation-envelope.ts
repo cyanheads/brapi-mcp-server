@@ -103,6 +103,22 @@ export const OrientationDialectSchema = z
     notes: z
       .array(z.string().describe('Verified compatibility note exposed by the active dialect.'))
       .describe('Dialect-level compatibility notes for this server family.'),
+    verifiedMappingCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe(
+        'Number of filter translations the dialect has empirically verified against a live server. Higher means more confidence in the translation table.',
+      ),
+    inferredMappingCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe(
+        'Number of filter translations inferred from naming conventions but not independently verified. A non-zero count means some result narrowing on this server may not fire as expected.',
+      ),
   })
   .describe('Active dialect summary — declares known quirks for this server family.');
 
@@ -282,7 +298,7 @@ function buildDialectSummary(
 ): OrientationEnvelope['dialect'] {
   const detection = detectDialectId(connection.alias, profile);
   const dialect = getDialectById(detection.id);
-  return {
+  const summary: OrientationEnvelope['dialect'] = {
     id: detection.id,
     source: detection.source,
     envVar: dialectEnvVar(connection.alias),
@@ -291,6 +307,11 @@ function buildDialectSummary(
       : [],
     notes: dialect.notes ? [...dialect.notes] : [],
   };
+  if (dialect.mappingSummary) {
+    summary.verifiedMappingCount = dialect.mappingSummary.verified;
+    summary.inferredMappingCount = dialect.mappingSummary.inferred;
+  }
+  return summary;
 }
 
 interface OpportunisticCounts {
@@ -347,7 +368,13 @@ async function fetchOpportunisticCounts(
 export function formatOrientationEnvelope(envelope: OrientationEnvelope): string {
   const lines: string[] = [];
   const title = envelope.server.name ?? envelope.alias;
-  lines.push(`# Connected: ${title}`);
+  // When the server advertises zero services, the connection is registered
+  // but unreachable from a capability standpoint — every downstream tool
+  // will fail. "Connected" misrepresents that state to an agent skimming
+  // the headline; use "Registered" to signal "alias is bound, server is
+  // not responding usefully."
+  const headlineVerb = envelope.capabilities.supportedCount === 0 ? 'Registered' : 'Connected';
+  lines.push(`# ${headlineVerb}: ${title}`);
   lines.push('');
   lines.push(`- **Alias:** ${envelope.alias}`);
   lines.push(`- **Base URL:** ${envelope.baseUrl}`);
@@ -382,6 +409,16 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
   lines.push('## Dialect');
   lines.push(`- **Active:** \`${envelope.dialect.id}\` (detected from ${envelope.dialect.source})`);
   lines.push(`- **Pin override:** \`${envelope.dialect.envVar}\``);
+  if (
+    envelope.dialect.verifiedMappingCount !== undefined ||
+    envelope.dialect.inferredMappingCount !== undefined
+  ) {
+    const v = envelope.dialect.verifiedMappingCount ?? 0;
+    const i = envelope.dialect.inferredMappingCount ?? 0;
+    lines.push(
+      `- **Filter mappings:** ${v} verified, ${i} inferred — inferred mappings may not narrow as expected; check distributions before trusting result counts.`,
+    );
+  }
   if (envelope.dialect.disabledSearchEndpoints.length > 0) {
     lines.push(
       `- **POST /search routes routed around:** ${envelope.dialect.disabledSearchEndpoints.join(', ')}`,

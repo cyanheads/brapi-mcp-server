@@ -69,6 +69,20 @@ export interface BrapiRequestOptions {
    * different outcome. Falls back to `BRAPI_RETRY_MAX_ATTEMPTS` when omitted.
    */
   retryMaxAttempts?: number;
+  /**
+   * Marks this as a single-record GET on a `/{noun}/{id}` path. The client
+   * reclassifies 5xx responses on these requests as `NotFound`, so callers
+   * (`brapi_get_study`, `brapi_get_germplasm`, walk_pedigree's per-root
+   * probes) fast-fail on missing DbIds without burning the retry budget.
+   * Several upstreams (notably Breedbase) serve HTTP 500 instead of 404 for
+   * unknown ids; without this opt-in the retry loop runs to completion (~40s)
+   * before the user sees an error that should have been near-instant.
+   *
+   * Tradeoff: a genuinely transient 5xx on a singleton fetch will surface as
+   * a not-found error. Callers should retry the call themselves if they want
+   * to confirm. Off by default.
+   */
+  singleton?: boolean;
   /** Override the config default timeout. */
   timeoutMs?: number;
   /**

@@ -61,15 +61,15 @@ const InputSchema = z.object({
 
 export const brapiDataframeDescribe = tool('brapi_dataframe_describe', {
   description:
-    'Start here after a spillover. Lists dataframes (or describes one) with columns, row counts, and originating-source provenance. The dataframe name appears inline on every find_* response that spilled (`result.dataframe.tableName`) — pass it as `dataframe` to inspect schema and provenance before writing the first brapi_dataframe_query. Listing without a name is gated under shared-tenant HTTP (`MCP_AUTH_MODE=none`); pass a known name instead.',
+    'Start here after a spillover. Lists dataframes (or describes one) with columns, row counts, and originating-source provenance. The dataframe name appears inline on every find_* response that spilled (`result.dataframe.tableName`) — pass it as `dataframe` to inspect schema and provenance before writing the first brapi_dataframe_query. Listing without a name is unavailable when this server runs as a shared HTTP endpoint without per-caller auth; pass a known name instead.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   errors: [
     {
       reason: 'list_all_disabled_on_shared_http',
       code: JsonRpcErrorCode.Forbidden,
-      when: "Running under MCP_AUTH_MODE=none on HTTP transport — listing every dataframe would expose other concurrent clients' workspaces, since all callers resolve to one shared tenant.",
+      when: "This server is running as a shared HTTP endpoint without per-caller auth — listing every dataframe would expose other concurrent clients' workspaces, since all callers resolve to one shared tenant.",
       recovery:
-        'Pass `dataframe` with a specific name — either from a prior find_* spillover result (`result.dataframe.tableName`) or one you registered via `brapi_dataframe_query` with `registerAs`. Listing all dataframes is not available.',
+        'Pass `dataframe` with a specific name — either from a prior find_* spillover result (`result.dataframe.tableName`) or one you registered via `brapi_dataframe_query` with `registerAs`. Listing all dataframes is not available on this deployment.',
     },
   ] as const,
   input: InputSchema,

@@ -61,10 +61,14 @@ describe('brapi://server/info resource', () => {
     expect(result.baseUrl).toBe(BASE_URL);
   });
 
-  it('throws NotFound when no connection is registered', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+  it('throws NotFound with unknown_alias recovery hint when no connection is registered', async () => {
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiServerInfoResource.errors });
     await expect(brapiServerInfoResource.handler({}, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'unknown_alias',
+        recovery: { hint: expect.stringContaining('brapi_connect') },
+      },
     });
   });
 

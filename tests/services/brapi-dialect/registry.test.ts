@@ -32,7 +32,13 @@ describe('dialect registry', () => {
 
   it('initBrapiDialectRegistry registers the built-ins', () => {
     initBrapiDialectRegistry();
-    expect(listRegisteredDialectIds()).toEqual(['brapi-test', 'breedbase', 'cassavabase', 'spec']);
+    expect(listRegisteredDialectIds()).toEqual([
+      'bms',
+      'brapi-test',
+      'breedbase',
+      'cassavabase',
+      'spec',
+    ]);
     expect(getDialectById('spec')).toBe(specDialect);
     expect(getDialectById('brapi-test')).toBe(brapiTestDialect);
     expect(getDialectById('breedbase')).toBe(breedbaseDialect);
@@ -73,6 +79,12 @@ describe('dialect registry', () => {
   it('initBrapiDialectRegistry is idempotent', () => {
     initBrapiDialectRegistry();
     initBrapiDialectRegistry();
-    expect(listRegisteredDialectIds()).toEqual(['brapi-test', 'breedbase', 'cassavabase', 'spec']);
+    expect(listRegisteredDialectIds()).toEqual([
+      'bms',
+      'brapi-test',
+      'breedbase',
+      'cassavabase',
+      'spec',
+    ]);
   });
 });

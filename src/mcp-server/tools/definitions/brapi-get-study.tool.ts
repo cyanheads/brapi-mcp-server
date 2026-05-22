@@ -14,7 +14,6 @@ import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { getReferenceDataCache } from '@/services/reference-data-cache/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
   appendPassthroughLines,
@@ -23,6 +22,7 @@ import {
   companionRequestOptions,
   extractCoordinates,
   isUpstreamNotFound,
+  requireRegisteredConnection,
 } from '../shared/find-helpers.js';
 
 const StudySchema = z
@@ -155,6 +155,13 @@ export const brapiGetStudy = tool('brapi_get_study', {
   annotations: { readOnlyHint: true, idempotentHint: true },
   errors: [
     {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No connection has been registered under the requested alias',
+      recovery:
+        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_get_study.',
+    },
+    {
       reason: 'study_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'Upstream returned no study record for the requested DbId',
@@ -169,13 +176,12 @@ export const brapiGetStudy = tool('brapi_get_study', {
   output: OutputSchema,
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
     const referenceData = getReferenceDataCache();
     const config = getServerConfig();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
@@ -202,7 +208,7 @@ export const brapiGetStudy = tool('brapi_get_study', {
         connection.baseUrl,
         `/studies/${encodeURIComponent(input.studyDbId)}`,
         ctx,
-        buildRequestOptions(connection),
+        buildRequestOptions(connection, undefined, { singleton: true }),
       );
     } catch (err) {
       if (isUpstreamNotFound(err)) {

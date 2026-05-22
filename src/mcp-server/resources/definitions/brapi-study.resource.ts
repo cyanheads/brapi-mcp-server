@@ -18,6 +18,13 @@ export const brapiStudyResource = resource('brapi://study/{studyDbId}', {
   mimeType: 'application/json',
   errors: [
     {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No default BrAPI connection has been registered',
+      recovery:
+        'Call brapi_connect (without an alias, or with alias `default`) before reading this resource.',
+    },
+    {
       reason: 'study_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'Upstream returned no study record for the requested DbId',

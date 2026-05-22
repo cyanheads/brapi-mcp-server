@@ -21,7 +21,13 @@
  * @module services/brapi-dialect/brapi-test-dialect
  */
 
-import { createSingularizingDialect } from './singularizing-dialect.js';
+import {
+  createSingularizingDialect,
+  type DialectFilterMappingInput,
+} from './singularizing-dialect.js';
+
+/** Shorthand for marking a mapping as live-verified. */
+const verified = (target: string): DialectFilterMappingInput => ({ target, verified: true });
 
 /**
  * Plural BrAPI v2.1 filter key → singular form the test server honors. Keyed
@@ -32,31 +38,31 @@ import { createSingularizingDialect } from './singularizing-dialect.js';
  * surface a warning when a translation doesn't reduce the result set as
  * expected.
  */
-const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
+const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, DialectFilterMappingInput>>> = {
   studies: {
-    studyDbIds: 'studyDbId', // observed: works
+    studyDbIds: verified('studyDbId'),
     studyNames: 'studyName',
     studyTypes: 'studyType',
     commonCropNames: 'commonCropName',
-    programDbIds: 'programDbId', // observed: works
+    programDbIds: verified('programDbId'),
     programNames: 'programName',
-    trialDbIds: 'trialDbId', // observed: works
+    trialDbIds: verified('trialDbId'),
     trialNames: 'trialName',
-    locationDbIds: 'locationDbId', // observed: works
+    locationDbIds: verified('locationDbId'),
     locationNames: 'locationName',
     seasonDbIds: 'seasonDbId',
-    germplasmDbIds: 'germplasmDbId', // observed: works
+    germplasmDbIds: verified('germplasmDbId'),
     studyCodes: 'studyCode',
     studyPUIs: 'studyPUI',
     externalReferenceIds: 'externalReferenceId',
     externalReferenceSources: 'externalReferenceSource',
   },
   germplasm: {
-    germplasmDbIds: 'germplasmDbId', // observed: works
+    germplasmDbIds: verified('germplasmDbId'),
     germplasmNames: 'germplasmName',
     germplasmPUIs: 'germplasmPUI',
     accessionNumbers: 'accessionNumber',
-    commonCropNames: 'commonCropName', // observed: works
+    commonCropNames: verified('commonCropName'),
     collections: 'collection',
     synonyms: 'synonym',
     programDbIds: 'programDbId',
@@ -68,10 +74,10 @@ const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
     // studyDbIds intentionally absent — see DROPPED_FILTERS below (broken on
     // both GET singular and POST /search plural — neither form actually
     // filters; both return either 0 unconditionally or the unfiltered set).
-    germplasmDbIds: 'germplasmDbId', // observed: works
-    observationVariableDbIds: 'observationVariableDbId', // observed: works
-    observationUnitDbIds: 'observationUnitDbId', // observed: works
-    observationDbIds: 'observationDbId', // observed: works
+    germplasmDbIds: verified('germplasmDbId'),
+    observationVariableDbIds: verified('observationVariableDbId'),
+    observationUnitDbIds: verified('observationUnitDbId'),
+    observationDbIds: verified('observationDbId'),
     seasonDbIds: 'seasonDbId',
     programDbIds: 'programDbId',
     trialDbIds: 'trialDbId',
@@ -86,14 +92,14 @@ const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, string>>> = {
     seasonDbIds: 'seasonDbId',
   },
   locations: {
-    locationDbIds: 'locationDbId', // observed: works
+    locationDbIds: verified('locationDbId'),
     locationNames: 'locationName',
     countryCodes: 'countryCode',
     locationTypes: 'locationType',
     abbreviations: 'abbreviation',
   },
   variables: {
-    observationVariableDbIds: 'observationVariableDbId', // observed: works
+    observationVariableDbIds: verified('observationVariableDbId'),
     observationVariableNames: 'observationVariableName',
     observationVariablePUIs: 'observationVariablePUI',
     traitClasses: 'traitClass',

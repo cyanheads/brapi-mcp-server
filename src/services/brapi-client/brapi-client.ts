@@ -86,6 +86,7 @@ export class BrapiClient {
           ctx,
           { method: 'GET', headers: this.buildHeaders(options.auth) },
           options.timeoutMs,
+          options.singleton === true,
         );
         return this.parseEnvelope<T>(response);
       },
@@ -316,6 +317,7 @@ export class BrapiClient {
     ctx: Context,
     init: Omit<FetchWithTimeoutOptions, 'signal' | 'rejectPrivateIPs'>,
     timeoutMs?: number,
+    singleton: boolean = false,
   ): Promise<Response> {
     try {
       return await this.fetcher(url, timeoutMs ?? this.serverConfig.requestTimeoutMs, ctx, {
@@ -324,7 +326,7 @@ export class BrapiClient {
         rejectPrivateIPs: !this.serverConfig.allowPrivateIps,
       });
     } catch (err) {
-      reclassifyHttpError(err);
+      reclassifyHttpError(err, singleton);
       throw err;
     }
   }
@@ -384,17 +386,30 @@ export class BrapiClient {
 /**
  * Map the `ServiceUnavailable` thrown by `fetchWithTimeout` to the correct
  * non-transient code when the underlying HTTP status is a 4xx. 429 is promoted
- * to `RateLimited` so the default retry policy still kicks in; 5xx stays as
- * `ServiceUnavailable` (also retryable). Network-level errors, which have no
+ * to `RateLimited` so the default retry policy still kicks in; 5xx normally
+ * stays as `ServiceUnavailable` (also retryable). When `singleton` is true the
+ * call is fetching `/{noun}/{id}` and a 5xx is treated as `NotFound` — some
+ * upstreams (notably Breedbase) serve HTTP 500 for unknown DbIds instead of
+ * 404, and retrying through that just delays the inevitable "not found"
+ * outcome. Network-level errors, which have no
  * `statusCode`, pass through untouched.
  */
-function reclassifyHttpError(err: unknown): void {
+function reclassifyHttpError(err: unknown, singleton: boolean = false): void {
   if (!(err instanceof McpError)) return;
   if (err.code !== JsonRpcErrorCode.ServiceUnavailable) return;
   const status = extractHttpStatus(err);
   if (status === undefined) return;
-  if (status >= 500) return;
   const data = asRecord(err.data) ?? {};
+  if (status >= 500) {
+    if (singleton) {
+      throw notFound(err.message, {
+        ...data,
+        reason: 'upstream_not_found',
+        upstreamStatus: status,
+      });
+    }
+    return;
+  }
   if (status === 429) {
     throw rateLimited(err.message, { ...data, reason: 'upstream_rate_limited' });
   }

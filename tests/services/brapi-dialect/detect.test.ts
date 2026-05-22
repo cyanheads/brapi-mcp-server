@@ -121,7 +121,6 @@ describe('detectDialectFromName', () => {
   });
 
   it('falls back to spec for unknown names with source=fallback', () => {
-    expect(detectDialectFromName('BMS')).toEqual({ id: 'spec', source: 'fallback' });
     expect(detectDialectFromName('GnpIS').id).toBe('spec');
     expect(detectDialectFromName('Totally Unknown Server').id).toBe('spec');
   });

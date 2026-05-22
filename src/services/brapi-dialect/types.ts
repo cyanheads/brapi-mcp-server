@@ -32,6 +32,15 @@ export interface DialectAdaptation {
    */
   dropped: readonly string[];
   filters: Record<string, unknown>;
+  /**
+   * True when at least one multi-value array filter was downcast to a single
+   * scalar (because the active GET dialect only honors single values per
+   * filter). The caller can use this signal to prefer POST `/search/{noun}`
+   * when the upstream advertises a working search route — the search body
+   * preserves the original multi-value semantics that the GET wire shape
+   * would have lost. Absent (or false) when no downcast occurred.
+   */
+  requiresEscalation?: boolean;
   warnings: string[];
 }
 
@@ -65,6 +74,37 @@ export interface BrapiDialect {
    */
   readonly disabledSearchEndpoints?: ReadonlySet<string>;
   readonly id: string;
+  /**
+   * Aggregate confidence breakdown for the dialect's filter-translation
+   * table. `verified` entries were empirically narrowed against a live server
+   * during dialect bring-up; `inferred` entries follow the v2.0/v2.1 naming
+   * pattern but haven't been independently checked. Surfaced on the
+   * orientation envelope so agents can see the dialect's confidence floor at
+   * a glance.
+   *
+   * Omitted on dialects with no translation table (the default `spec`
+   * dialect, custom dialects that override `adaptGetFilters` directly).
+   */
+  readonly mappingSummary?: {
+    inferred: number;
+    verified: number;
+  };
+  /**
+   * Coerce one upstream row into a canonical shape before schema validation.
+   * Implementations strip server-specific encodings of "missing" — e.g.
+   * CassavaBase returns `null` for many optional fields where the BrAPI v2.1
+   * spec says the field should be omitted entirely. Returning a fresh object
+   * with the null keys dropped lets the row schemas express the natural
+   * "field is absent" via `optional()` without every schema absorbing a
+   * `.nullish()` per field.
+   *
+   * Implementations must not mutate the input. The default `spec` dialect
+   * omits this method (passthrough).
+   */
+  readonly normalizeRow?: (
+    endpoint: string,
+    row: Record<string, unknown>,
+  ) => Record<string, unknown>;
   /**
    * Human-readable compatibility notes surfaced in brapi_connect /
    * brapi_server_info. Use this for verified quirks that are handled outside

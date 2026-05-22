@@ -10,11 +10,16 @@
  */
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
-import { AliasInput, buildRequestOptions, isUpstreamNotFound } from '../shared/find-helpers.js';
+import {
+  AliasInput,
+  buildRequestOptions,
+  isUpstreamNotFound,
+  requireRegisteredConnection,
+} from '../shared/find-helpers.js';
 
 const DEFAULT_MAX_DEPTH = 3;
 const MAX_NODES = 1_000;
@@ -29,6 +34,11 @@ const NodeSchema = z
       .nonnegative()
       .describe('Min distance from any root germplasm (0 for roots).'),
     isRoot: z.boolean().describe('True when this node is one of the starting germplasm.'),
+    direction: z
+      .enum(['root', 'ancestor', 'descendant', 'both'])
+      .describe(
+        'Side of the root this node was reached from. `root` = the starting germplasm itself. `ancestor` = reached via /pedigree (a parent of the root or one of its parents). `descendant` = reached via /progeny. `both` = encountered as both an ancestor and a descendant in a bidirectional walk (rare — backcross or selfing chain).',
+      ),
   })
   .describe('One germplasm reached during the walk.');
 
@@ -103,6 +113,15 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
   description:
     'Walk germplasm ancestry or descendancy as a deduplicated DAG, with multi-generation traversal, cycle detection, and depth limits. Returns nodes + edges plus traversal stats (depthReached, rootCount, leafCount, cycleCount, deadEndCount).',
   annotations: { readOnlyHint: true, openWorldHint: true },
+  errors: [
+    {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No connection has been registered under the requested alias',
+      recovery:
+        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_walk_pedigree.',
+    },
+  ] as const,
   input: z.object({
     germplasmDbIds: z
       .array(z.string().min(1))
@@ -125,11 +144,10 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
   output: OutputSchema,
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
@@ -207,7 +225,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
 
         for (const parent of result.parents) {
           const already = state.nodes.has(parent.germplasmDbId);
-          registerNode(state, parent.germplasmDbId, parent.germplasmName, depth);
+          registerNode(state, parent.germplasmDbId, parent.germplasmName, depth, 'ancestor');
           const edge: z.infer<typeof EdgeSchema> = {
             from: parent.germplasmDbId,
             to: result.id,
@@ -228,7 +246,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
 
         for (const child of result.children) {
           const already = state.nodes.has(child.germplasmDbId);
-          registerNode(state, child.germplasmDbId, child.germplasmName, depth);
+          registerNode(state, child.germplasmDbId, child.germplasmName, depth, 'descendant');
           const edge: z.infer<typeof EdgeSchema> = {
             from: child.germplasmDbId,
             to: result.id,
@@ -294,7 +312,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
         const parts: string[] = [`**${node.germplasmName ?? node.germplasmDbId}**`];
         parts.push(`id=\`${node.germplasmDbId}\``);
         parts.push(`depth=${node.depth}`);
-        if (node.isRoot) parts.push('root');
+        parts.push(node.direction);
         lines.push(`- ${parts.join(' · ')}`);
       }
     }
@@ -329,20 +347,40 @@ function createWalkState(rootIds: readonly string[]): WalkState {
   const nodes = new Map<string, z.infer<typeof NodeSchema>>();
   const frontier = new Set<string>();
   for (const id of rootIds) {
-    nodes.set(id, { germplasmDbId: id, depth: 0, isRoot: true });
+    nodes.set(id, { germplasmDbId: id, depth: 0, isRoot: true, direction: 'root' });
     frontier.add(id);
   }
   return { nodes, edges: new Map(), frontier };
 }
 
-function registerNode(state: WalkState, id: string, name: string | undefined, depth: number): void {
+/**
+ * Add a node to the walk state. When `id` is already registered, merge the
+ * incoming `side` with the existing direction — `ancestor` + `descendant` →
+ * `both`. Roots are never overwritten. Depth converges to the minimum across
+ * encounters.
+ */
+function registerNode(
+  state: WalkState,
+  id: string,
+  name: string | undefined,
+  depth: number,
+  side: 'ancestor' | 'descendant',
+): void {
   const existing = state.nodes.get(id);
   if (existing) {
     if (!existing.germplasmName && name) existing.germplasmName = name;
     if (depth < existing.depth) existing.depth = depth;
+    if (existing.direction !== 'root' && existing.direction !== side) {
+      existing.direction = 'both';
+    }
     return;
   }
-  const node: z.infer<typeof NodeSchema> = { germplasmDbId: id, depth, isRoot: false };
+  const node: z.infer<typeof NodeSchema> = {
+    germplasmDbId: id,
+    depth,
+    isRoot: false,
+    direction: side,
+  };
   if (name) node.germplasmName = name;
   state.nodes.set(id, node);
 }
@@ -413,7 +451,7 @@ async function rootExists(
       connection.baseUrl,
       `/germplasm/${encodeURIComponent(id)}/pedigree`,
       ctx,
-      buildRequestOptions(connection),
+      buildRequestOptions(connection, undefined, { singleton: true }),
     );
     // Some servers (e.g. test-server.brapi.org) reply 200 with `result: null`
     // for unknown germplasm instead of 404.
@@ -435,7 +473,7 @@ async function fetchPedigree(
     connection.baseUrl,
     `/germplasm/${encodedId}/pedigree`,
     ctx,
-    buildRequestOptions(connection),
+    buildRequestOptions(connection, undefined, { singleton: true }),
   );
   const rawParents = (env.result as { parents?: unknown })?.parents;
   if (!Array.isArray(rawParents)) return [];
@@ -465,7 +503,7 @@ async function fetchProgeny(
     connection.baseUrl,
     `/germplasm/${encodedId}/progeny`,
     ctx,
-    buildRequestOptions(connection),
+    buildRequestOptions(connection, undefined, { singleton: true }),
   );
   const result = env.result as { progeny?: unknown; data?: unknown } | null;
   const rawProgeny = result?.progeny;

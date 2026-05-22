@@ -29,7 +29,7 @@ import type {
   TableInfo,
 } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
-import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
+import { idGenerator, type RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type { CanvasTableMeta, DescribedTable } from './types.js';
 
@@ -378,12 +378,16 @@ export class CanvasBridge {
 }
 
 /**
- * Generate a fresh canvas-safe dataframe name. Hyphens in `crypto.randomUUID()`
- * fail the canvas identifier gate, so we replace them with underscores and
- * prefix with `df_` to mark the namespace as auto-registered.
+ * Generate a fresh canvas-safe dataframe name in the form
+ * `df_XXXXX_XXXXX` — 10 random chars from `A–Z 0–9`, split into two 5-char
+ * groups by `_` for readability. Keyspace is ~3.7×10^15 (36^10), unguessable
+ * for the (tenant, session)-bucketed capability-token model and short enough
+ * that the name renders cleanly in inline tool output.
  */
 function generateDataframeName(): string {
-  return `${DATAFRAME_TABLE_PREFIX}${crypto.randomUUID().replace(/-/g, '_')}`;
+  const left = idGenerator.generateRandomString(5);
+  const right = idGenerator.generateRandomString(5);
+  return `${DATAFRAME_TABLE_PREFIX}${left}_${right}`;
 }
 
 /**

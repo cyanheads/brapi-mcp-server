@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-05-22
+
+BMS dialect for the CGIAR crop community, route escalation to POST /search when GET would downcast multi-value filters, walk_pedigree `direction` field, plus fixes for bbox spillover ordering, schemeless `imageURL` resolution, singleton-fetch 5xx retry storms, and large inline JSON in `find_*` text rows.
+
 ## [0.5.5](changelog/0.5.x/0.5.5.md) — 2026-05-16
 
 Adopt framework 0.9.1 — wire `instructions` field for server-level orientation, port two raw schemas off `z.url()` and three off `.nullish()` unions to clear the new cross-vendor portability lint family (`schema-format-portability`, `schema-anyof-needs-type`).

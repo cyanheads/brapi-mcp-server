@@ -15,7 +15,6 @@ import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
   applyDialectFiltersOrFail,
@@ -27,6 +26,7 @@ import {
   collectPassthroughParts,
   computeDistribution,
   DataframeHandleSchema,
+  dialectRowMapper,
   ExtraFiltersInput,
   fkMatchCheck,
   LoadLimitInput,
@@ -37,6 +37,7 @@ import {
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
 
@@ -148,6 +149,13 @@ export const brapiFindStudies = tool('brapi_find_studies', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No connection has been registered under the requested alias',
+      recovery:
+        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_studies.',
+    },
+    {
       reason: 'all_filters_dropped',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The active dialect dropped every filter the agent supplied — the upstream server does not honor any of the requested scope filters on this endpoint, so the call would silently widen to the unfiltered baseline.',
@@ -174,13 +182,12 @@ export const brapiFindStudies = tool('brapi_find_studies', {
   output: OutputSchema,
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
     const bridge = getCanvasBridge();
     const config = getServerConfig();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
@@ -204,7 +211,8 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       warnings,
     );
 
-    const filters = applyDialectFiltersOrFail(ctx, dialect, 'studies', merged, warnings);
+    const adapted = applyDialectFiltersOrFail(ctx, dialect, 'studies', merged, warnings);
+    const filters = adapted.filters;
     const route = resolveFindRoute({
       profile,
       dialect,
@@ -212,15 +220,18 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       filters,
       searchBody: merged,
       warnings,
+      ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
     });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
+    const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'studies');
     const firstPage = await loadInitialFindPage<Record<string, unknown>>(
       client,
       connection,
       route,
       loadLimit,
       ctx,
+      normalizeRow ? { normalizeRow } : {},
     );
 
     const { fullRows, dataframe } = await maybeSpill({
@@ -234,6 +245,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       loadLimit,
       ctx,
       bridge,
+      ...(normalizeRow ? { normalizeRow } : {}),
     });
 
     const distributions = {

@@ -8,6 +8,7 @@
  * @module services/brapi-dialect/registry
  */
 
+import { bmsDialect } from './bms-dialect.js';
 import { brapiTestDialect } from './brapi-test-dialect.js';
 import { breedbaseDialect, cassavabaseDialect } from './cassavabase-dialect.js';
 import { specDialect } from './spec-dialect.js';
@@ -36,6 +37,7 @@ export function initBrapiDialectRegistry(): void {
   registerDialect(brapiTestDialect);
   registerDialect(breedbaseDialect);
   registerDialect(cassavabaseDialect);
+  registerDialect(bmsDialect);
 }
 
 /** Test-only — clear all registrations between suites. */

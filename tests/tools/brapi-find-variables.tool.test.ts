@@ -252,6 +252,64 @@ describe('brapi_find_variables tool', () => {
     expect(url.searchParams.has('traitClasses')).toBe(false);
   });
 
+  it('escalates GET → POST /search when multi-value filters would be downcast (#15)', async () => {
+    // BrAPI Community Test Server singularizes plural GET filters but its
+    // POST /search routes work natively with multi-value arrays. When the
+    // caller passes multiple values, the route resolver should escalate to
+    // POST /search/variables instead of silently downcasting to the first
+    // value on the GET wire.
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/serverinfo')) {
+        return jsonResponse(
+          envelope({
+            serverName: 'BrAPI Test Server',
+            calls: [
+              { service: 'variables', methods: ['GET'], versions: ['2.1'] },
+              { service: 'search/variables', methods: ['POST'], versions: ['2.1'] },
+              { service: 'ontologies', methods: ['GET'], versions: ['2.1'] },
+            ],
+          }),
+        );
+      }
+      if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+    const ctx = createMockContext({ tenantId: 't1' });
+    await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
+    fetcher.mockReset();
+
+    let searchCalledWith: Record<string, unknown> | undefined;
+    fetcher.mockImplementation(
+      async (
+        url: string,
+        _timeoutMs: number,
+        _ctx: unknown,
+        init?: { method?: string; body?: string },
+      ) => {
+        const path = pathnameOf(url);
+        if (path.endsWith('/search/variables') && init?.method === 'POST') {
+          searchCalledWith = JSON.parse(init.body ?? '{}');
+          return jsonResponse(envelope({ data: [varRow()] }, { totalCount: 1 }));
+        }
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      },
+    );
+
+    const result = await brapiFindVariables.handler(
+      brapiFindVariables.input.parse({
+        variables: ['var-1', 'var-2', 'var-3'],
+      }),
+      ctx,
+    );
+
+    expect(searchCalledWith).toBeDefined();
+    // The full multi-value array must reach the search body — not be downcast.
+    expect(searchCalledWith?.observationVariableDbIds).toEqual(['var-1', 'var-2', 'var-3']);
+    expect(result.warnings.join('\n')).toContain('escalated to POST /search/variables');
+    expect(result.returnedCount).toBe(1);
+  });
+
   it('tolerates null values on nested trait/scale/method fields (Cassavabase shape)', async () => {
     const ctx = await connect(fetcher);
     const sparseRow = {
