@@ -21,7 +21,6 @@ import {
 } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
   buildRequestOptions,
@@ -29,6 +28,7 @@ import {
   extractListRows,
   LoadLimitInput,
   renderDataframeHandle,
+  requireRegisteredConnection,
   spillToCanvas,
   toDataframeHandle,
 } from '../shared/find-helpers.js';
@@ -79,6 +79,13 @@ export const brapiRawSearch = tool('brapi_raw_search', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No connection has been registered under the requested alias',
+      recovery:
+        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_raw_search.',
+    },
+    {
       reason: 'search_endpoint_disabled',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The active dialect declares this POST /search/{noun} route as known-dead on this server',
@@ -101,12 +108,11 @@ export const brapiRawSearch = tool('brapi_raw_search', {
   output: OutputSchema,
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const client = getBrapiClient();
     const bridge = getCanvasBridge();
     const config = getServerConfig();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
 
     const requestOptions: BrapiRequestOptions = {};
     if (connection.resolvedAuth) requestOptions.auth = connection.resolvedAuth;

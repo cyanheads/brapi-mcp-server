@@ -12,7 +12,6 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
   appendPassthroughLines,
@@ -20,6 +19,7 @@ import {
   collectPassthroughParts,
   dedupSynonymsByIdentity,
   isUpstreamNotFound,
+  requireRegisteredConnection,
 } from '../shared/find-helpers.js';
 
 const GermplasmSchema = z
@@ -120,6 +120,13 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
   annotations: { readOnlyHint: true, idempotentHint: true },
   errors: [
     {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No connection has been registered under the requested alias',
+      recovery:
+        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_get_germplasm.',
+    },
+    {
       reason: 'germplasm_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'Upstream returned no germplasm record for the requested DbId',
@@ -134,11 +141,10 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
   output: OutputSchema,
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
@@ -158,7 +164,7 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
         connection.baseUrl,
         `/germplasm/${id}`,
         ctx,
-        buildRequestOptions(connection),
+        buildRequestOptions(connection, undefined, { singleton: true }),
       );
     } catch (err) {
       if (isUpstreamNotFound(err)) {

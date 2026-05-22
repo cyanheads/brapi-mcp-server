@@ -5,7 +5,7 @@
  * @module tests/tools/brapi-get-study.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
@@ -133,6 +133,31 @@ describe('brapi_get_study tool', () => {
     await expect(
       brapiGetStudy.handler(brapiGetStudy.input.parse({ studyDbId: 'ghost' }), ctx),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+  });
+
+  it('fast-fails with study_not_found when upstream serves 5xx on a missing DbId (#30)', async () => {
+    const ctx = await connect(fetcher);
+    // Breedbase serves HTTP 500 for unknown /studies/{id} instead of 404.
+    // Without the singleton hint the retry loop would burn ~40s before
+    // surfacing as a generic transport error; the singleton flow turns this
+    // into the typed `study_not_found` contract with the recovery hint
+    // attached.
+    fetcher.mockRejectedValue(
+      serviceUnavailable('Fetch failed. Status: 500', {
+        statusCode: 500,
+        responseBody: 'Internal Server Error',
+      }),
+    );
+    await expect(
+      brapiGetStudy.handler(brapiGetStudy.input.parse({ studyDbId: 'does-not-exist' }), ctx),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'study_not_found',
+        studyDbId: 'does-not-exist',
+        recovery: { hint: expect.stringContaining('brapi_find_studies') },
+      },
+    });
   });
 
   it('records warnings when FK lookups fail but still returns the study', async () => {

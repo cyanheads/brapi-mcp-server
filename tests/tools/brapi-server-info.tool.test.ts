@@ -74,7 +74,7 @@ describe('brapi_server_info tool', () => {
   });
 
   it('returns the orientation envelope for the default connection', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiServerInfo.errors });
     await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
 
     const result = await brapiServerInfo.handler(brapiServerInfo.input.parse({}), ctx);
@@ -82,15 +82,22 @@ describe('brapi_server_info tool', () => {
     expect(result.baseUrl).toBe(BASE_URL);
   });
 
-  it('throws NotFound when the alias has no registered connection', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+  it('throws NotFound with unknown_alias recovery on the wire when alias is unregistered', async () => {
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiServerInfo.errors });
     await expect(
       brapiServerInfo.handler(brapiServerInfo.input.parse({ alias: 'missing' }), ctx),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'unknown_alias',
+        alias: 'missing',
+        recovery: { hint: expect.stringContaining('brapi_connect') },
+      },
+    });
   });
 
   it('honors forceRefresh by re-fetching the capability profile', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiServerInfo.errors });
     await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
     const callsAfterConnect = fetcher.mock.calls.length;
 

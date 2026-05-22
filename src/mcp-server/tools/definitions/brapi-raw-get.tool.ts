@@ -21,13 +21,13 @@ import {
   getBrapiClient,
 } from '@/services/brapi-client/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import {
   AliasInput,
   DataframeHandleSchema,
   extractListRows,
   LoadLimitInput,
   renderDataframeHandle,
+  requireRegisteredConnection,
   spillToCanvas,
   toDataframeHandle,
 } from '../shared/find-helpers.js';
@@ -74,6 +74,13 @@ export const brapiRawGet = tool('brapi_raw_get', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'unknown_alias',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No connection has been registered under the requested alias',
+      recovery:
+        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_raw_get.',
+    },
+    {
       reason: 'cross_origin_path',
       code: JsonRpcErrorCode.ValidationError,
       when: 'path argument was a full URL instead of a relative BrAPI route',
@@ -99,12 +106,11 @@ export const brapiRawGet = tool('brapi_raw_get', {
   output: OutputSchema,
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const client = getBrapiClient();
     const bridge = getCanvasBridge();
     const config = getServerConfig();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
     // The path is appended to the registered baseUrl; if the caller smuggles a
     // full URL (http://evil/...) `new URL()` would silently hijack the request.
     if (/^https?:\/\//i.test(input.path)) {

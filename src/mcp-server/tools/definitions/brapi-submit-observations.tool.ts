@@ -16,7 +16,6 @@ import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
   AliasInput,
@@ -24,6 +23,7 @@ import {
   companionRequestOptions,
   extractRows,
   isUpstreamNotFound,
+  requireRegisteredConnection,
 } from '../shared/find-helpers.js';
 
 const ObservationRowSchema = z
@@ -202,6 +202,13 @@ interface RowDecision {
 
 const SUBMIT_ERRORS = [
   {
+    reason: 'unknown_alias',
+    code: JsonRpcErrorCode.NotFound,
+    when: 'No connection has been registered under the requested alias',
+    recovery:
+      'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_submit_observations.',
+  },
+  {
     reason: 'observations_unsupported',
     code: JsonRpcErrorCode.ValidationError,
     when: 'BrAPI server does not advertise /observations',
@@ -281,12 +288,11 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
   auth: ['brapi:write:observations'],
 
   async handler(input, ctx) {
-    const registry = getServerRegistry();
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
     const config = getServerConfig();
 
-    const connection = await registry.get(ctx, input.alias ?? DEFAULT_ALIAS);
+    const connection = await requireRegisteredConnection(ctx, input.alias);
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
