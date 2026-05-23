@@ -78,29 +78,16 @@ const ObservationRowSchema = z
       .union([
         z.string().describe('Season identifier as a flat string (older BrAPI servers).'),
         z
-          .object({
-            seasonDbId: z.string().nullish().describe('Server-side season identifier.'),
-            year: z
-              .union([
-                z.string().describe('Calendar year as a string (e.g. "2024").'),
-                z.number().describe('Calendar year as an integer (e.g. 2024).'),
-                z.null().describe('Field present but null on the upstream.'),
-              ])
-              .optional()
-              .describe('Calendar year — accepts string or numeric form depending on server.'),
-            season: z.string().nullish().describe('Season label (e.g. "wet", "dry", "Q1").'),
-            seasonName: z
-              .string()
-              .nullish()
-              .describe('Season display name (BrAPI v2.1 alternate field).'),
-          })
+          .object({})
           .passthrough()
-          .describe('Structured season block per BrAPI v2.1.'),
+          .describe(
+            'Structured season block per BrAPI v2.1 — may carry seasonDbId, year, season, or seasonName. Fields vary by server; all pass through and are collapsed into a single label by format().',
+          ),
         z.null().describe('Field present but null on the upstream.'),
       ])
       .optional()
       .describe(
-        'Season — either a flat string or a structured `{seasonDbId, year, season}` object depending on the server.',
+        'Season — either a flat string or a structured object depending on the server. format() normalizes both into a single label.',
       ),
     value: z
       .string()

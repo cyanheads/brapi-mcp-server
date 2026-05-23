@@ -29,26 +29,9 @@ import type {
   TableInfo,
 } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
-import { idGenerator, type RequestContext } from '@cyanheads/mcp-ts-core/utils';
+import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type { CanvasTableMeta, DescribedTable } from './types.js';
-
-/**
- * Construct a `RequestContext` slice from the handler `Context`. The
- * framework's `RequestContext` carries an `[key: string]: unknown` index
- * signature which the strict `Context` interface lacks, so direct
- * assignment fails despite the 0.8.12 optional-field widening.
- */
-function asRequestContext(ctx: Context): RequestContext {
-  const rc: RequestContext = {
-    requestId: ctx.requestId,
-    timestamp: ctx.timestamp,
-  };
-  if (ctx.tenantId !== undefined) rc.tenantId = ctx.tenantId;
-  if (ctx.traceId !== undefined) rc.traceId = ctx.traceId;
-  if (ctx.spanId !== undefined) rc.spanId = ctx.spanId;
-  return rc;
-}
 
 /**
  * State keys holding the default canvasId (opaque 10-char token).
@@ -138,7 +121,7 @@ export class CanvasBridge {
     const key = this.defaultCanvasKey(ctx);
     const cached = await ctx.state.get<string>(key);
     try {
-      const instance = await this.canvas.acquire(cached ?? undefined, asRequestContext(ctx));
+      const instance = await this.canvas.acquire(cached ?? undefined, ctx);
       if (!cached || instance.isNew) {
         await ctx.state.set(key, instance.canvasId);
       }
@@ -146,7 +129,7 @@ export class CanvasBridge {
     } catch (err) {
       if (cached && isCanvasNotFound(err)) {
         await ctx.state.delete(key);
-        const fresh = await this.canvas.acquire(undefined, asRequestContext(ctx));
+        const fresh = await this.canvas.acquire(undefined, ctx);
         await ctx.state.set(key, fresh.canvasId);
         return fresh;
       }

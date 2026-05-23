@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.6.1
+**Version:** 0.6.2
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -341,15 +341,27 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run rebuild` | Clean + build |
 | `bun run clean` | Remove build artifacts |
 | `bun run devcheck` | Lint + format + typecheck + security + changelog sync |
+| `bun run audit:refresh` | Delete `bun.lock`, reinstall, re-audit. Use when `devcheck` flags a transitive advisory — stale lockfile can mask already-patched deps. If advisory survives, it's real. |
+| `bun run list-skills` | Print the skill index for this project (name, version, description) |
 | `bun run tree` | Generate `docs/tree.md` |
 | `bun run format` | Auto-fix formatting via Biome |
 | `bun run lint:mcp` | Validate MCP tool / resource / prompt definitions against the spec |
+| `bun run lint:packaging` | Verify env var alignment between `manifest.json` and `server.json` |
+| `bun run bundle` | Build and pack as `.mcpb` for one-click Claude Desktop install |
 | `bun run test` | Vitest suite |
 | `bun run start` | Production mode — defers transport selection to `MCP_TRANSPORT_TYPE` (stdio default) |
 | `bun run start:stdio` | Production mode (stdio) — requires prior `bun run build` |
 | `bun run start:http` | Production mode (HTTP) — requires prior `bun run build` |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/<minor>.x/` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
+
+---
+
+## Bundling
+
+`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. MCPB is stdio-only — HTTP deployments are unaffected. To opt out, delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly when `manifest.json` is absent.
+
+**Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match.
 
 ---
 

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.2](changelog/0.6.x/0.6.2.md) — 2026-05-23
+
+mcp-ts-core ^0.9.1 → ^0.9.6: RequestContextLike adoption removes the manual asRequestContext shim in canvas-bridge, format-parity fixes in find-observations and submit-observations, manifest.json + .mcpbignore scaffolded for MCPB bundle support, install badges added to README.
+
 ## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-05-22
 
 Three field-test fixes against T3 / Breedbase image surfaces: collapse double slashes in resolved imageURL paths, wire the SGN row normalizer through brapi_get_image, and coerce numeric-string image dimensions at schema-validation time.

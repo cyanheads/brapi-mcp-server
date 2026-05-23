@@ -550,6 +550,13 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
           lines.push(`- row ${w.rowIndex}:${id}${unit} — ${w.warning}`);
         }
       }
+      if (r.warnings && r.warnings.length > 0) {
+        lines.push('');
+        lines.push('## Warnings');
+        for (const w of r.warnings) {
+          lines.push(`- ${w}`);
+        }
+      }
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

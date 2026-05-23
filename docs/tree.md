@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-05-22 08:19:41
+Generated on: 2026-05-23 12:18:38
 
 ```text
 brapi-mcp-server/
@@ -32,6 +32,8 @@ brapi-mcp-server/
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
@@ -76,8 +78,6 @@ brapi-mcp-server/
 │   │   │   └── security.md
 │   │   └── SKILL.md
 │   ├── api-workers/
-│   │   └── SKILL.md
-│   ├── code-simplifier/
 │   │   └── SKILL.md
 │   ├── design-mcp-server/
 │   │   └── SKILL.md
@@ -254,6 +254,7 @@ brapi-mcp-server/
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
+├── .mcpbignore
 ├── AGENTS.md
 ├── biome.json
 ├── bun.lock
@@ -264,6 +265,7 @@ brapi-mcp-server/
 ├── devcheck.config.json
 ├── Dockerfile
 ├── LICENSE
+├── manifest.json
 ├── package.json
 ├── README.md
 ├── server.json

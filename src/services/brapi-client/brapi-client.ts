@@ -34,11 +34,10 @@ import type {
 import { DIALECT_ALL_DROPPED_REASON } from './types.js';
 
 /**
- * The framework's `Context` and `RequestContext` are structurally compatible
- * at runtime — framework docs confirm passing `Context` to `fetchWithTimeout`
- * and `withRetry` is safe. The types diverge only under
- * `exactOptionalPropertyTypes` (Context marks some fields as `| undefined`).
- * One cast, one place.
+ * `fetchWithTimeout` and `withRetry` accept `RequestContext`, not the broader
+ * `RequestContextLike` that canvas uses. `Context` is structurally compatible
+ * at runtime but diverges under `exactOptionalPropertyTypes` — one cast here
+ * covers all call sites.
  */
 const asRequestContext = (ctx: Context): RequestContext => ctx as unknown as RequestContext;
 

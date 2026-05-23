@@ -1,0 +1,50 @@
+{
+  "manifest_version": "0.3",
+  "name": "brapi-mcp-server",
+  "version": "0.6.2",
+  "description": "Collaborative BrAPI v2.1 MCP workspace — studies, germplasm, genotypes across Breedbase, T3, more.",
+  "author": { "name": "Casey Hand" },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_AUTH_MODE": "none",
+        "NODE_ENV": "production",
+        "BRAPI_DEFAULT_BASE_URL": "${BRAPI_DEFAULT_BASE_URL}",
+        "BRAPI_ENABLE_WRITES": "${BRAPI_ENABLE_WRITES}",
+        "MCP_LOG_LEVEL": "${MCP_LOG_LEVEL}"
+      }
+    }
+  },
+  "compatibility": {
+    "runtimes": { "node": ">=24.0.0" }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "user_config": {
+    "BRAPI_DEFAULT_BASE_URL": {
+      "title": "Default BrAPI Base URL",
+      "description": "Default BrAPI v2 base URL. Optional — connections can be opened at runtime via brapi_connect instead.",
+      "type": "string",
+      "required": false
+    },
+    "BRAPI_ENABLE_WRITES": {
+      "title": "Enable Write Surface",
+      "description": "Opt-in flag for brapi_submit_observations. Off by default.",
+      "type": "string",
+      "required": false,
+      "default": "false"
+    },
+    "MCP_LOG_LEVEL": {
+      "title": "Log Level",
+      "description": "Minimum log level for output (debug, info, warn, error).",
+      "type": "string",
+      "required": false,
+      "default": "info"
+    }
+  }
+}
