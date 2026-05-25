@@ -3,7 +3,7 @@
   "name": "brapi-mcp-server",
   "version": "0.6.2",
   "description": "Collaborative BrAPI v2.1 MCP workspace — studies, germplasm, genotypes across Breedbase, T3, more.",
-  "author": { "name": "Casey Hand" },
+  "author": { "name": "cyanheads" },
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
