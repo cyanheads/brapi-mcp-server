@@ -1,0 +1,25 @@
+{
+  "name": "@cyanheads/brapi-mcp-server",
+  "version": "0.6.2",
+  "description": "A collaborative BrAPI v2.1 workspace for multi-agent research via MCP. Search studies, germplasm, genotypes, & more - across Breedbase, T3, Sweetpotatobase, & any BrAPI v2-compliant server.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/brapi-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/brapi-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "brapi", "plant-breeding", "germplasm"],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "@cyanheads/brapi-mcp-server",
+    "shortDescription": "A collaborative BrAPI v2.1 workspace for multi-agent research via MCP. Search studies, germplasm, genotypes, & more - across Breedbase, T3, Sweetpotatobase, & any BrAPI v2-compliant server.",
+    "longDescription": "",
+    "developerName": "cyanheads",
+    "category": "",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/cyanheads/brapi-mcp-server#readme",
+    "defaultPrompt": []
+  }
+}

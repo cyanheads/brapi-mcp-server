@@ -13,9 +13,10 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 export const ServerConfigSchema = z.object({
   defaultBaseUrl: z
-    .string()
-    .url()
-    .optional()
+    .preprocess(
+      (v) => (typeof v === 'string' && /^\$\{/.test(v) ? undefined : v),
+      z.string().url().optional(),
+    )
     .describe('Default BrAPI v2 base URL if no connection is opened via brapi_connect.'),
   defaultUsername: z
     .string()

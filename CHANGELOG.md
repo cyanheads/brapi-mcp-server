@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.3](changelog/0.6.x/0.6.3.md) — 2026-05-28
+
+@cyanheads/mcp-ts-core ^0.9.6 → ^0.9.13: HTTP 413 body cap, session-init gate, quieter error logs, landing inventory open-catalog override, URL placeholder guard
+
 ## [0.6.2](changelog/0.6.x/0.6.2.md) — 2026-05-23
 
 mcp-ts-core ^0.9.1 → ^0.9.6: RequestContextLike adoption removes the manual asRequestContext shim in canvas-bridge, format-parity fixes in find-observations and submit-observations, manifest.json + .mcpbignore scaffolded for MCPB bundle support, install badges added to README.

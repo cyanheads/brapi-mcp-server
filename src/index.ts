@@ -122,6 +122,10 @@ await createApp({
     brapiFiltersResource,
   ],
   prompts: [brapiEdaStudy, brapiMetaAnalysis],
+  // Public-catalog deployment: keep landing inventory visible to unauthenticated
+  // visitors even when MCP_AUTH_MODE is jwt/oauth. Framework default (0.9.13+)
+  // gates the inventory behind auth; this override restores the open-catalog UX.
+  landing: { requireAuth: false },
   instructions:
     'Bridges BrAPI v2 servers (Breeding API for plant/crop research). Call `brapi_connect` first to register a server under an alias and return the orientation envelope (capabilities, dialect, sample IDs). `brapi_find_*` tools page filtered lookups across studies, germplasm, observations, variables, locations, images, variants, and genotype calls; rows beyond the per-call cap spill to a canvas dataframe — query with `brapi_dataframe_query` (SELECT-only SQL). `brapi_get_*` fetch single records by `*DbId`. Use `brapi_raw_get` / `brapi_raw_search` only when no curated tool fits — responses route back to the right curated tool.',
   setup(core) {

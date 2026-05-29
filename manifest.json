@@ -1,9 +1,17 @@
 {
   "manifest_version": "0.3",
   "name": "brapi-mcp-server",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Collaborative BrAPI v2.1 MCP workspace — studies, germplasm, genotypes across Breedbase, T3, more.",
-  "author": { "name": "cyanheads" },
+  "author": {
+    "name": "cyanheads"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cyanheads/brapi-mcp-server"
+  },
+  "homepage": "https://github.com/cyanheads/brapi-mcp-server#readme",
+  "license": "Apache-2.0",
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
@@ -21,7 +29,9 @@
     }
   },
   "compatibility": {
-    "runtimes": { "node": ">=24.0.0" }
+    "runtimes": {
+      "node": ">=24.0.0"
+    }
   },
   "tools_generated": true,
   "prompts_generated": true,
@@ -30,7 +40,8 @@
       "title": "Default BrAPI Base URL",
       "description": "Default BrAPI v2 base URL. Optional — connections can be opened at runtime via brapi_connect instead.",
       "type": "string",
-      "required": false
+      "required": false,
+      "default": ""
     },
     "BRAPI_ENABLE_WRITES": {
       "title": "Enable Write Surface",
