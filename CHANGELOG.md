@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.4](changelog/0.6.x/0.6.4.md) — 2026-05-30
+
+Enrichment adoption — brapi_find_* tools now surface filter echoes, result totals, and empty-result guidance via ctx.enrich(); @cyanheads/mcp-ts-core ^0.9.13 → ^0.9.16
+
 ## [0.6.3](changelog/0.6.x/0.6.3.md) — 2026-05-28
 
 @cyanheads/mcp-ts-core ^0.9.6 → ^0.9.13: HTTP 413 body cap, session-init gate, quieter error logs, landing inventory open-catalog override, URL placeholder guard
