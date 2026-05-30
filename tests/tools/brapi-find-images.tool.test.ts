@@ -7,7 +7,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindImages } from '@/mcp-server/tools/definitions/brapi-find-images.tool.js';
@@ -86,7 +86,7 @@ describe('brapi_find_images tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(3);
+    expect(getEnrichment(ctx).returnedCount).toBe(3);
     expect(result.distributions.mimeType).toEqual({ 'image/jpeg': 2, 'image/png': 1 });
     expect(result.distributions.descriptiveOntologyTerms).toEqual({
       'CO_334:plot': 3,
@@ -111,7 +111,7 @@ describe('brapi_find_images tool', () => {
       jsonResponse(envelope({ data: [{ imageDbId: 'img-only-id' }] }, { totalCount: 1 })),
     );
     const result = await brapiFindImages.handler(brapiFindImages.input.parse({}), ctx);
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(Object.keys(result.distributions.descriptiveOntologyTerms)).toHaveLength(0);
   });
 
@@ -145,7 +145,7 @@ describe('brapi_find_images tool', () => {
       ),
     );
     const result = await brapiFindImages.handler(brapiFindImages.input.parse({}), ctx);
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.imageDbId).toBe('img-1');
     expect(result.results[0]?.imageTimeStamp).toBeNull();
   });

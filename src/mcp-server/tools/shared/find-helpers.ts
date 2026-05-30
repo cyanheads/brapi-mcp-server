@@ -361,16 +361,21 @@ export function renderFindHeader(opts: {
   noun: string;
   alias: string;
   returnedCount: number;
-  totalCount: number;
+  totalCount?: number;
   dataframe?: { rowCount: number; expiresAt?: string } | undefined;
 }): string {
   if (opts.dataframe) {
     const expiry = opts.dataframe.expiresAt
       ? ` (${formatExpiresIn(opts.dataframe.expiresAt)})`
       : '';
-    return `# ${opts.returnedCount} returned · ${opts.dataframe.rowCount} in dataframe${expiry} · ${opts.totalCount} total ${opts.noun} — \`${opts.alias}\``;
+    const totalPart =
+      opts.totalCount !== undefined ? ` · ${opts.totalCount} total ${opts.noun}` : '';
+    return `# ${opts.returnedCount} returned · ${opts.dataframe.rowCount} in dataframe${expiry}${totalPart} — \`${opts.alias}\``;
   }
-  return `# ${opts.returnedCount} of ${opts.totalCount} ${opts.noun} — \`${opts.alias}\``;
+  if (opts.totalCount !== undefined) {
+    return `# ${opts.returnedCount} of ${opts.totalCount} ${opts.noun} — \`${opts.alias}\``;
+  }
+  return `# ${opts.returnedCount} ${opts.noun} — \`${opts.alias}\``;
 }
 
 /**

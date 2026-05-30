@@ -7,7 +7,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindVariants } from '@/mcp-server/tools/definitions/brapi-find-variants.tool.js';
@@ -92,11 +92,8 @@ describe('brapi_find_variants tool', () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    const result = await brapiFindVariants.handler(
-      brapiFindVariants.input.parse({ start: 1000, end: 1000 }),
-      ctx,
-    );
-    expect(result.warnings.join('\n')).toContain('start >= end');
+    await brapiFindVariants.handler(brapiFindVariants.input.parse({ start: 1000, end: 1000 }), ctx);
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('start >= end');
   });
 
   it('returns rows + per-type / per-reference distributions', async () => {

@@ -7,7 +7,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindStudies } from '@/mcp-server/tools/definitions/brapi-find-studies.tool.js';
@@ -91,8 +91,8 @@ describe('brapi_find_studies tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(3);
-    expect(result.totalCount).toBe(3);
+    expect(getEnrichment(ctx).returnedCount).toBe(3);
+    expect(getEnrichment(ctx).totalCount).toBe(3);
     expect(result.hasMore).toBe(false);
     expect(result.dataframe).toBeUndefined();
     expect(result.distributions.programName).toEqual({
@@ -100,7 +100,7 @@ describe('brapi_find_studies tool', () => {
       'Yam Breeding': 1,
     });
     expect(result.distributions.seasons).toEqual({ '2022': 2, '2021': 1 });
-    expect(result.appliedFilters.commonCropNames).toEqual(['Cassava']);
+    expect(getEnrichment(ctx).appliedFilters.commonCropNames).toEqual(['Cassava']);
   });
 
   it('passes named filters as BrAPI query params', async () => {
@@ -129,7 +129,7 @@ describe('brapi_find_studies tool', () => {
     const rows = [studyRow('s1')];
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
 
-    const result = await brapiFindStudies.handler(
+    await brapiFindStudies.handler(
       brapiFindStudies.input.parse({ crop: 'Cassava', loadLimit: 10 }),
       ctx,
     );
@@ -143,15 +143,15 @@ describe('brapi_find_studies tool', () => {
       page: 0,
       pageSize: 10,
     });
-    expect(result.appliedFilters.commonCropNames).toEqual(['Cassava']);
-    expect(result.warnings.some((w) => w.includes('POST /search/studies'))).toBe(true);
+    expect(getEnrichment(ctx).appliedFilters.commonCropNames).toEqual(['Cassava']);
+    expect(getEnrichment(ctx).warnings.some((w) => w.includes('POST /search/studies'))).toBe(true);
   });
 
   it('merges extraFilters with named params and warns on overrides', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    const result = await brapiFindStudies.handler(
+    await brapiFindStudies.handler(
       brapiFindStudies.input.parse({
         crop: 'Cassava',
         extraFilters: {
@@ -165,7 +165,7 @@ describe('brapi_find_studies tool', () => {
     const url = new URL(String(fetcher.mock.calls[0]![0]));
     expect(url.searchParams.getAll('commonCropNames')).toEqual(['Cassava']);
     expect(url.searchParams.getAll('studyCodes')).toEqual(['IBA-YT-22']);
-    expect(result.warnings).toContain(
+    expect(getEnrichment(ctx).warnings).toContain(
       'extraFilters.commonCropNames was overridden by the named param (named params take precedence).',
     );
   });
@@ -184,7 +184,7 @@ describe('brapi_find_studies tool', () => {
     ];
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
 
-    const result = await brapiFindStudies.handler(
+    await brapiFindStudies.handler(
       brapiFindStudies.input.parse({
         extraFilters: { locationName: 'Ibadan' },
       }),
@@ -192,7 +192,7 @@ describe('brapi_find_studies tool', () => {
     );
 
     expect(
-      result.warnings.some(
+      getEnrichment(ctx).warnings.some(
         (w) =>
           w.includes("Filter 'extraFilters.locationName'") &&
           w.includes('returned row(s) carried other values'),
@@ -206,7 +206,7 @@ describe('brapi_find_studies tool', () => {
       jsonResponse(envelope({ data: [studyRow('s1')] }, { totalCount: 1 })),
     );
 
-    const result = await brapiFindStudies.handler(
+    await brapiFindStudies.handler(
       brapiFindStudies.input.parse({
         extraFilters: { madeUpFilter: 'whatever' },
       }),
@@ -214,7 +214,7 @@ describe('brapi_find_studies tool', () => {
     );
 
     expect(
-      result.warnings.some(
+      getEnrichment(ctx).warnings.some(
         (w) => w.includes('Could not verify these extraFilters keys') && w.includes('madeUpFilter'),
       ),
     ).toBe(true);
@@ -240,11 +240,11 @@ describe('brapi_find_studies tool', () => {
     );
 
     expect(result.hasMore).toBe(true);
-    expect(result.totalCount).toBe(25);
-    expect(result.returnedCount).toBe(10); // in-context truncated to loadLimit
+    expect(getEnrichment(ctx).totalCount).toBe(25);
+    expect(getEnrichment(ctx).returnedCount).toBe(10); // in-context truncated to loadLimit
     expect(result.dataframe).toBeDefined();
     expect(result.dataframe?.rowCount).toBe(25);
-    expect(result.refinementHint).toMatch(/25 rows exceed loadLimit=10/);
+    expect(getEnrichment(ctx).refinementHint).toMatch(/25 rows exceed loadLimit=10/);
     // Distributions computed from full set — 25 programName hits
     expect(Object.values(result.distributions.programName).reduce((a, b) => a + b, 0)).toBe(25);
   });
@@ -277,7 +277,7 @@ describe('brapi_find_studies tool', () => {
     const ctx = await connect(fetcher, ['studies'], 'CassavaBase');
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    const result = await brapiFindStudies.handler(
+    await brapiFindStudies.handler(
       brapiFindStudies.input.parse({
         crop: 'Cassava',
         seasons: ['2022'],
@@ -293,7 +293,7 @@ describe('brapi_find_studies tool', () => {
     expect(url.searchParams.has('commonCropNames')).toBe(false);
     expect(url.searchParams.has('seasonDbIds')).toBe(false);
     expect(url.searchParams.has('programDbIds')).toBe(false);
-    expect(result.appliedFilters).toEqual({
+    expect(getEnrichment(ctx).appliedFilters).toEqual({
       commonCropName: 'Cassava',
       seasonDbId: '2022',
       programDbId: '162',
@@ -304,7 +304,7 @@ describe('brapi_find_studies tool', () => {
     const ctx = await connect(fetcher, ['studies'], 'CassavaBase');
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    const result = await brapiFindStudies.handler(
+    await brapiFindStudies.handler(
       brapiFindStudies.input.parse({
         seasons: ['2022', '2023', '2024'],
       }),
@@ -313,9 +313,9 @@ describe('brapi_find_studies tool', () => {
 
     const url = new URL(String(fetcher.mock.calls[0]![0]));
     expect(url.searchParams.getAll('seasonDbId')).toEqual(['2022']);
-    expect(result.warnings.some((w) => /'seasonDbIds' downcast to 'seasonDbId'/.test(w))).toBe(
-      true,
-    );
+    expect(
+      getEnrichment(ctx).warnings.some((w) => /'seasonDbIds' downcast to 'seasonDbId'/.test(w)),
+    ).toBe(true);
   });
 
   it('warns when locations / programs / trials filter requested but no rows match', async () => {
@@ -350,18 +350,20 @@ describe('brapi_find_studies tool', () => {
       ),
     );
 
-    const result = await brapiFindStudies.handler(
+    await brapiFindStudies.handler(
       brapiFindStudies.input.parse({ locations: ['3'], programs: ['99'], trials: ['88'] }),
       ctx,
     );
 
-    expect(result.warnings.some((w) => /Filter 'locations' requested .*\["3"\]/.test(w))).toBe(
-      true,
-    );
-    expect(result.warnings.some((w) => /Filter 'programs' requested .*\["99"\]/.test(w))).toBe(
-      true,
-    );
-    expect(result.warnings.some((w) => /Filter 'trials' requested .*\["88"\]/.test(w))).toBe(true);
+    expect(
+      getEnrichment(ctx).warnings.some((w) => /Filter 'locations' requested .*\["3"\]/.test(w)),
+    ).toBe(true);
+    expect(
+      getEnrichment(ctx).warnings.some((w) => /Filter 'programs' requested .*\["99"\]/.test(w)),
+    ).toBe(true);
+    expect(
+      getEnrichment(ctx).warnings.some((w) => /Filter 'trials' requested .*\["88"\]/.test(w)),
+    ).toBe(true);
   });
 
   // Cassavabase returns null for many optional string fields rather than
@@ -387,7 +389,7 @@ describe('brapi_find_studies tool', () => {
     };
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [sparseRow] }, { totalCount: 1 })));
     const result = await brapiFindStudies.handler(brapiFindStudies.input.parse({}), ctx);
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.studyCode).toBeNull();
     expect(result.results[0]?.studyName).toBe('00ayt11interspecIB');
   });
@@ -405,7 +407,7 @@ describe('brapi_find_studies tool', () => {
     ];
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: 3 })));
     const result = await brapiFindStudies.handler(brapiFindStudies.input.parse({}), ctx);
-    expect(result.returnedCount).toBe(3);
+    expect(getEnrichment(ctx).returnedCount).toBe(3);
     // Distribution should count only the non-null values.
     expect(result.distributions.seasons).toEqual({ '2024': 1, '2023': 1 });
     // Null entries pass through to results as-is — schema is permissive, the

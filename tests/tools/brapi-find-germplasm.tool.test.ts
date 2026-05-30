@@ -5,7 +5,7 @@
  * @module tests/tools/brapi-find-germplasm.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindGermplasm } from '@/mcp-server/tools/definitions/brapi-find-germplasm.tool.js';
@@ -81,7 +81,7 @@ describe('brapi_find_germplasm tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(3);
+    expect(getEnrichment(ctx).returnedCount).toBe(3);
     expect(result.distributions.commonCropName).toEqual({ Cassava: 2, Yam: 1 });
     expect(result.distributions.genus).toEqual({ Manihot: 2, Dioscorea: 1 });
     expect(result.distributions.species).toEqual({ esculenta: 2 });
@@ -135,7 +135,7 @@ describe('brapi_find_germplasm tool', () => {
 
     expect(result.hasMore).toBe(true);
     expect(result.dataframe?.rowCount).toBe(15);
-    expect(result.refinementHint).toMatch(/15 rows exceed loadLimit=10/);
+    expect(getEnrichment(ctx).refinementHint).toMatch(/15 rows exceed loadLimit=10/);
   });
 
   it('applies free-text as a client-side post-filter and never sends searchText on the wire', async () => {
@@ -152,16 +152,18 @@ describe('brapi_find_germplasm tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.germplasmName).toBe('TME419');
-    expect(result.totalCount).toBe(3);
+    expect(getEnrichment(ctx).totalCount).toBe(3);
     const url = new URL(String(fetcher.mock.calls[0]![0]));
     expect(url.searchParams.has('searchText')).toBe(false);
     expect(url.searchParams.has('text')).toBe(false);
     // Distributions reflect the matched set (only the TME419 row passed the text filter).
     expect(result.distributions.commonCropName).toEqual({ Cassava: 1 });
     expect(
-      result.warnings.some((w) => /narrowed in-context view to 1 of 3 returned rows/.test(w)),
+      getEnrichment(ctx).warnings.some((w) =>
+        /narrowed in-context view to 1 of 3 returned rows/.test(w),
+      ),
     ).toBe(true);
   });
 
@@ -178,7 +180,7 @@ describe('brapi_find_germplasm tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.germplasmDbId).toBe('g1');
   });
 
@@ -195,9 +197,11 @@ describe('brapi_find_germplasm tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(0);
+    expect(getEnrichment(ctx).returnedCount).toBe(0);
     expect(
-      result.warnings.some((w) => /Free-text 'no-such-name' matched 0 of 2 returned rows/.test(w)),
+      getEnrichment(ctx).warnings.some((w) =>
+        /Free-text 'no-such-name' matched 0 of 2 returned rows/.test(w),
+      ),
     ).toBe(true);
     // Distributions reflect the matched set, not the upstream rows — so a
     // zero-match query produces empty distributions instead of a misleading
@@ -234,9 +238,9 @@ describe('brapi_find_germplasm tool', () => {
 
     expect(result.dataframe).toBeDefined();
     expect(result.dataframe?.rowCount).toBe(1);
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(
-      result.warnings.some((w) =>
+      getEnrichment(ctx).warnings.some((w) =>
         /filtered the dataframe to 1 matched row\(s\) across the upstream union/.test(w),
       ),
     ).toBe(true);
@@ -263,14 +267,14 @@ describe('brapi_find_germplasm tool', () => {
     // Only one HTTP call — no spillover pulls.
     expect(fetcher.mock.calls.length).toBe(1);
     expect(result.dataframe).toBeUndefined();
-    expect(result.returnedCount).toBe(0);
+    expect(getEnrichment(ctx).returnedCount).toBe(0);
     expect(
-      result.warnings.some((w) =>
+      getEnrichment(ctx).warnings.some((w) =>
         /matched 0 of 10 first-page rows out of 842000 upstream\. Spillover skipped/.test(w),
       ),
     ).toBe(true);
     expect(
-      result.warnings.some((w) =>
+      getEnrichment(ctx).warnings.some((w) =>
         /names: \['TMS30572'\].*accessionNumbers: \['TMS30572'\].*germplasmDbIds: \['TMS30572'\]/.test(
           w,
         ),
@@ -282,7 +286,7 @@ describe('brapi_find_germplasm tool', () => {
     const ctx = await connect(fetcher, 'CassavaBase');
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    const result = await brapiFindGermplasm.handler(
+    await brapiFindGermplasm.handler(
       brapiFindGermplasm.input.parse({
         crops: ['Cassava'],
         names: ['TME419'],
@@ -298,7 +302,7 @@ describe('brapi_find_germplasm tool', () => {
     expect(url.searchParams.has('commonCropNames')).toBe(false);
     expect(url.searchParams.has('germplasmNames')).toBe(false);
     expect(url.searchParams.has('accessionNumbers')).toBe(false);
-    expect(result.appliedFilters).toEqual({
+    expect(getEnrichment(ctx).appliedFilters).toEqual({
       commonCropName: 'Cassava',
       germplasmName: 'TME419',
       accessionNumber: 'TMe-419',
@@ -309,14 +313,14 @@ describe('brapi_find_germplasm tool', () => {
     const ctx = await connect(fetcher, 'CassavaBase');
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    const result = await brapiFindGermplasm.handler(
-      brapiFindGermplasm.input.parse({ crops: ['Cassava'] }),
-      ctx,
-    );
+    await brapiFindGermplasm.handler(brapiFindGermplasm.input.parse({ crops: ['Cassava'] }), ctx);
 
-    const text = (brapiFindGermplasm.format!(result)[0] as { text: string }).text;
     // SERVER_TO_USER maps singular `commonCropName` back to the user-facing `crops` param.
-    expect(text).toMatch(/crops/);
+    // appliedFilters is now in enrichmentTrailer, not format() — verify via the trailer render.
+    const appliedFilters = getEnrichment(ctx).appliedFilters as Record<string, unknown>;
+    const render = brapiFindGermplasm.enrichmentTrailer!.appliedFilters!.render!;
+    const trailerText = render(appliedFilters);
+    expect(trailerText).toMatch(/crops/);
   });
 
   it('tolerates null values on optional string fields (Cassavabase shape)', async () => {
@@ -340,7 +344,7 @@ describe('brapi_find_germplasm tool', () => {
     };
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [sparseRow] }, { totalCount: 1 })));
     const result = await brapiFindGermplasm.handler(brapiFindGermplasm.input.parse({}), ctx);
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.subtaxa).toBeNull();
     expect(result.results[0]?.synonyms?.[0]?.type).toBeNull();
   });

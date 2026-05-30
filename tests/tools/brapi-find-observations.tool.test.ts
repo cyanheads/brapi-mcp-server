@@ -6,7 +6,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindObservations } from '@/mcp-server/tools/definitions/brapi-find-observations.tool.js';
@@ -86,8 +86,8 @@ describe('brapi_find_observations tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(3);
-    expect(result.totalCount).toBe(3);
+    expect(getEnrichment(ctx).returnedCount).toBe(3);
+    expect(getEnrichment(ctx).totalCount).toBe(3);
     expect(result.distributions.observationVariableName).toEqual({ 'Dry Matter %': 3 });
     expect(result.distributions.observationLevel).toEqual({ plot: 2, plant: 1 });
 
@@ -108,7 +108,7 @@ describe('brapi_find_observations tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.observationDbId).toBe('obs-only-id');
     // The distribution map is empty because every other field is missing.
     expect(Object.keys(result.distributions.observationVariableName)).toHaveLength(0);
@@ -149,7 +149,7 @@ describe('brapi_find_observations tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.observationTimeStamp).toBeNull();
     expect(result.results[0]?.season).toBeNull();
   });
@@ -174,7 +174,7 @@ describe('brapi_find_observations tool', () => {
 
     expect(result.hasMore).toBe(true);
     expect(result.dataframe?.rowCount).toBe(25);
-    expect(result.refinementHint).toMatch(/25 rows exceed loadLimit=10/);
+    expect(getEnrichment(ctx).refinementHint).toMatch(/25 rows exceed loadLimit=10/);
   });
 
   it('returns the first page with a warning when dataframe spillover page pulls fail', async () => {
@@ -196,12 +196,12 @@ describe('brapi_find_observations tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(10);
-    expect(result.totalCount).toBe(25);
+    expect(getEnrichment(ctx).returnedCount).toBe(10);
+    expect(getEnrichment(ctx).totalCount).toBe(25);
     expect(result.hasMore).toBe(true);
     expect(result.dataframe).toBeUndefined();
-    expect(result.warnings.join('\n')).toContain('Dataframe spillover skipped');
-    expect(result.warnings.join('\n')).toContain('upstream page stalled');
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('Dataframe spillover skipped');
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('upstream page stalled');
   });
 
   it('throws ValidationError when /observations is not advertised', async () => {
@@ -242,7 +242,7 @@ describe('brapi_find_observations tool', () => {
     const ctx = await connect(fetcher, ['observations'], 'BrAPI Community Test Server');
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    const result = await brapiFindObservations.handler(
+    await brapiFindObservations.handler(
       brapiFindObservations.input.parse({
         studies: ['study2'],
         germplasm: ['germplasm1'],
@@ -258,7 +258,9 @@ describe('brapi_find_observations tool', () => {
     expect(url.searchParams.has('studyDbIds')).toBe(false);
     expect(url.searchParams.has('germplasmDbIds')).toBe(false);
     expect(url.searchParams.has('observationVariableDbIds')).toBe(false);
-    expect(result.warnings.some((w) => /dropped filter 'studyDbIds'/.test(w))).toBe(true);
+    expect(getEnrichment(ctx).warnings.some((w) => /dropped filter 'studyDbIds'/.test(w))).toBe(
+      true,
+    );
   });
 
   // Issue 1 follow-up: when *all* agent-provided filters get dropped by the
@@ -288,7 +290,7 @@ describe('brapi_find_observations tool', () => {
     // double-fetches).
     fetcher.mockImplementation(async () => jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    const result = await brapiFindObservations.handler(
+    await brapiFindObservations.handler(
       brapiFindObservations.input.parse({
         observationUnits: ['observation_unit1'],
         observationLevels: ['plot'],
@@ -300,7 +302,9 @@ describe('brapi_find_observations tool', () => {
     expect(url.searchParams.getAll('observationUnitDbId')).toEqual(['observation_unit1']);
     expect(url.searchParams.has('observationLevels')).toBe(false);
     expect(url.searchParams.has('observationLevel')).toBe(false);
-    expect(result.warnings.some((w) => /dropped filter 'observationLevels'/.test(w))).toBe(true);
+    expect(
+      getEnrichment(ctx).warnings.some((w) => /dropped filter 'observationLevels'/.test(w)),
+    ).toBe(true);
   });
 
   it('preflights unscoped variable-only queries (symmetric to germplasm-only blow-up on cassavabase)', async () => {
@@ -314,16 +318,16 @@ describe('brapi_find_observations tool', () => {
       throw new Error(`Bulk pull should have been skipped; got pageSize=${pageSize}`);
     });
 
-    const result = await brapiFindObservations.handler(
+    await brapiFindObservations.handler(
       brapiFindObservations.input.parse({ variables: ['var-1'] }),
       ctx,
     );
 
     expect(fetcher.mock.calls.length).toBe(1);
-    expect(result.returnedCount).toBe(1);
-    expect(result.totalCount).toBe(80_000);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
+    expect(getEnrichment(ctx).totalCount).toBe(80_000);
     expect(
-      result.warnings.some((w) =>
+      getEnrichment(ctx).warnings.some((w) =>
         /Preflight detected 80000 observations.*Bulk pull skipped/.test(w),
       ),
     ).toBe(true);
@@ -340,15 +344,12 @@ describe('brapi_find_observations tool', () => {
       throw new Error(`Bulk pull should have been skipped; got pageSize=${pageSize}`);
     });
 
-    const result = await brapiFindObservations.handler(
-      brapiFindObservations.input.parse({ loadLimit: 200 }),
-      ctx,
-    );
+    await brapiFindObservations.handler(brapiFindObservations.input.parse({ loadLimit: 200 }), ctx);
 
     expect(fetcher.mock.calls.length).toBe(1);
-    expect(result.totalCount).toBe(1_000_000);
+    expect(getEnrichment(ctx).totalCount).toBe(1_000_000);
     expect(
-      result.warnings.some((w) =>
+      getEnrichment(ctx).warnings.some((w) =>
         /Preflight detected 1000000 observations.*Bulk pull skipped/.test(w),
       ),
     ).toBe(true);
@@ -362,18 +363,20 @@ describe('brapi_find_observations tool', () => {
       throw new Error('upstream stalled');
     });
 
-    const result = await brapiFindObservations.handler(
+    await brapiFindObservations.handler(
       brapiFindObservations.input.parse({ variables: ['var-1'] }),
       ctx,
     );
 
     expect(calls).toBe(1);
-    expect(result.returnedCount).toBe(0);
-    expect(result.totalCount).toBe(0);
-    expect(result.warnings.some((w) => /Observations preflight count probe stalled/.test(w))).toBe(
-      true,
+    expect(getEnrichment(ctx).returnedCount).toBe(0);
+    expect(getEnrichment(ctx).totalCount).toBe(0);
+    expect(
+      getEnrichment(ctx).warnings.some((w) => /Observations preflight count probe stalled/.test(w)),
+    ).toBe(true);
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain(
+      'find studies containing the germplasm',
     );
-    expect(result.warnings.join('\n')).toContain('find studies containing the germplasm');
   });
 
   it('preflights unscoped germplasm queries and skips bulk pull above threshold', async () => {
@@ -395,11 +398,11 @@ describe('brapi_find_observations tool', () => {
     );
 
     expect(fetcher.mock.calls.length).toBe(1);
-    expect(result.returnedCount).toBe(1);
-    expect(result.totalCount).toBe(50_000);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
+    expect(getEnrichment(ctx).totalCount).toBe(50_000);
     expect(result.dataframe).toBeUndefined();
     expect(
-      result.warnings.some((w) =>
+      getEnrichment(ctx).warnings.some((w) =>
         /Preflight detected 50000 observations.*Bulk pull skipped/.test(w),
       ),
     ).toBe(true);
@@ -409,7 +412,7 @@ describe('brapi_find_observations tool', () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 1 })));
 
-    const result = await brapiFindObservations.handler(
+    await brapiFindObservations.handler(
       brapiFindObservations.input.parse({ studies: ['s-1'], germplasm: ['g-1'] }),
       ctx,
     );
@@ -419,7 +422,7 @@ describe('brapi_find_observations tool', () => {
     const url = new URL(String(fetcher.mock.calls[0]![0]));
     // Confirms it was the bulk pull (loadLimit) and not a pageSize=1 preflight.
     expect(url.searchParams.get('pageSize')).not.toBe('1');
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
   });
 
   it('preflights and proceeds when the upstream total fits under the threshold', async () => {
@@ -439,14 +442,14 @@ describe('brapi_find_observations tool', () => {
       return jsonResponse(envelope({ data: rows }, { totalCount: 50 }));
     });
 
-    const result = await brapiFindObservations.handler(
+    await brapiFindObservations.handler(
       brapiFindObservations.input.parse({ germplasm: ['g-1'] }),
       ctx,
     );
 
     expect(calls).toBe(2);
-    expect(result.returnedCount).toBe(50);
-    expect(result.totalCount).toBe(50);
+    expect(getEnrichment(ctx).returnedCount).toBe(50);
+    expect(getEnrichment(ctx).totalCount).toBe(50);
   });
 
   it('format() renders observation IDs and study/variable names', async () => {

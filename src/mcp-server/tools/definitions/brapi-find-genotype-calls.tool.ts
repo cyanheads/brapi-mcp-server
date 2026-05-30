@@ -79,14 +79,6 @@ const CallRowSchema = z
 const OutputSchema = z.object({
   alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
   results: z.array(CallRowSchema).describe('Call rows returned in-context (up to loadLimit).'),
-  returnedCount: z.number().int().nonnegative().describe('Length of `results[]`.'),
-  totalCount: z
-    .number()
-    .int()
-    .nonnegative()
-    .describe(
-      'Total calls collected across all pages (may be capped by the deployment-wide pull limit; check `truncated`).',
-    ),
   hasMore: z
     .boolean()
     .describe('True when the collection was truncated (equivalent to `truncated`).'),
@@ -131,10 +123,6 @@ const OutputSchema = z.object({
     .describe(
       'True when the deployment-wide pull limit was reached and more calls exist upstream. Narrow the filters and re-pull, or query the spilled dataframe.',
     ),
-  warnings: z
-    .array(z.string())
-    .describe('Advisory messages (truncation, capability gaps, partial pulls).'),
-  searchBody: z.record(z.string(), z.unknown()).describe('The body sent to /search/calls.'),
 });
 
 type Output = z.infer<typeof OutputSchema>;
@@ -198,6 +186,54 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
   }),
   output: OutputSchema,
 
+  // Agent-facing success-path context: total collected count, in-context count,
+  // the exact body sent to /search/calls, empty-result guidance, and advisory
+  // warnings. Populated via ctx.enrich() so it reaches both structuredContent
+  // and the content[] trailer without living in the domain return.
+  enrichment: {
+    totalCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe(
+        'Total calls collected across all pages (may be capped by the deployment-wide pull limit; check `truncated`).',
+      ),
+    returnedCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe('Length of results[] — rows returned in-context (up to loadLimit).'),
+    appliedFilters: z
+      .record(z.string(), z.unknown())
+      .describe(
+        'The body sent to POST /search/calls (variant/germplasm/call-set scope plus pageSize).',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance when no calls were returned — how to broaden filters or verify IDs.'),
+    warnings: z
+      .array(z.string())
+      .describe('Advisory messages (truncation, capability gaps, partial pulls).'),
+  },
+
+  enrichmentTrailer: {
+    appliedFilters: {
+      render: (filters) => {
+        const entries = Object.entries(filters);
+        if (entries.length === 0) return '**Search body:** none';
+        const lines = entries.map(
+          ([k, v]) => `- **${k}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`,
+        );
+        return `**Search body:**\n${lines.join('\n')}`;
+      },
+    },
+    warnings: {
+      render: (ws) => (ws.length > 0 ? ws.map((w) => `- ${w}`).join('\n') : '_none_'),
+      label: 'Warnings',
+    },
+  },
+
   async handler(input, ctx) {
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
@@ -258,12 +294,6 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       variantSetDbId: computeDistribution(collected.rows, (r) => asString(r.variantSetDbId)),
     };
 
-    if (collected.rows.length === 0) {
-      warnings.push(
-        'Upstream returned 0 calls for the requested filters. The variant set or filter combination may not match any data on this server.',
-      );
-    }
-
     const shouldSpill = collected.rows.length > loadLimit;
     let dataframeHandle: z.infer<typeof DataframeHandleSchema> | undefined;
     if (shouldSpill) {
@@ -278,17 +308,24 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       });
     }
 
+    ctx.enrich({
+      totalCount: collected.rows.length,
+      returnedCount: inContext.length,
+      appliedFilters: searchBody,
+      warnings,
+    });
+    if (collected.rows.length === 0)
+      ctx.enrich.notice(
+        'No calls matched the requested filters. The variant set or filter combination may not match any data on this server — broaden the scope (variantSetDbId, germplasmDbIds) or verify the IDs.',
+      );
+
     const result: Output = {
       alias: connection.alias,
       results: inContext,
-      returnedCount: inContext.length,
-      totalCount: collected.rows.length,
       hasMore: collected.truncated,
       callFormatting: collected.callFormatting,
       distributions,
       truncated: collected.truncated,
-      warnings,
-      searchBody,
     };
     if (dataframeHandle) result.dataframe = dataframeHandle;
     return result;
@@ -299,15 +336,12 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     const headerBase = renderFindHeader({
       noun: 'calls',
       alias: result.alias,
-      returnedCount: result.returnedCount,
-      totalCount: result.totalCount,
+      returnedCount: result.results.length,
       dataframe: result.dataframe,
     });
     lines.push(
       result.truncated ? `${headerBase} (truncated at deployment pull limit)` : headerBase,
     );
-    lines.push('');
-    lines.push(`Search body: \`${JSON.stringify(result.searchBody)}\``);
     lines.push('');
     lines.push('## Call formatting');
     const f = result.callFormatting;
@@ -351,11 +385,6 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       lines.push('');
       lines.push('## Dataframe handle');
       lines.push(...renderDataframeHandle(result.dataframe));
-    }
-    if (result.warnings.length > 0) {
-      lines.push('');
-      lines.push('## Warnings');
-      for (const w of result.warnings) lines.push(`- ${w}`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

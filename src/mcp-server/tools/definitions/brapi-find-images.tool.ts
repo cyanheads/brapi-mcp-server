@@ -31,7 +31,6 @@ import {
   loadInitialFindPage,
   maybeSpill,
   mergeFilters,
-  renderAppliedFilters,
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
@@ -90,8 +89,6 @@ const OutputSchema = z.object({
   results: z
     .array(ImageRowSchema)
     .describe('Image metadata rows returned in-context (up to loadLimit).'),
-  returnedCount: z.number().int().nonnegative().describe('Length of `results[]`.'),
-  totalCount: z.number().int().nonnegative().describe('Total rows reported by the server.'),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
@@ -109,19 +106,9 @@ const OutputSchema = z.object({
         .describe('Ontology term → count of images tagged with that term.'),
     })
     .describe('Value frequency per field across the full result set.'),
-  refinementHint: z
-    .string()
-    .optional()
-    .describe('Suggested next-step query refinement when the result set is large.'),
   dataframe: DataframeHandleSchema.optional().describe(
     'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
   ),
-  warnings: z
-    .array(z.string())
-    .describe('Advisory messages (filter overrides, partial data, capability gaps, etc.).'),
-  appliedFilters: z
-    .record(z.string(), z.unknown())
-    .describe('The final filter map sent to the server (named + extraFilters).'),
 });
 
 type Output = z.infer<typeof OutputSchema>;
@@ -184,6 +171,47 @@ export const brapiFindImages = tool('brapi_find_images', {
     extraFilters: ExtraFiltersInput,
   }),
   output: OutputSchema,
+
+  // Agent-facing success-path context: pagination totals, the exact filter map
+  // sent to the server, guidance when the result set is large, and empty-result
+  // notices. Populated via ctx.enrich() so it reaches both structuredContent
+  // and the content[] trailer without living in the domain return.
+  enrichment: {
+    totalCount: z.number().int().nonnegative().describe('Total rows reported by the server.'),
+    returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
+    appliedFilters: z
+      .record(z.string(), z.unknown())
+      .describe('The final filter map sent to the server (named + extraFilters).'),
+    refinementHint: z
+      .string()
+      .optional()
+      .describe('Suggested next-step query refinement when the result set is large.'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance when no rows were returned — how to broaden filters or retry.'),
+    warnings: z
+      .array(z.string())
+      .describe('Advisory messages (filter overrides, partial data, capability gaps).'),
+  },
+
+  enrichmentTrailer: {
+    appliedFilters: {
+      render: (filters) => {
+        const entries = Object.entries(filters);
+        if (entries.length === 0) return '**Applied Filters:** none';
+        const lines = entries.map(([k, v]) => {
+          const display = SERVER_TO_USER[k] ?? k;
+          return `- **${display}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`;
+        });
+        return `**Applied Filters:**\n${lines.join('\n')}`;
+      },
+    },
+    warnings: {
+      render: (ws) => (ws.length > 0 ? ws.map((w) => `- ${w}`).join('\n') : '_none_'),
+      label: 'Warnings',
+    },
+  },
 
   async handler(input, ctx) {
     const capabilities = getCapabilityRegistry();
@@ -292,17 +320,27 @@ export const brapiFindImages = tool('brapi_find_images', {
       ],
     });
 
+    const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
+    ctx.enrich({
+      totalCount,
+      returnedCount: firstPage.rows.length,
+      appliedFilters,
+      warnings,
+      ...(refinementHint ? { refinementHint } : {}),
+    });
+    if (firstPage.rows.length === 0)
+      ctx.enrich.notice(
+        warnings.length > 0
+          ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
+          : 'No images matched the applied filters. Try broadening observationUnits, studies, mimeTypes, or descriptiveOntologyTerms.',
+      );
+
     const result: Output = {
       alias: connection.alias,
       results: firstPage.rows as z.infer<typeof ImageRowSchema>[],
-      returnedCount: firstPage.rows.length,
-      totalCount,
       hasMore: firstPage.hasMore,
       distributions,
-      warnings,
-      appliedFilters: route.kind === 'search' ? route.searchBody : filters,
     };
-    if (refinementHint) result.refinementHint = refinementHint;
     if (dataframe) result.dataframe = dataframe;
     return result;
   },
@@ -313,8 +351,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       renderFindHeader({
         noun: 'images',
         alias: result.alias,
-        returnedCount: result.returnedCount,
-        totalCount: result.totalCount,
+        returnedCount: result.results.length,
         dataframe: result.dataframe,
       }),
     );
@@ -325,12 +362,6 @@ export const brapiFindImages = tool('brapi_find_images', {
       );
       lines.push('');
     }
-    if (result.refinementHint) {
-      lines.push(`**Refinement hint:** ${result.refinementHint}`);
-      lines.push('');
-    }
-    lines.push(renderAppliedFilters(result.appliedFilters, SERVER_TO_USER));
-    lines.push('');
     lines.push('## Distributions');
     lines.push(renderDistributions(result.distributions) || '_No values to summarize._');
     lines.push('');
@@ -386,11 +417,6 @@ export const brapiFindImages = tool('brapi_find_images', {
       lines.push('');
       lines.push('## Dataframe handle');
       lines.push(...renderDataframeHandle(result.dataframe));
-    }
-    if (result.warnings.length > 0) {
-      lines.push('');
-      lines.push('## Warnings');
-      for (const w of result.warnings) lines.push(`- ${w}`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

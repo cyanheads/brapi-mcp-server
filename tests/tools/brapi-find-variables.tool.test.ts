@@ -8,7 +8,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindVariables } from '@/mcp-server/tools/definitions/brapi-find-variables.tool.js';
@@ -97,7 +97,7 @@ describe('brapi_find_variables tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(3);
+    expect(getEnrichment(ctx).returnedCount).toBe(3);
     expect(result.distributions.ontologyDbId).toEqual({ CO_334: 2, CO_338: 1 });
     expect(result.distributions.traitClass).toEqual({ Agronomic: 2, Morphological: 1 });
     expect(result.distributions.scaleName).toEqual({ Percent: 2, Centimeters: 1 });
@@ -202,12 +202,12 @@ describe('brapi_find_variables tool', () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    const result = await brapiFindVariables.handler(
+    await brapiFindVariables.handler(
       brapiFindVariables.input.parse({ studies: ['s-1', 's-2'] }),
       ctx,
     );
 
-    expect(result.warnings.join('\n')).toContain('only one studyDbId');
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('only one studyDbId');
     const url = new URL(String(fetcher.mock.calls[0]![0]));
     expect(url.searchParams.get('studyDbId')).toBe('s-1');
   });
@@ -216,11 +216,8 @@ describe('brapi_find_variables tool', () => {
     const ctx = await connect(fetcher, ['variables']); // no ontologies in calls
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [varRow()] }, { totalCount: 1 })));
 
-    const result = await brapiFindVariables.handler(
-      brapiFindVariables.input.parse({ text: 'dry matter' }),
-      ctx,
-    );
-    expect(result.warnings.join('\n')).toContain('does not expose /ontologies');
+    await brapiFindVariables.handler(brapiFindVariables.input.parse({ text: 'dry matter' }), ctx);
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('does not expose /ontologies');
   });
 
   it('throws ValidationError when /variables is not advertised', async () => {
@@ -296,7 +293,7 @@ describe('brapi_find_variables tool', () => {
       },
     );
 
-    const result = await brapiFindVariables.handler(
+    await brapiFindVariables.handler(
       brapiFindVariables.input.parse({
         variables: ['var-1', 'var-2', 'var-3'],
       }),
@@ -306,8 +303,8 @@ describe('brapi_find_variables tool', () => {
     expect(searchCalledWith).toBeDefined();
     // The full multi-value array must reach the search body — not be downcast.
     expect(searchCalledWith?.observationVariableDbIds).toEqual(['var-1', 'var-2', 'var-3']);
-    expect(result.warnings.join('\n')).toContain('escalated to POST /search/variables');
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('escalated to POST /search/variables');
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
   });
 
   it('tolerates null values on nested trait/scale/method fields (Cassavabase shape)', async () => {
@@ -327,7 +324,7 @@ describe('brapi_find_variables tool', () => {
     };
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [sparseRow] }, { totalCount: 1 })));
     const result = await brapiFindVariables.handler(brapiFindVariables.input.parse({}), ctx);
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.trait?.traitClass).toBeNull();
     expect(result.results[0]?.scale?.scaleName).toBeNull();
   });

@@ -7,7 +7,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindLocations } from '@/mcp-server/tools/definitions/brapi-find-locations.tool.js';
@@ -75,7 +75,7 @@ describe('brapi_find_locations tool', () => {
 
     const result = await brapiFindLocations.handler(brapiFindLocations.input.parse({}), ctx);
 
-    expect(result.returnedCount).toBe(3);
+    expect(getEnrichment(ctx).returnedCount).toBe(3);
     expect(result.distributions.countryCode).toEqual({ USA: 2, NGA: 1 });
     expect(result.distributions.locationType).toEqual({
       'Research Station': 2,
@@ -98,8 +98,8 @@ describe('brapi_find_locations tool', () => {
       ctx,
     );
 
-    expect(result.returnedCount).toBe(1);
-    expect(result.totalCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
+    expect(getEnrichment(ctx).totalCount).toBe(1);
     expect(result.results[0]?.locationDbId).toBe('loc-1');
   });
 
@@ -107,15 +107,15 @@ describe('brapi_find_locations tool', () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [locRow()] }, { totalCount: 1 })));
 
-    const result = await brapiFindLocations.handler(
+    await brapiFindLocations.handler(
       brapiFindLocations.input.parse({
         bbox: { minLat: 30, maxLat: 40 }, // missing lon corners
       }),
       ctx,
     );
 
-    expect(result.warnings.join('\n')).toContain('all four corners');
-    expect(result.returnedCount).toBe(1); // bbox ignored, original row kept
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('all four corners');
+    expect(getEnrichment(ctx).returnedCount).toBe(1); // bbox ignored, original row kept
   });
 
   it('throws ValidationError when /locations is not advertised', async () => {
@@ -185,13 +185,13 @@ describe('brapi_find_locations tool', () => {
       ),
     );
 
-    const result = await brapiFindLocations.handler(
+    await brapiFindLocations.handler(
       brapiFindLocations.input.parse({ countryCodes: ['PER'] }),
       ctx,
     );
 
-    expect(result.warnings.join('\n')).toContain('carried other values');
-    expect(result.warnings.join('\n')).toContain('USA');
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('carried other values');
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('USA');
   });
 
   it('format() includes the location name, country, and coordinates', async () => {
@@ -221,7 +221,7 @@ describe('brapi_find_locations tool', () => {
     };
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [sparseRow] }, { totalCount: 1 })));
     const result = await brapiFindLocations.handler(brapiFindLocations.input.parse({}), ctx);
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.documentationURL).toBeNull();
     // null lat/lon must not render — would print `lat=null` and confuse the LLM.
     const text = (brapiFindLocations.format!(result)[0] as { text: string }).text;
@@ -250,7 +250,7 @@ describe('brapi_find_locations tool', () => {
       }),
       ctx,
     );
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     const text = (brapiFindLocations.format!(result)[0] as { text: string }).text;
     expect(text).toContain('lat=7.378');
     expect(text).toContain('lon=3.947');
@@ -283,9 +283,9 @@ describe('brapi_find_locations tool', () => {
     );
 
     expect(result.coordinateAxisOrder).toBe('swapped');
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.locationDbId).toBe('location_01');
-    expect(result.warnings.join('\n')).toContain('[lat, lon, alt]');
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('[lat, lon, alt]');
     // Renderer must use the same swapped reading as the bbox filter, otherwise
     // the LLM sees coords that contradict the warning.
     const text = (brapiFindLocations.format!(result)[0] as { text: string }).text;
@@ -310,8 +310,8 @@ describe('brapi_find_locations tool', () => {
       ctx,
     );
     expect(result.coordinateAxisOrder).toBe('spec');
-    expect(result.returnedCount).toBe(1);
-    expect(result.warnings.some((w) => w.includes('[lat, lon, alt]'))).toBe(false);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
+    expect(getEnrichment(ctx).warnings.some((w) => w.includes('[lat, lon, alt]'))).toBe(false);
   });
 
   it('keeps the verify-coordinate-convention warning when both spec and swapped readings exclude every row', async () => {
@@ -333,8 +333,8 @@ describe('brapi_find_locations tool', () => {
       ctx,
     );
     expect(result.coordinateAxisOrder).toBe('spec');
-    expect(result.returnedCount).toBe(0);
-    const text = result.warnings.join('\n');
+    expect(getEnrichment(ctx).returnedCount).toBe(0);
+    const text = getEnrichment(ctx).warnings.join('\n');
     expect(text).toContain('Verify the latitude/longitude window');
     expect(text).not.toContain('[lat, lon, alt]');
   });
@@ -370,9 +370,11 @@ describe('brapi_find_locations tool', () => {
       ctx,
     );
     expect(result.coordinateAxisOrder).toBe('spec');
-    expect(result.returnedCount).toBe(0);
-    expect(result.warnings.some((w) => w.includes('[lat, lon, alt]'))).toBe(false);
-    expect(result.warnings.join('\n')).toContain('Verify the latitude/longitude window');
+    expect(getEnrichment(ctx).returnedCount).toBe(0);
+    expect(getEnrichment(ctx).warnings.some((w) => w.includes('[lat, lon, alt]'))).toBe(false);
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain(
+      'Verify the latitude/longitude window',
+    );
   });
 
   it('materializes the post-bbox set in the spillover dataframe (#28)', async () => {
@@ -412,7 +414,7 @@ describe('brapi_find_locations tool', () => {
     // rowCount must reflect the in-bbox set, not the upstream union.
     expect(result.dataframe?.rowCount).toBe(2);
     // The inline totalCount mirrors the dataframe size — both are post-bbox.
-    expect(result.totalCount).toBe(2);
+    expect(getEnrichment(ctx).totalCount).toBe(2);
   });
 
   it('bbox honors GeoJSON coordinates and excludes outside-window points', async () => {
@@ -439,7 +441,7 @@ describe('brapi_find_locations tool', () => {
       }),
       ctx,
     );
-    expect(result.returnedCount).toBe(1);
+    expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.locationDbId).toBe('in');
   });
 });

@@ -8,7 +8,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindGenotypeCalls } from '@/mcp-server/tools/definitions/brapi-find-genotype-calls.tool.js';
@@ -101,13 +101,14 @@ describe('brapi_find_genotype_calls tool', () => {
       ctx,
     );
 
-    expect(result.totalCount).toBe(3);
+    expect(getEnrichment(ctx).totalCount).toBe(3);
+    expect(getEnrichment(ctx).returnedCount).toBe(3);
     expect(result.distributions.callSetName).toEqual({ TME419: 2, 'TMS-30572': 1 });
     expect(result.distributions.variantName).toEqual({ rs1: 2, rs2: 1 });
     expect(result.callFormatting.unknownString).toBe('.');
     expect(result.callFormatting.sepPhased).toBe('|');
-    expect(result.searchBody.variantSetDbIds).toEqual(['vset-1']);
-    expect(result.searchBody.germplasmDbIds).toEqual(['g-1', 'g-2']);
+    expect(getEnrichment(ctx).appliedFilters.variantSetDbIds).toEqual(['vset-1']);
+    expect(getEnrichment(ctx).appliedFilters.germplasmDbIds).toEqual(['g-1', 'g-2']);
   });
 
   it('spills to a canvas dataframe when collected calls exceed loadLimit', async () => {
@@ -125,8 +126,8 @@ describe('brapi_find_genotype_calls tool', () => {
       ctx,
     );
 
-    expect(result.totalCount).toBe(25);
-    expect(result.returnedCount).toBe(10);
+    expect(getEnrichment(ctx).totalCount).toBe(25);
+    expect(getEnrichment(ctx).returnedCount).toBe(10);
     expect(result.dataframe?.rowCount).toBe(25);
   });
 
