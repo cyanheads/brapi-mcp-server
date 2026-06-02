@@ -31,6 +31,7 @@ import type {
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
+import { sanitizeRowColumns } from '@/mcp-server/tools/shared/canvas-columns.js';
 import type { CanvasTableMeta, DescribedTable } from './types.js';
 
 /**
@@ -82,6 +83,12 @@ export interface RegisterDataframeInput {
 
 /** Result of {@link CanvasBridge.registerDataframe} — the dataframe handle. */
 export interface RegisterDataframeResult {
+  /**
+   * Maps each sanitized column name back to its original upstream key, for
+   * columns renamed to clear the SQL-safe-identifier gate (e.g. `end` → `end_`).
+   * Present only when at least one column was renamed.
+   */
+  columnLegend?: Record<string, string>;
   columns: string[];
   createdAt: string;
   expiresAt: string;
@@ -175,8 +182,13 @@ export class CanvasBridge {
     // that column. Sniffed schemas can never prove non-nullability from a
     // sample, so we walk every row, classify types ourselves, and emit
     // `nullable: true` for every column.
-    const schema = deriveAllNullableSchema(input.rows);
-    const registered = await instance.registerTable(tableName, input.rows, { schema });
+    // Sanitize raw upstream column keys to SQL-safe identifiers before
+    // registration — a reserved word (`end` on /variants) or digit-leading key
+    // would otherwise be rejected by the framework's assertValidIdentifier gate.
+    // `columnLegend` records any rename so callers can map safe → original.
+    const { rows: safeRows, legend: columnLegend } = sanitizeRowColumns(input.rows);
+    const schema = deriveAllNullableSchema(safeRows);
+    const registered = await instance.registerTable(tableName, safeRows, { schema });
 
     const tableMeta: CanvasTableMeta = {
       source: input.source,
@@ -201,6 +213,7 @@ export class CanvasBridge {
     };
     if (input.truncated) result.truncated = true;
     if (typeof input.maxRows === 'number') result.maxRows = input.maxRows;
+    if (Object.keys(columnLegend).length > 0) result.columnLegend = columnLegend;
     return result;
   }
 

@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
 </div>
 
@@ -133,7 +133,7 @@ Within one (tenant, session), dataframes act as a self-cleaning shared notebook:
 - **Dialect adaptation** — `spec` / `brapi-test` / `breedbase` / `cassavabase` / `bms` dialects translate v2.1 plural filter keys to the singular form each server family honors, drop filters known to be broken, normalize sparse-shape encodings, and escalate to POST `/search/{noun}` when GET would silently downcast multi-value filters. Detected from `/serverinfo` (server-name / organization-name); pin per-alias via `BRAPI_<ALIAS>_DIALECT`. Verified-vs-inferred mapping counts surface on the orientation envelope so agents see the confidence floor at a glance.
 - **DuckDB required** — `@duckdb/node-api` is a regular dependency; startup fails closed when the framework canvas is unavailable. Not supported on Cloudflare Workers (no native binary in that runtime).
 - **Async-search transparency** — `brapi_find_genotype_calls` and `brapi_raw_search` handle the `POST /search/{noun}` → `GET /search/{noun}/{id}` 202-retry pattern automatically.
-- **Pedigree DAG walks** — `brapi_walk_pedigree` BFS-traverses ancestry / descendancy with cycle detection (BrAPI only exposes one generation per call).
+- **Pedigree DAG walks** — `brapi_walk_pedigree` BFS-traverses ancestry / descendancy with cycle detection (BrAPI only exposes one generation per call); a 1,000-node safety cap bounds the walk and sets `truncated` when reached.
 - **Image content** — `brapi_get_image` fetches bytes inline as MCP `type: image` blocks, preferring `/images/{id}/imagecontent` with `imageURL` fallback.
 - **Free-text variable ranking** — `OntologyResolver` scores variables against a query (PUI / name / synonym / trait-class) so `find_variables text:"..."` returns ranked candidates even without `/ontologies`.
 - **Auth variants in one schema** — tagged-union covers `none` / `bearer` / `api_key` / `sgn` (session-token exchange) / `oauth2` (client-credentials).
@@ -145,7 +145,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp
 
 ## Working with dataframes
 
-When a `find_*` tool's upstream total exceeds `loadLimit`, the full union materializes as a canvas dataframe and the response carries an inline `dataframe` handle (`{ tableName, rowCount, columns, createdAt, expiresAt, … }`). SQL is the paging idiom — use `LIMIT/OFFSET` to walk pages, projection (`SELECT col1, col2`) to trim columns, and aggregation (`COUNT`, `GROUP BY`, `AVG`) to summarize without materializing every row.
+When a `find_*` tool's upstream total exceeds `loadLimit`, the full union materializes as a canvas dataframe and the response carries an inline `dataframe` handle (`{ tableName, rowCount, columns, createdAt, expiresAt, … }`). Upstream column names that aren't SQL-safe identifiers — reserved words like `end`, digit-leading IDs — are sanitized for the dataframe, and a `columnLegend` on the handle maps each renamed column back to its original key. SQL is the paging idiom — use `LIMIT/OFFSET` to walk pages, projection (`SELECT col1, col2`) to trim columns, and aggregation (`COUNT`, `GROUP BY`, `AVG`) to summarize without materializing every row.
 
 Dataframe names are session-scoped capability tokens by default — pass `tableName` to any other agent on the same MCP session (or a downstream step in the same workflow) and they query the same workspace by name without re-pulling from the upstream. The `brapi_dataframe_*` tools offer SQL manipulation and more. See [Multi-agent workflows](#multi-agent-workflows) for cross-session / cross-tenant rules.
 
@@ -171,7 +171,7 @@ Add to your MCP client config — pick one runner:
 ```json
 {
   "mcpServers": {
-    "brapi": {
+    "brapi-mcp-server": {
       "type": "stdio",
       "command": "bunx",
       "args": ["@cyanheads/brapi-mcp-server@latest"],

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.1](changelog/0.7.x/0.7.1.md) — 2026-06-01
+
+fix: find_* dataframe spillover survives reserved-word columns (end, order, etc.) via centralized sanitization; brapi_walk_pedigree now enforces its 1,000-node cap mid-traversal as a hard ceiling
+
 ## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-06-01
 
 phenotype matrix, germplasm performance, genotype export, observation variable resource

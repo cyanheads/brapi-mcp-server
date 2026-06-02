@@ -12,6 +12,8 @@ import { describe, expect, it } from 'vitest';
 import {
   appendPassthroughLines,
   collectPassthroughParts,
+  renderDataframeHandle,
+  toDataframeHandle,
 } from '@/mcp-server/tools/shared/find-helpers.js';
 
 describe('collectPassthroughParts', () => {
@@ -69,5 +71,40 @@ describe('appendPassthroughLines', () => {
     appendPassthroughLines(lines, { name: 'small', payload: big }, new Set());
     expect(lines[0]).toBe('- **name:** small');
     expect(lines[1]).toMatch(/^- \*\*payload:\*\* <30 keys, \d+\.\d+KB — see structuredContent>$/);
+  });
+});
+
+describe('renderDataframeHandle', () => {
+  const base = {
+    tableName: 'df_AAAAA_BBBBB',
+    rowCount: 12,
+    columns: ['variantDbId', 'end_'],
+    createdAt: '2026-06-01T00:00:00.000Z',
+    expiresAt: '2999-01-01T00:00:00.000Z',
+  };
+
+  it('renders a renamedColumns line when a legend is present', () => {
+    const lines = renderDataframeHandle({ ...base, columnLegend: { end_: 'end' } });
+    expect(lines.join('\n')).toContain(
+      'renamedColumns: end_ → end (query using the left-hand names)',
+    );
+  });
+
+  it('omits the renamedColumns line when no columns were renamed', () => {
+    expect(renderDataframeHandle(base).join('\n')).not.toContain('renamedColumns');
+  });
+});
+
+describe('toDataframeHandle', () => {
+  it('propagates columnLegend from the register result', () => {
+    const handle = toDataframeHandle({
+      tableName: 'df_X',
+      rowCount: 1,
+      columns: ['end_'],
+      createdAt: '2026-06-01T00:00:00.000Z',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+      columnLegend: { end_: 'end' },
+    });
+    expect(handle.columnLegend).toEqual({ end_: 'end' });
   });
 });

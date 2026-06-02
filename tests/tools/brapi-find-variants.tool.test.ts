@@ -153,4 +153,33 @@ describe('brapi_find_variants tool', () => {
     expect(text).toContain('refBases=A');
     expect(text).toContain('altBases=G');
   });
+
+  it('sanitizes the reserved-word `end` column when the result spills to a dataframe', async () => {
+    const ctx = await connect(fetcher);
+    // loadLimit: 5 with 7 upstream variants → spillover (mirrors the issue's
+    // repro). Each row carries an `end` field — a reserved SQL keyword the
+    // canvas identifier gate rejects unsanitized.
+    const page1 = Array.from({ length: 5 }, (_, i) => variantRow({ variantDbId: `v-${i}` }));
+    const page2 = Array.from({ length: 2 }, (_, i) => variantRow({ variantDbId: `v-1${i}` }));
+    let call = 0;
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (!path.endsWith('/variants')) throw new Error(`Unexpected path: ${path}`);
+      call += 1;
+      return jsonResponse(envelope({ data: call === 1 ? page1 : page2 }, { totalCount: 7 }));
+    });
+
+    const result = await brapiFindVariants.handler(
+      brapiFindVariants.input.parse({ loadLimit: 5 }),
+      ctx,
+    );
+
+    expect(result.dataframe).toBeDefined();
+    expect(result.dataframe?.columns).toContain('end_');
+    expect(result.dataframe?.columns).not.toContain('end');
+    expect(result.dataframe?.columnLegend).toMatchObject({ end_: 'end' });
+    // format() surfaces the rename so the agent writes correct SQL.
+    const text = (brapiFindVariants.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('end_ → end');
+  });
 });

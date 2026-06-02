@@ -608,6 +608,12 @@ export const DataframeHandleSchema = z.object({
   columns: z
     .array(z.string().describe('Column name from the materialized rows.'))
     .describe('Full column list of the dataframe.'),
+  columnLegend: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe(
+      'Maps a sanitized column name back to its original upstream key, for columns renamed to clear the SQL-safe-identifier gate (e.g. `end` → `end_`). Present only when a column was renamed — write SQL against the sanitized (left-hand) names.',
+    ),
   createdAt: z.string().describe('ISO 8601 timestamp the dataframe was created.'),
   expiresAt: z
     .string()
@@ -642,6 +648,12 @@ export function renderDataframeHandle(handle: DataframeHandle): string[] {
     `- createdAt: ${handle.createdAt}`,
     `- expiresAt: ${handle.expiresAt} (${formatExpiresIn(handle.expiresAt)})`,
   ];
+  if (handle.columnLegend && Object.keys(handle.columnLegend).length > 0) {
+    const pairs = Object.entries(handle.columnLegend)
+      .map(([safe, original]) => `${safe} → ${original}`)
+      .join(', ');
+    lines.push(`- renamedColumns: ${pairs} (query using the left-hand names)`);
+  }
   if (handle.truncated) lines.push(`- truncated: true`);
   if (typeof handle.maxRows === 'number') lines.push(`- maxRows: ${handle.maxRows}`);
   return lines;
@@ -677,6 +689,7 @@ export function toDataframeHandle(result: RegisterDataframeResult): DataframeHan
     createdAt: result.createdAt,
     expiresAt: result.expiresAt,
   };
+  if (result.columnLegend) handle.columnLegend = result.columnLegend;
   if (result.truncated) handle.truncated = true;
   if (typeof result.maxRows === 'number') handle.maxRows = result.maxRows;
   return handle;

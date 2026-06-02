@@ -377,6 +377,37 @@ describe('CanvasBridge.registerDataframe', () => {
     expect(result.maxRows).toBe(50_000);
   });
 
+  it('sanitizes reserved-word and digit-leading column keys, surfacing a legend', async () => {
+    const ctx = createMockContext({ tenantId: 't1' });
+    const result = await bridge.registerDataframe(ctx, {
+      source: 'find_variants',
+      baseUrl: 'https://b/v2',
+      query: {},
+      rows: [
+        { variantDbId: 'v1', start: 100, end: 200, '12345': 'x' },
+        { variantDbId: 'v2', start: 300, end: 400, '12345': 'y' },
+      ],
+    });
+    // `end` is a reserved SQL keyword → `end_`; `12345` is digit-leading → `v_12345`.
+    expect(result.columns).toContain('end_');
+    expect(result.columns).toContain('v_12345');
+    expect(result.columns).not.toContain('end');
+    expect(result.columns).not.toContain('12345');
+    expect(result.columnLegend).toEqual({ end_: 'end', v_12345: '12345' });
+  });
+
+  it('omits the column legend when every key is already a safe identifier', async () => {
+    const ctx = createMockContext({ tenantId: 't1' });
+    const result = await bridge.registerDataframe(ctx, {
+      source: 'find_germplasm',
+      baseUrl: 'https://b/v2',
+      query: {},
+      rows: [{ germplasmDbId: 'g1', germplasmName: 'Acme' }],
+    });
+    expect(result.columnLegend).toBeUndefined();
+    expect(result.columns).toEqual(['germplasmDbId', 'germplasmName']);
+  });
+
   it('generates unique table names across calls', async () => {
     const ctx = createMockContext({ tenantId: 't1' });
     const a = await bridge.registerDataframe(ctx, {
