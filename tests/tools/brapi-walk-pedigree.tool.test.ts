@@ -338,4 +338,37 @@ describe('brapi_walk_pedigree tool', () => {
       brapiWalkPedigree.handler(brapiWalkPedigree.input.parse({ germplasmDbIds: ['g-1'] }), ctx),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
   });
+
+  it('enforces the node cap mid-depth instead of overshooting it', async () => {
+    const ctx = await connect(fetcher);
+    // A single prolific founder enumerates far more parents in ONE depth than
+    // the 1,000-node cap. The cap must hold mid-expansion, not just at the next
+    // depth boundary — the pre-fix code overshot to ~1,500 here.
+    const parents = Array.from({ length: 1500 }, (_, i) => ({ germplasmDbId: `g-p-${i}` }));
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      const m = path.match(/\/germplasm\/([^/]+)\/pedigree$/);
+      if (m) {
+        const id = decodeURIComponent(m[1]!);
+        return jsonResponse(envelope(id === 'g-root' ? { parents } : { parents: [] }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiWalkPedigree.handler(
+      brapiWalkPedigree.input.parse({
+        germplasmDbIds: ['g-root'],
+        direction: 'ancestors',
+        maxDepth: 3,
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.nodes.length).toBeLessThanOrEqual(1000); // hard ceiling — pre-fix this was ~1,500
+    expect(result.nodes.length).toBe(1000); // 1 root + 999 parents, then the cap stops registration
+    expect(result.warnings.join('\n')).toContain('safety cap');
+    const text = (brapiWalkPedigree.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('truncated: true');
+  });
 });

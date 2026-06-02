@@ -194,8 +194,9 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     let deadEndCount = 0;
     let depthReached = 0;
 
-    for (let depth = 1; depth <= input.maxDepth; depth++) {
+    depthLoop: for (let depth = 1; depth <= input.maxDepth; depth++) {
       if (state.nodes.size >= MAX_NODES) {
+        // Already at the cap from a prior depth — skip fetching another round.
         truncated = true;
         break;
       }
@@ -215,7 +216,6 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
         ),
       );
 
-      let producedEdge = false;
       for (const result of exp) {
         if (result.kind === 'deadEnd') {
           deadEndCount++;
@@ -224,6 +224,14 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
         }
 
         for (const parent of result.parents) {
+          // Hard ceiling: one high-fertility germplasm can enumerate thousands
+          // of parents/children within a single depth, so enforce the cap
+          // per-registration — a depth-boundary check alone lets nodes.size
+          // overshoot MAX_NODES before the next iteration runs.
+          if (state.nodes.size >= MAX_NODES) {
+            truncated = true;
+            break depthLoop;
+          }
           const already = state.nodes.has(parent.germplasmDbId);
           registerNode(state, parent.germplasmDbId, parent.germplasmName, depth, 'ancestor');
           const edge: z.infer<typeof EdgeSchema> = {
@@ -233,7 +241,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
           };
           if (parent.parentType) edge.parentType = parent.parentType;
           const inverseKnown = isInverseEdgeKnown(state, edge);
-          if (addEdge(state, edge)) producedEdge = true;
+          if (addEdge(state, edge)) depthReached = depth;
           if (already) {
             // direction='both' walks BFS in two directions concurrently — we
             // expect to re-encounter nodes via the inverse relationship as the
@@ -245,6 +253,10 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
         }
 
         for (const child of result.children) {
+          if (state.nodes.size >= MAX_NODES) {
+            truncated = true;
+            break depthLoop;
+          }
           const already = state.nodes.has(child.germplasmDbId);
           registerNode(state, child.germplasmDbId, child.germplasmName, depth, 'descendant');
           const edge: z.infer<typeof EdgeSchema> = {
@@ -253,7 +265,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
             relationship: 'child',
           };
           const inverseKnown = isInverseEdgeKnown(state, edge);
-          if (addEdge(state, edge)) producedEdge = true;
+          if (addEdge(state, edge)) depthReached = depth;
           if (already) {
             if (!inverseKnown) cycleCount++;
           } else {
@@ -262,8 +274,13 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
         }
       }
 
-      if (producedEdge) depthReached = depth;
       if (state.frontier.size === 0) break;
+    }
+
+    if (truncated) {
+      warnings.push(
+        `Walk stopped at the ${MAX_NODES}-node safety cap; the returned DAG is partial. Re-run with fewer roots or a lower maxDepth to stay within the cap.`,
+      );
     }
 
     const nodes = Array.from(state.nodes.values()).sort(
