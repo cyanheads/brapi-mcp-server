@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-06-01
+
+phenotype matrix, germplasm performance, genotype export, observation variable resource
+
 ## [0.6.4](changelog/0.6.x/0.6.4.md) — 2026-05-30
 
 Enrichment adoption — brapi_find_* tools now surface filter echoes, result totals, and empty-result guidance via ctx.enrich(); @cyanheads/mcp-ts-core ^0.9.13 → ^0.9.16

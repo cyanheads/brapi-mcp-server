@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.6.4
+**Version:** 0.7.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -168,7 +168,7 @@ Handlers receive a unified `ctx` object. Currently used surface:
 | `ctx.requestId` | Unique request ID — auto-attached to every `ctx.log` entry. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio / HTTP+`auth=none` — outer scope on all `ctx.state` reads/writes. |
 
-`ctx.elicit` is used by `brapi_submit_observations` to gate apply-mode writes behind user confirmation (with explicit `force: true` as the bypass). `ctx.sample` and `ctx.progress` are not used yet — they'll show up when long-running workflows (pedigree traversal, genotype-call pulls) need progress reporting or LLM sampling. `ctx.fail(reason, …)` is the typed thrower keyed off declared `errors[]` contracts — used by 8 tools and 3 resources today. `ctx.recoveryFor(reason)` resolves the matching contract entry's recovery hint into `data.recovery.hint` so it surfaces on the wire.
+`ctx.elicit` is used by `brapi_submit_observations` to gate apply-mode writes behind user confirmation (with explicit `force: true` as the bypass). `ctx.sample` and `ctx.progress` are not used yet — they'll show up when long-running workflows (pedigree traversal, genotype-call pulls) need progress reporting or LLM sampling. `ctx.fail(reason, …)` is the typed thrower keyed off declared `errors[]` contracts — used by 14 tools and 1 resource today. `ctx.recoveryFor(reason)` resolves the matching contract entry's recovery hint into `data.recovery.hint` so it surfaces on the wire.
 
 ---
 
@@ -176,7 +176,7 @@ Handlers receive a unified `ctx` object. Currently used surface:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated); to surface it on the wire, spread `...ctx.recoveryFor('reason')` into `data` or pass an explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Live across the BrAPI surface today: `brapi_connect`, `brapi_dataframe_query`, `brapi_describe_filters`, `brapi_find_genotype_calls`, `brapi_get_germplasm`, `brapi_get_image`, `brapi_get_study`, `brapi_raw_get`, `brapi_raw_search`, `brapi_submit_observations`, plus the `brapi://study/{studyDbId}`, `brapi://germplasm/{germplasmDbId}`, and `brapi://filters/{endpoint}` resources.
+**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated); to surface it on the wire, spread `...ctx.recoveryFor('reason')` into `data` or pass an explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely and don't need declaring. Live across the BrAPI surface today: `brapi_build_phenotype_matrix`, `brapi_dataframe_describe`, `brapi_dataframe_export`, `brapi_dataframe_query`, `brapi_describe_filters`, `brapi_export_genotype_matrix`, `brapi_find_genotype_calls`, `brapi_germplasm_performance`, `brapi_get_germplasm`, `brapi_get_image`, `brapi_get_study`, `brapi_raw_get`, `brapi_raw_search`, `brapi_submit_observations`, plus the `brapi://variable/{observationVariableDbId}` resource.
 
 ```ts
 errors: [
@@ -219,7 +219,7 @@ Available factories include `notFound`, `validationError`, `forbidden`, `unautho
 
 ```text
 src/
-  index.ts                                # createApp() entry point — registers 21 tools, 5 resources, 2 prompts; inits 7 services
+  index.ts                                # createApp() entry point — registers 25 tools, 6 resources, 2 prompts; inits 7 services
   config/
     server-config.ts                      # BRAPI_* env vars (Zod schema, lazy-parsed)
     alias-credentials.ts                  # Per-alias env-var resolution (BRAPI_<ALIAS>_*) for brapi_connect
@@ -254,6 +254,9 @@ src/
         brapi-dataframe-query.tool.ts     # Run SQL across canvas dataframes (SELECT only); typed columns response
         brapi-dataframe-drop.tool.ts      # Drop a dataframe by name (opt-in via BRAPI_CANVAS_DROP_ENABLED)
         brapi-dataframe-export.tool.ts    # Write CSV/Parquet/JSON to BRAPI_EXPORT_DIR (opt-in, stdio-only)
+        brapi-build-phenotype-matrix.tool.ts  # Germplasm × trait matrix from studies; materialized as canvas dataframe
+        brapi-germplasm-performance.tool.ts   # Per-variable aggregates (n, mean, median, sd) for a single germplasm
+        brapi-export-genotype-matrix.tool.ts  # Genotype calls → germplasm × variant dataframe + VCF-lite / PLINK serialization
         brapi-submit-observations.tool.ts # Two-phase observation write — preview / apply (POST + PUT) with elicit gate
         brapi-raw-get.tool.ts             # Last-resort GET passthrough with routing nudge
         brapi-raw-search.tool.ts          # Last-resort POST /search passthrough with async polling
@@ -262,6 +265,9 @@ src/
         orientation-envelope.ts           # Shared envelope builder + formatter
         find-helpers.ts                   # Alias / loadLimit / extraFilters fragments, mergeFilters, maybeSpill, DataframeHandleSchema
         raw-routing-hints.ts              # Routing nudges emitted by raw_get / raw_search when a curated tool exists
+        canvas-columns.ts                 # SQL-safe column-name sanitizer + variableLegend builder (shared by matrix tools)
+        observations.ts                   # Study-anchored observation pull shared by phenotype-matrix and germplasm-performance
+        genotype-calls.ts                 # Async genotype-call collector shared by find-genotype-calls and export-genotype-matrix
     resources/
       definitions/
         brapi-server-info.resource.ts     # brapi://server/info — orientation envelope (default connection)
@@ -269,6 +275,7 @@ src/
         brapi-study.resource.ts           # brapi://study/{studyDbId} — single study with FKs
         brapi-germplasm.resource.ts       # brapi://germplasm/{germplasmDbId} — single germplasm with attributes + parents
         brapi-filters.resource.ts         # brapi://filters/{endpoint} — filter catalog
+        brapi-variable.resource.ts        # brapi://variable/{observationVariableDbId} — observation variable (trait, scale, method)
     prompts/
       definitions/
         brapi-eda-study.prompt.ts         # EDA playbook for one study (orient → variables → coverage → outliers → report)

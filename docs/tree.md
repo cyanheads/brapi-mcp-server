@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-05-29 04:49:24
+Generated on: 2026-06-02 04:53:11
 
 ```text
 brapi-mcp-server/
@@ -26,6 +26,7 @@ brapi-mcp-server/
 │   ├── 0.4.x/
 │   ├── 0.5.x/
 │   ├── 0.6.x/
+│   ├── 0.7.x/
 │   └── template.md
 ├── docs/
 ├── scripts/
@@ -129,15 +130,18 @@ brapi-mcp-server/
 │   │   │       ├── brapi-filters.resource.ts
 │   │   │       ├── brapi-germplasm.resource.ts
 │   │   │       ├── brapi-server-info.resource.ts
-│   │   │       └── brapi-study.resource.ts
+│   │   │       ├── brapi-study.resource.ts
+│   │   │       └── brapi-variable.resource.ts
 │   │   └── tools/
 │   │       ├── definitions/
+│   │       │   ├── brapi-build-phenotype-matrix.tool.ts
 │   │       │   ├── brapi-connect.tool.ts
 │   │       │   ├── brapi-dataframe-describe.tool.ts
 │   │       │   ├── brapi-dataframe-drop.tool.ts
 │   │       │   ├── brapi-dataframe-export.tool.ts
 │   │       │   ├── brapi-dataframe-query.tool.ts
 │   │       │   ├── brapi-describe-filters.tool.ts
+│   │       │   ├── brapi-export-genotype-matrix.tool.ts
 │   │       │   ├── brapi-find-genotype-calls.tool.ts
 │   │       │   ├── brapi-find-germplasm.tool.ts
 │   │       │   ├── brapi-find-images.tool.ts
@@ -146,6 +150,7 @@ brapi-mcp-server/
 │   │       │   ├── brapi-find-studies.tool.ts
 │   │       │   ├── brapi-find-variables.tool.ts
 │   │       │   ├── brapi-find-variants.tool.ts
+│   │       │   ├── brapi-germplasm-performance.tool.ts
 │   │       │   ├── brapi-get-germplasm.tool.ts
 │   │       │   ├── brapi-get-image.tool.ts
 │   │       │   ├── brapi-get-study.tool.ts
@@ -156,8 +161,11 @@ brapi-mcp-server/
 │   │       │   ├── brapi-walk-pedigree.tool.ts
 │   │       │   └── index.ts
 │   │       └── shared/
+│   │           ├── canvas-columns.ts
 │   │           ├── connect-auth-schema.ts
 │   │           ├── find-helpers.ts
+│   │           ├── genotype-calls.ts
+│   │           ├── observations.ts
 │   │           ├── orientation-envelope.ts
 │   │           └── raw-routing-hints.ts
 │   ├── services/
@@ -213,7 +221,8 @@ brapi-mcp-server/
 │   │   ├── brapi-filters.resource.test.ts
 │   │   ├── brapi-germplasm.resource.test.ts
 │   │   ├── brapi-server-info.resource.test.ts
-│   │   └── brapi-study.resource.test.ts
+│   │   ├── brapi-study.resource.test.ts
+│   │   └── brapi-variable.resource.test.ts
 │   ├── services/
 │   │   ├── brapi-dialect/
 │   │   │   ├── bms-dialect.test.ts
@@ -235,12 +244,14 @@ brapi-mcp-server/
 │   │   │   ├── find-helpers.test.ts
 │   │   │   └── orientation-envelope.test.ts
 │   │   ├── _tool-test-helpers.ts
+│   │   ├── brapi-build-phenotype-matrix.tool.test.ts
 │   │   ├── brapi-connect.tool.test.ts
 │   │   ├── brapi-dataframe-describe.tool.test.ts
 │   │   ├── brapi-dataframe-drop.tool.test.ts
 │   │   ├── brapi-dataframe-export.tool.test.ts
 │   │   ├── brapi-dataframe-query.tool.test.ts
 │   │   ├── brapi-describe-filters.tool.test.ts
+│   │   ├── brapi-export-genotype-matrix.tool.test.ts
 │   │   ├── brapi-find-genotype-calls.tool.test.ts
 │   │   ├── brapi-find-germplasm.tool.test.ts
 │   │   ├── brapi-find-images.tool.test.ts
@@ -249,6 +260,7 @@ brapi-mcp-server/
 │   │   ├── brapi-find-studies.tool.test.ts
 │   │   ├── brapi-find-variables.tool.test.ts
 │   │   ├── brapi-find-variants.tool.test.ts
+│   │   ├── brapi-germplasm-performance.tool.test.ts
 │   │   ├── brapi-get-germplasm.tool.test.ts
 │   │   ├── brapi-get-image.tool.test.ts
 │   │   ├── brapi-get-study.tool.test.ts
@@ -256,7 +268,8 @@ brapi-mcp-server/
 │   │   ├── brapi-raw-search.tool.test.ts
 │   │   ├── brapi-server-info.tool.test.ts
 │   │   ├── brapi-submit-observations.tool.test.ts
-│   │   └── brapi-walk-pedigree.tool.test.ts
+│   │   ├── brapi-walk-pedigree.tool.test.ts
+│   │   └── security.test.ts
 │   └── registration-gate.test.ts
 ├── .dockerignore
 ├── .env.example

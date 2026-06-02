@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/brapi-mcp-server</h1>
   <p><b>A collaborative BrAPI v2.1 workspace for multi-agent research via MCP. Search studies, germplasm, genotypes, & more - across Breedbase, T3, Sweetpotatobase, & any BrAPI v2-compliant server.</b>
-  <div>22 Tools • 5 Resources • 2 Prompts • Multi-agent collaboration</div>
+  <div>25 Tools • 6 Resources • 2 Prompts • Multi-agent collaboration</div>
   </p>
 </div>
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.6.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
 </div>
 
@@ -23,7 +23,7 @@
 
 ## Tools
 
-22 tools grouped by shape — connection tools bootstrap a session, `find_*` tools return a summarized page plus distributions and spill overflow rows into a canvas dataframe that agents on the same session can query or hand off by ID, `get_*` tools fetch a single record with companion counts, plus pedigree walking, an embedded SQL workspace over spilled rows (DuckDB-backed), file export for human handoff, an additive write surface for observations, and raw passthrough escape hatches.
+25 tools grouped by shape — connection tools bootstrap a session, `find_*` tools return a summarized page plus distributions and spill overflow rows into a canvas dataframe that agents on the same session can query or hand off by ID, `get_*` tools fetch a single record with companion counts, plus pedigree walking, an embedded SQL workspace over spilled rows (DuckDB-backed), file export for human handoff, an additive write surface for observations, and raw passthrough escape hatches.
 
 ### Orient
 
@@ -58,6 +58,9 @@
 | `brapi_dataframe_query` | SELECT SQL across in-memory dataframes (DuckDB-backed). Spilled `find_*` rows auto-register as `df_<uuid>`. Read-only — multi-statement, non-SELECT, file-reads, and exports rejected. Returns typed columns (`{ name, type }[]`). |
 | `brapi_dataframe_drop` | _Opt-in via `BRAPI_CANVAS_DROP_ENABLED=true`._ Drop a dataframe by name. Idempotent. Dataframes also expire via TTL when left unmanaged. |
 | `brapi_dataframe_export` | _Opt-in via `BRAPI_EXPORT_DIR=<path>`, stdio-only._ Export a dataframe to disk (CSV / Parquet / JSON) under the configured directory and return the absolute path for the human to open. Optional `columns` projection or `sql` filter materializes a derived table for the export, dropped after. |
+| `brapi_build_phenotype_matrix` | Build a germplasm × trait matrix from one or more studies and materialize it as a canvas dataframe. Supports wide (pivot) or long shape with configurable per-cell aggregation. |
+| `brapi_germplasm_performance` | Per-variable performance aggregates (n, mean, median, sd, min, max, studyCount) for a single germplasm across all studies where it has observations. |
+| `brapi_export_genotype_matrix` | Export genotype calls for a variant set as a germplasm × variant canvas dataframe; also serializes to VCF-lite or PLINK `.ped`/`.map` text. |
 
 ### Write (opt-in: `BRAPI_ENABLE_WRITES=true`)
 
@@ -87,6 +90,7 @@ URI-addressable mirrors of the curated tool surface for clients that prefer reso
 | `brapi://study/{studyDbId}` | `brapi_get_study` |
 | `brapi://germplasm/{germplasmDbId}` | `brapi_get_germplasm` |
 | `brapi://filters/{endpoint}` | `brapi_describe_filters` |
+| `brapi://variable/{observationVariableDbId}` | Observation variable record (trait, scale, method, ontology) |
 
 ---
 
