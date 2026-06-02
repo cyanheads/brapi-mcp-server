@@ -49,6 +49,7 @@ import { brapiFiltersResource } from './mcp-server/resources/definitions/brapi-f
 import { brapiGermplasmResource } from './mcp-server/resources/definitions/brapi-germplasm.resource.js';
 import { brapiServerInfoResource } from './mcp-server/resources/definitions/brapi-server-info.resource.js';
 import { brapiStudyResource } from './mcp-server/resources/definitions/brapi-study.resource.js';
+import { brapiVariableResource } from './mcp-server/resources/definitions/brapi-variable.resource.js';
 import {
   dropToolDefinitions,
   exportToolDefinitions,
@@ -119,6 +120,7 @@ await createApp({
     brapiCallsResource,
     brapiStudyResource,
     brapiGermplasmResource,
+    brapiVariableResource,
     brapiFiltersResource,
   ],
   prompts: [brapiEdaStudy, brapiMetaAnalysis],
