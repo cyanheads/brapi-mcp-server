@@ -172,8 +172,8 @@ describe('brapi_export_genotype_matrix tool', () => {
     // germplasmDbId column present
     expect(result.dataframe.columns).toContain('germplasmDbId');
     // Legend maps sanitized names back to originals
-    expect(result.variantColumnLegend['v_1']).toBe('v-1');
-    expect(result.variantColumnLegend['v_2']).toBe('v-2');
+    expect(result.variantColumnLegend.v_1).toBe('v-1');
+    expect(result.variantColumnLegend.v_2).toBe('v-2');
   });
 
   it('sanitizes reserved SQL keyword variant IDs into valid column names', async () => {
@@ -204,9 +204,9 @@ describe('brapi_export_genotype_matrix tool', () => {
     expect(cols).toContain('null_');
     expect(cols).toContain('order_');
     // Legend maps back correctly
-    expect(result.variantColumnLegend['end_']).toBe('end');
-    expect(result.variantColumnLegend['null_']).toBe('null');
-    expect(result.variantColumnLegend['order_']).toBe('order');
+    expect(result.variantColumnLegend.end_).toBe('end');
+    expect(result.variantColumnLegend.null_).toBe('null');
+    expect(result.variantColumnLegend.order_).toBe('order');
   });
 
   it('sanitizes variant IDs with hyphens and leading digits', async () => {
