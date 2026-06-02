@@ -15,7 +15,7 @@
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
-import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
+import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import {
   type CanvasBridge,
@@ -27,7 +27,6 @@ import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
   AliasInput,
   asString,
-  buildRequestOptions,
   collectPassthroughParts,
   computeDistribution,
   DataframeHandleSchema,
@@ -37,8 +36,7 @@ import {
   requireRegisteredConnection,
   toDataframeHandle,
 } from '../shared/find-helpers.js';
-
-const PAGE_SIZE = 10_000;
+import { buildCallsSearchBody, collectCalls } from '../shared/genotype-calls.js';
 
 const CallRowSchema = z
   .object({
@@ -279,7 +277,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
 
     const warnings: string[] = [];
     const collected = await collectCalls({
-      client,
+      client: client,
       connection,
       ctx,
       body: searchBody,
@@ -393,144 +391,14 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
 function buildSearchBody(
   input: Parameters<typeof brapiFindGenotypeCalls.handler>[0],
 ): Record<string, unknown> {
-  const body: Record<string, unknown> = {};
-  if (input.variantSetDbId) body.variantSetDbIds = [input.variantSetDbId];
-  if (input.variantSetDbIds?.length) {
-    body.variantSetDbIds = Array.from(
-      new Set([...((body.variantSetDbIds as string[]) ?? []), ...input.variantSetDbIds]),
-    );
-  }
-  if (input.germplasmDbIds?.length) body.germplasmDbIds = input.germplasmDbIds;
-  if (input.callSetDbIds?.length) body.callSetDbIds = input.callSetDbIds;
-  if (input.variantDbIds?.length) body.variantDbIds = input.variantDbIds;
-  if (input.callFormat) body.callFormat = input.callFormat;
-  body.pageSize = PAGE_SIZE;
-  return body;
-}
-
-interface CollectInput {
-  body: Record<string, unknown>;
-  client: BrapiClient;
-  connection: RegisteredServer;
-  ctx: Context;
-  maxCalls: number;
-  warnings: string[];
-}
-
-interface CollectResult {
-  callFormatting: Output['callFormatting'];
-  rows: z.infer<typeof CallRowSchema>[];
-  truncated: boolean;
-}
-
-async function collectCalls(input: CollectInput): Promise<CollectResult> {
-  const rows: z.infer<typeof CallRowSchema>[] = [];
-  let callFormatting: Output['callFormatting'] = {};
-  let truncated = false;
-
-  const firstBody = { ...input.body, page: 0 };
-  const first = await input.client.postSearch<Record<string, unknown>>(
-    input.connection.baseUrl,
-    'calls',
-    firstBody,
-    input.ctx,
-    buildRequestOptions(input.connection),
-  );
-
-  let envelope: Awaited<ReturnType<BrapiClient['get']>>;
-  let searchResultsDbId: string | undefined;
-  if (first.kind === 'sync') {
-    envelope = first.envelope;
-  } else {
-    searchResultsDbId = first.searchResultsDbId;
-    envelope = await input.client.getSearchResults<Record<string, unknown>>(
-      input.connection.baseUrl,
-      'calls',
-      first.searchResultsDbId,
-      input.ctx,
-      buildRequestOptions(input.connection),
-    );
-  }
-
-  consumePage(envelope, rows, (cf) => {
-    callFormatting = cf;
-  });
-  const totalPages = envelope.metadata?.pagination?.totalPages;
-
-  for (let page = 1; page < (totalPages ?? 1); page++) {
-    if (rows.length >= input.maxCalls) {
-      truncated = true;
-      break;
-    }
-    if (input.ctx.signal.aborted) break;
-    let pageEnvelope: Awaited<ReturnType<BrapiClient['get']>>;
-    if (searchResultsDbId) {
-      pageEnvelope = await input.client.getSearchResults<Record<string, unknown>>(
-        input.connection.baseUrl,
-        'calls',
-        searchResultsDbId,
-        input.ctx,
-        buildRequestOptions(input.connection, { page, pageSize: PAGE_SIZE }),
-      );
-    } else {
-      const nextSearch = await input.client.postSearch<Record<string, unknown>>(
-        input.connection.baseUrl,
-        'calls',
-        { ...input.body, page },
-        input.ctx,
-        buildRequestOptions(input.connection),
-      );
-      if (nextSearch.kind === 'sync') {
-        pageEnvelope = nextSearch.envelope;
-      } else {
-        pageEnvelope = await input.client.getSearchResults<Record<string, unknown>>(
-          input.connection.baseUrl,
-          'calls',
-          nextSearch.searchResultsDbId,
-          input.ctx,
-          buildRequestOptions(input.connection),
-        );
-      }
-    }
-    consumePage(pageEnvelope, rows, (cf) => {
-      callFormatting = cf;
-    });
-  }
-
-  if (rows.length > input.maxCalls) {
-    rows.length = input.maxCalls;
-    truncated = true;
-    input.warnings.push(
-      `Truncated at the deployment pull limit (${input.maxCalls} rows). Narrow the filters and re-pull; the captured slice is preserved in the spilled dataframe.`,
-    );
-  }
-
-  return { rows, callFormatting, truncated };
-}
-
-function consumePage(
-  envelope: Awaited<ReturnType<BrapiClient['get']>>,
-  rows: z.infer<typeof CallRowSchema>[],
-  setCallFormatting: (f: Output['callFormatting']) => void,
-): void {
-  const result = envelope.result;
-  if (!result || typeof result !== 'object') return;
-  const record = result as Record<string, unknown>;
-  const cf: Output['callFormatting'] = {};
-  if (typeof record.expandHomozygotes === 'boolean')
-    cf.expandHomozygotes = record.expandHomozygotes;
-  if (typeof record.unknownString === 'string') cf.unknownString = record.unknownString;
-  if (typeof record.sepPhased === 'string') cf.sepPhased = record.sepPhased;
-  if (typeof record.sepUnphased === 'string') cf.sepUnphased = record.sepUnphased;
-  setCallFormatting(cf);
-
-  const data = record.data;
-  if (!Array.isArray(data)) return;
-  for (const entry of data) {
-    if (typeof entry === 'object' && entry !== null) {
-      rows.push(entry as z.infer<typeof CallRowSchema>);
-    }
-  }
+  const opts: Parameters<typeof buildCallsSearchBody>[0] = {};
+  if (input.variantSetDbId !== undefined) opts.variantSetDbId = input.variantSetDbId;
+  if (input.variantSetDbIds !== undefined) opts.variantSetDbIds = input.variantSetDbIds;
+  if (input.germplasmDbIds !== undefined) opts.germplasmDbIds = input.germplasmDbIds;
+  if (input.callSetDbIds !== undefined) opts.callSetDbIds = input.callSetDbIds;
+  if (input.variantDbIds !== undefined) opts.variantDbIds = input.variantDbIds;
+  if (input.callFormat !== undefined) opts.callFormat = input.callFormat;
+  return buildCallsSearchBody(opts);
 }
 
 interface SpillCallsInput {

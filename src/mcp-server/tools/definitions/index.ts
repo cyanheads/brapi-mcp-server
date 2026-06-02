@@ -11,12 +11,14 @@
  * @module mcp-server/tools/definitions/index
  */
 
+import { brapiBuildPhenotypeMatrix } from './brapi-build-phenotype-matrix.tool.js';
 import { brapiConnect } from './brapi-connect.tool.js';
 import { brapiDataframeDescribe } from './brapi-dataframe-describe.tool.js';
 import { brapiDataframeDrop } from './brapi-dataframe-drop.tool.js';
 import { brapiDataframeExport } from './brapi-dataframe-export.tool.js';
 import { brapiDataframeQuery } from './brapi-dataframe-query.tool.js';
 import { brapiDescribeFilters } from './brapi-describe-filters.tool.js';
+import { brapiExportGenotypeMatrix } from './brapi-export-genotype-matrix.tool.js';
 import { brapiFindGenotypeCalls } from './brapi-find-genotype-calls.tool.js';
 import { brapiFindGermplasm } from './brapi-find-germplasm.tool.js';
 import { brapiFindImages } from './brapi-find-images.tool.js';
@@ -25,6 +27,7 @@ import { brapiFindObservations } from './brapi-find-observations.tool.js';
 import { brapiFindStudies } from './brapi-find-studies.tool.js';
 import { brapiFindVariables } from './brapi-find-variables.tool.js';
 import { brapiFindVariants } from './brapi-find-variants.tool.js';
+import { brapiGermplasmPerformance } from './brapi-germplasm-performance.tool.js';
 import { brapiGetGermplasm } from './brapi-get-germplasm.tool.js';
 import { brapiGetImage } from './brapi-get-image.tool.js';
 import { brapiGetStudy } from './brapi-get-study.tool.js';
@@ -41,6 +44,7 @@ import { brapiWalkPedigree } from './brapi-walk-pedigree.tool.js';
  */
 export const readOnlyToolDefinitions = [
   brapiConnect,
+  brapiBuildPhenotypeMatrix,
   brapiServerInfo,
   brapiDescribeFilters,
   brapiFindStudies,
@@ -48,6 +52,7 @@ export const readOnlyToolDefinitions = [
   brapiFindGermplasm,
   brapiGetGermplasm,
   brapiWalkPedigree,
+  brapiGermplasmPerformance,
   brapiFindVariables,
   brapiFindObservations,
   brapiFindImages,
@@ -55,6 +60,7 @@ export const readOnlyToolDefinitions = [
   brapiFindLocations,
   brapiFindVariants,
   brapiFindGenotypeCalls,
+  brapiExportGenotypeMatrix,
   brapiDataframeDescribe,
   brapiDataframeQuery,
   brapiRawGet,
