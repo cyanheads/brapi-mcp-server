@@ -6,14 +6,14 @@
     "url": "https://github.com/cyanheads/brapi-mcp-server",
     "source": "github"
   },
-  "version": "0.7.2",
+  "version": "0.7.3",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/brapi-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.7.2",
+      "version": "0.7.3",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:stdio" }
@@ -33,6 +33,13 @@
           "default": "false"
         },
         {
+          "name": "BRAPI_PAGE_SIZE",
+          "description": "Upstream pageSize used during canvas spillover walks (decoupled from BRAPI_LOAD_LIMIT). Dataframe ceiling = pageSize × 50 pages.",
+          "format": "string",
+          "isRequired": false,
+          "default": "1000"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -49,7 +56,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/brapi-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.7.2",
+      "version": "0.7.3",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:http" }
@@ -67,6 +74,13 @@
           "format": "string",
           "isRequired": false,
           "default": "false"
+        },
+        {
+          "name": "BRAPI_PAGE_SIZE",
+          "description": "Upstream pageSize used during canvas spillover walks (decoupled from BRAPI_LOAD_LIMIT). Dataframe ceiling = pageSize × 50 pages.",
+          "format": "string",
+          "isRequired": false,
+          "default": "1000"
         },
         {
           "name": "MCP_HTTP_HOST",

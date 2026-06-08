@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
 </div>
 
@@ -207,7 +207,8 @@ Every variable is optional.
 | `BRAPI_DEFAULT_OAUTH_CLIENT_ID` / `_OAUTH_CLIENT_SECRET` | OAuth2 client-credentials for the default connection. | — |
 | `BRAPI_DEFAULT_API_KEY` / `_API_KEY_HEADER` | Static API key for the default connection. | header `Authorization` |
 | `BRAPI_BUILTIN_ALIASES_DISABLED` | Comma-separated alias names (case-insensitive) to remove from the built-in registry. | — |
-| `BRAPI_LOAD_LIMIT` | In-context row cap before `find_*` spills to a canvas dataframe; also doubles as the upstream pageSize during spillover walks (`loadLimit × 50` is the dataframe ceiling). | `1000` |
+| `BRAPI_LOAD_LIMIT` | In-context row cap returned by `find_*` tools before spilling to a canvas dataframe. | `1000` |
+| `BRAPI_PAGE_SIZE` | Upstream `pageSize` used during canvas spillover walks (decoupled from `BRAPI_LOAD_LIMIT`). Dataframe ceiling = `pageSize × 50`. | `1000` |
 | `BRAPI_MAX_CONCURRENT_REQUESTS` | Per-connection concurrency cap. | `4` |
 | `BRAPI_RETRY_MAX_ATTEMPTS` / `BRAPI_RETRY_BASE_DELAY_MS` | Retry policy for 429/5xx with exponential backoff. | `3` / `500` |
 | `BRAPI_REQUEST_TIMEOUT_MS` | Per-request HTTP timeout. | `30000` |

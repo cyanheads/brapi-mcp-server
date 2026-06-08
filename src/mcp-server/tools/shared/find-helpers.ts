@@ -11,6 +11,7 @@
 import { type Context, type HandlerContext, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
+import { getServerConfig } from '@/config/server-config.js';
 import type {
   BrapiClient,
   BrapiEnvelope,
@@ -81,7 +82,7 @@ export const LoadLimitInput = z
   .positive()
   .optional()
   .describe(
-    'Cap on rows returned inline. Omit for the deployment default — sized so spillover reaches its full row-count ceiling. Rows beyond the cap land in a dataframe; query with brapi_dataframe_query (SQL) instead of paging row-by-row. Heads-up: this same value drives the upstream pageSize during spillover walks, so lowering it to "preview a smaller sample" also shrinks the dataframe ceiling proportionally — prefer SQL `LIMIT` on the dataframe for sampling instead.',
+    'Cap on rows returned inline. Omit for the deployment default. Rows beyond the cap land in a dataframe; query with brapi_dataframe_query (SQL) instead of paging row-by-row.',
   );
 
 export const ExtraFiltersInput = z
@@ -402,9 +403,21 @@ export function renderAppliedFilters(
   return lines.join('\n');
 }
 
-/** Cheap sanity-render for a distributions block in markdown. */
-export function renderDistributions(distributions: Record<string, Record<string, number>>): string {
+/**
+ * Render a distributions block in markdown. When `truncated` metadata is
+ * supplied and `truncated.truncated` is true, a caveat line is prepended so
+ * readers know the distribution covers only the fetched subset.
+ */
+export function renderDistributions(
+  distributions: Record<string, Record<string, number>>,
+  truncated?: { truncated: boolean; rowCount: number; totalCount: number },
+): string {
   const lines: string[] = [];
+  if (truncated?.truncated) {
+    lines.push(
+      `_Computed over ${truncated.rowCount} of ${truncated.totalCount} upstream rows — narrow filters or raise loadLimit for a representative sample._`,
+    );
+  }
   for (const [field, counts] of Object.entries(distributions)) {
     const entries = Object.entries(counts);
     if (entries.length === 0) continue;
@@ -416,6 +429,23 @@ export function renderDistributions(distributions: Record<string, Record<string,
     lines.push(`- **${field}:** ${summary}${suffix}`);
   }
   return lines.join('\n');
+}
+
+/**
+ * Project a `DataframeHandle | undefined` to the `truncated` metadata shape
+ * expected by `renderDistributions`. Returns `undefined` when no dataframe is
+ * present or when the dataframe was not truncated, so the caller doesn't need
+ * to guard — just pass the result straight through.
+ */
+export function truncationMeta(
+  dataframe: DataframeHandle | undefined,
+): { truncated: boolean; rowCount: number; totalCount: number } | undefined {
+  if (!dataframe?.truncated) return;
+  return {
+    truncated: true,
+    rowCount: dataframe.rowCount,
+    totalCount: dataframe.totalCount ?? dataframe.rowCount,
+  };
 }
 
 export interface LoadedRows<T> {
@@ -630,6 +660,12 @@ export const DataframeHandleSchema = z.object({
     .positive()
     .optional()
     .describe('Cap that was applied at create time, when truncation occurred.'),
+  totalCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe('Total rows reported by the upstream server (may exceed rowCount when truncated).'),
 });
 
 export type DataframeHandle = z.infer<typeof DataframeHandleSchema>;
@@ -656,6 +692,7 @@ export function renderDataframeHandle(handle: DataframeHandle): string[] {
   }
   if (handle.truncated) lines.push(`- truncated: true`);
   if (typeof handle.maxRows === 'number') lines.push(`- maxRows: ${handle.maxRows}`);
+  if (typeof handle.totalCount === 'number') lines.push(`- totalCount: ${handle.totalCount}`);
   return lines;
 }
 
@@ -681,7 +718,10 @@ export function formatExpiresIn(expiresAt: string, now: Date = new Date()): stri
 }
 
 /** Project a `RegisterDataframeResult` to the inline handle shape. */
-export function toDataframeHandle(result: RegisterDataframeResult): DataframeHandle {
+export function toDataframeHandle(
+  result: RegisterDataframeResult,
+  totalCount?: number,
+): DataframeHandle {
   const handle: DataframeHandle = {
     tableName: result.tableName,
     rowCount: result.rowCount,
@@ -692,6 +732,7 @@ export function toDataframeHandle(result: RegisterDataframeResult): DataframeHan
   if (result.columnLegend) handle.columnLegend = result.columnLegend;
   if (result.truncated) handle.truncated = true;
   if (typeof result.maxRows === 'number') handle.maxRows = result.maxRows;
+  if (typeof totalCount === 'number') handle.totalCount = totalCount;
   return handle;
 }
 
@@ -779,7 +820,7 @@ export async function maybeSpill<T extends Record<string, unknown>>(
     const spill = await spillToCanvas(spillInput);
     return {
       fullRows: spill.fullRows,
-      dataframe: toDataframeHandle(spill.dataframe),
+      dataframe: toDataframeHandle(spill.dataframe, firstPage.totalCount),
     };
   } catch (err) {
     if (!input.warnings || !(err instanceof SpillPageFetchError)) throw err;
@@ -814,14 +855,19 @@ export async function spillToCanvas<T extends Record<string, unknown>>(
   input: SpillInput<T>,
 ): Promise<SpillResult<T>> {
   const remainingTarget = Math.min(input.totalCount, MAX_SPILLOVER_ROWS);
-  const pageSize = input.loadLimit;
+  const pageSize = getServerConfig().pageSize;
   const totalPages = Math.min(Math.ceil(remainingTarget / pageSize), MAX_SPILLOVER_PAGES);
 
-  const rows: T[] = [...input.firstPage];
-  let pagesFetched = 1;
+  // When pageSize differs from the first-page fetch size (loadLimit), the
+  // BrAPI page=1 offset jumps to pageSize rows in — skipping rows loadLimit..pageSize-1.
+  // Re-fetch from page 0 at pageSize to keep offsets consistent.
+  // Reuse firstPage only when loadLimit === pageSize (offsets already aligned).
+  const reuseFirstPage = input.loadLimit === pageSize;
+  const rows: T[] = reuseFirstPage ? [...input.firstPage] : [];
+  let pagesFetched = reuseFirstPage ? 1 : 0;
+  const startPage = reuseFirstPage ? 1 : 0;
 
-  // Page 0 is already fetched by caller; continue from page 1.
-  for (let page = 1; page < totalPages; page++) {
+  for (let page = startPage; page < totalPages; page++) {
     if (rows.length >= remainingTarget) break;
     if (input.ctx.signal.aborted) break;
     const route = input.route ?? getRouteForPath(input.path, input.filters);

@@ -27,6 +27,12 @@ describe('ServerConfigSchema defaults', () => {
     expect(config.loadLimit).toBe(1_000);
   });
 
+  it('defaults pageSize to 1000 and accepts an override', () => {
+    const config = ServerConfigSchema.parse({});
+    expect(config.pageSize).toBe(1_000);
+    expect(ServerConfigSchema.parse({ pageSize: '500' }).pageSize).toBe(500);
+  });
+
   it('defaults canvasMaxRows to 10000 and canvasQueryTimeoutMs to 30000', () => {
     const config = ServerConfigSchema.parse({});
     expect(config.canvasMaxRows).toBe(10_000);

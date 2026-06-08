@@ -35,6 +35,7 @@ import {
   renderFindHeader,
   requireRegisteredConnection,
   resolveFindRoute,
+  truncationMeta,
 } from '../shared/find-helpers.js';
 
 const VariantRowSchema = z
@@ -326,7 +327,10 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       lines.push('');
     }
     lines.push('## Distributions');
-    lines.push(renderDistributions(result.distributions) || '_No values to summarize._');
+    lines.push(
+      renderDistributions(result.distributions, truncationMeta(result.dataframe)) ||
+        '_No values to summarize._',
+    );
     lines.push('');
     lines.push('## Variants');
     if (result.results.length === 0) {

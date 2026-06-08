@@ -11,6 +11,7 @@
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
+import { resetServerConfig } from '@/config/server-config.js';
 import type { Fetcher } from '@/services/brapi-client/index.js';
 import { initBrapiClient, resetBrapiClient } from '@/services/brapi-client/index.js';
 import {
@@ -35,6 +36,7 @@ export const TEST_CONFIG: ServerConfig = {
   defaultApiKeyHeader: 'Authorization',
   datasetTtlSeconds: 86_400,
   loadLimit: 10,
+  pageSize: 10,
   maxConcurrentRequests: 4,
   retryMaxAttempts: 0,
   retryBaseDelayMs: 1,
@@ -69,6 +71,11 @@ export type MockFetcher = ReturnType<typeof vi.fn>;
 
 export function initTestServices(config: ServerConfig = TEST_CONFIG): MockFetcher {
   const fetcher = vi.fn() as MockFetcher;
+  // Seed BRAPI_PAGE_SIZE in the getServerConfig() singleton so spillToCanvas
+  // uses the test-friendly small pageSize rather than the 1000-row production
+  // default. Reset first so the lazy cache re-reads from the stubbed env.
+  resetServerConfig();
+  vi.stubEnv('BRAPI_PAGE_SIZE', String(config.pageSize));
   initBrapiClient(config, fetcher as unknown as Fetcher);
   initCapabilityRegistry(config);
   initBrapiDialectRegistry();
@@ -81,6 +88,8 @@ export function initTestServices(config: ServerConfig = TEST_CONFIG): MockFetche
 }
 
 export function resetTestServices(): void {
+  resetServerConfig();
+  vi.unstubAllEnvs();
   resetBrapiClient();
   resetCapabilityRegistry();
   resetBrapiDialectRegistry();

@@ -13,6 +13,7 @@ import {
   appendPassthroughLines,
   collectPassthroughParts,
   renderDataframeHandle,
+  renderDistributions,
   toDataframeHandle,
 } from '@/mcp-server/tools/shared/find-helpers.js';
 
@@ -95,6 +96,35 @@ describe('renderDataframeHandle', () => {
   });
 });
 
+describe('renderDistributions', () => {
+  it('renders a simple distribution without a caveat', () => {
+    const out = renderDistributions({ crop: { Maize: 3, Wheat: 1 } });
+    expect(out).toBe('- **crop:** Maize (3), Wheat (1)');
+    expect(out).not.toContain('Computed over');
+  });
+
+  it('omits the caveat when truncated is false', () => {
+    const out = renderDistributions(
+      { crop: { Maize: 3 } },
+      { truncated: false, rowCount: 3, totalCount: 3 },
+    );
+    expect(out).not.toContain('Computed over');
+  });
+
+  it('prepends a caveat when truncated is true', () => {
+    const out = renderDistributions(
+      { crop: { Soybean: 250 } },
+      { truncated: true, rowCount: 250, totalCount: 880 },
+    );
+    expect(out).toContain('_Computed over 250 of 880 upstream rows');
+    expect(out).toContain('- **crop:** Soybean (250)');
+  });
+
+  it('returns empty string for empty distributions (no caveat with no data)', () => {
+    expect(renderDistributions({})).toBe('');
+  });
+});
+
 describe('toDataframeHandle', () => {
   it('propagates columnLegend from the register result', () => {
     const handle = toDataframeHandle({
@@ -106,5 +136,32 @@ describe('toDataframeHandle', () => {
       columnLegend: { end_: 'end' },
     });
     expect(handle.columnLegend).toEqual({ end_: 'end' });
+  });
+
+  it('propagates totalCount when supplied', () => {
+    const handle = toDataframeHandle(
+      {
+        tableName: 'df_Y',
+        rowCount: 250,
+        columns: ['id'],
+        createdAt: '2026-06-01T00:00:00.000Z',
+        expiresAt: '2999-01-01T00:00:00.000Z',
+        truncated: true,
+      },
+      880,
+    );
+    expect(handle.totalCount).toBe(880);
+    expect(handle.truncated).toBe(true);
+  });
+
+  it('omits totalCount when not supplied', () => {
+    const handle = toDataframeHandle({
+      tableName: 'df_Z',
+      rowCount: 5,
+      columns: ['id'],
+      createdAt: '2026-06-01T00:00:00.000Z',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+    });
+    expect(handle.totalCount).toBeUndefined();
   });
 });

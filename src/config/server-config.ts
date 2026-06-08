@@ -50,7 +50,15 @@ export const ServerConfigSchema = z.object({
     .positive()
     .default(1_000)
     .describe(
-      'Default row cap returned in-context before spilling to a canvas dataframe. Also doubles as the upstream `pageSize` used during spillover walks — the dataframe ceiling is `loadLimit × MAX_SPILLOVER_PAGES (50)`, so the 1,000 default lines up with the documented 50,000-row spillover cap. Operators on small/test BrAPI servers can lower it; raising it above 1,000 is rarely useful because most BrAPI servers cap server-side pageSize at 1,000.',
+      'Default in-context row cap returned by find_* tools before spilling to a canvas dataframe. Rows beyond this cap land in the dataframe; query with brapi_dataframe_query (SQL).',
+    ),
+  pageSize: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1_000)
+    .describe(
+      'Upstream pageSize used during canvas spillover walks. Decoupled from loadLimit so lowering the inline preview cap no longer shrinks the dataframe ceiling. Most BrAPI servers cap pageSize at 1,000; the dataframe ceiling is pageSize × MAX_SPILLOVER_PAGES (50).',
     ),
   maxConcurrentRequests: z.coerce
     .number()
@@ -177,6 +185,7 @@ export function getServerConfig(): ServerConfig {
     defaultApiKeyHeader: 'BRAPI_DEFAULT_API_KEY_HEADER',
     datasetTtlSeconds: 'BRAPI_DATASET_TTL_SECONDS',
     loadLimit: 'BRAPI_LOAD_LIMIT',
+    pageSize: 'BRAPI_PAGE_SIZE',
     maxConcurrentRequests: 'BRAPI_MAX_CONCURRENT_REQUESTS',
     retryMaxAttempts: 'BRAPI_RETRY_MAX_ATTEMPTS',
     retryBaseDelayMs: 'BRAPI_RETRY_BASE_DELAY_MS',

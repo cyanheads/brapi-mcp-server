@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "brapi-mcp-server",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Collaborative BrAPI v2.1 MCP workspace — studies, germplasm, genotypes across Breedbase, T3, more.",
   "author": {
     "name": "cyanheads"
@@ -24,6 +24,7 @@
         "NODE_ENV": "production",
         "BRAPI_DEFAULT_BASE_URL": "${BRAPI_DEFAULT_BASE_URL}",
         "BRAPI_ENABLE_WRITES": "${BRAPI_ENABLE_WRITES}",
+        "BRAPI_PAGE_SIZE": "${BRAPI_PAGE_SIZE}",
         "MCP_LOG_LEVEL": "${MCP_LOG_LEVEL}"
       }
     }
@@ -49,6 +50,13 @@
       "type": "string",
       "required": false,
       "default": "false"
+    },
+    "BRAPI_PAGE_SIZE": {
+      "title": "Spillover Page Size",
+      "description": "Upstream pageSize used during canvas spillover walks. Decoupled from BRAPI_LOAD_LIMIT so lowering the inline preview cap does not shrink the dataframe ceiling.",
+      "type": "string",
+      "required": false,
+      "default": "1000"
     },
     "MCP_LOG_LEVEL": {
       "title": "Log Level",

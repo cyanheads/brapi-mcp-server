@@ -38,6 +38,7 @@ import {
   renderFindHeader,
   requireRegisteredConnection,
   resolveFindRoute,
+  truncationMeta,
 } from '../shared/find-helpers.js';
 
 const StudyRowSchema = z
@@ -366,7 +367,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       lines.push('');
     }
     lines.push('## Distributions');
-    const rendered = renderDistributions(result.distributions);
+    const rendered = renderDistributions(result.distributions, truncationMeta(result.dataframe));
     lines.push(rendered || '_No values to summarize._');
     lines.push('');
     lines.push('## Studies');

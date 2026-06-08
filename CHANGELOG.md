@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.3](changelog/0.7.x/0.7.3.md) — 2026-06-08
+
+Decouple spillover pageSize from loadLimit via BRAPI_PAGE_SIZE — fixes spillover timeout when agents request a small inline preview
+
 ## [0.7.2](changelog/0.7.x/0.7.2.md) — 2026-06-02
 
 Adopt @cyanheads/mcp-ts-core 0.9.21 — HTTP log context fix, secret-safe error messages, fail-fast retries
