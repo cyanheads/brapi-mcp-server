@@ -114,6 +114,8 @@ const tools = [
 ];
 
 await createApp({
+  name: 'brapi-mcp-server',
+  title: 'brapi-mcp-server',
   tools,
   resources: [
     brapiServerInfoResource,

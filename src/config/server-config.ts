@@ -112,14 +112,12 @@ export const ServerConfigSchema = z.object({
     .default(1_000)
     .describe('Poll interval between async-search status checks.'),
   allowPrivateIps: z
-    .enum(['true', 'false'])
-    .default('false')
-    .transform((v) => v === 'true')
+    .stringbool()
+    .default(false)
     .describe('Allow connecting to RFC 1918 / loopback targets. Dev-only.'),
   enableWrites: z
-    .enum(['true', 'false'])
-    .default('false')
-    .transform((v) => v === 'true')
+    .stringbool()
+    .default(false)
     .describe(
       'Opt-in flag for the write surface (`brapi_submit_observations`). Off by default — the tool is omitted from `tools/list` unless the operator opts in for this deployment.',
     ),
@@ -134,9 +132,8 @@ export const ServerConfigSchema = z.object({
     ),
 
   canvasDropEnabled: z
-    .enum(['true', 'false'])
-    .default('false')
-    .transform((v) => v === 'true')
+    .stringbool()
+    .default(false)
     .describe(
       'Opt-in flag for `brapi_dataframe_drop`. Off by default — the tool is omitted from `tools/list` unless the operator opts in. Dataframes still expire via TTL when left unmanaged.',
     ),
@@ -162,9 +159,8 @@ export const ServerConfigSchema = z.object({
     .describe('Per-query wall-clock timeout for brapi_dataframe_query.'),
 
   sessionIsolation: z
-    .enum(['true', 'false'])
-    .default('true')
-    .transform((v) => v === 'true')
+    .stringbool()
+    .default(true)
     .describe(
       'When true (default) and an MCP session ID is present (HTTP stateful/auto), scope ServerRegistry connection state and the CanvasBridge default canvas to the session. Concurrent HTTP callers under MCP_AUTH_MODE=none then operate in isolated workspaces — registered aliases, exchanged tokens, and df_<uuid> namespaces do not cross sessions. Set to false to share state across sessions in one tenant (the pre-0.6 multi-agent collaboration model). No effect on stdio (no session) or HTTP stateless without exposeStatelessSessionId; both fall back to per-tenant keying. Under MCP_AUTH_MODE=jwt|oauth, tenants already isolate — sessions add a sub-scope inside each tenant.',
     ),
