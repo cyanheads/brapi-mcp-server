@@ -1,7 +1,7 @@
 {
   "name": "@cyanheads/brapi-mcp-server",
   "mcpName": "io.github.cyanheads/brapi-mcp-server",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "A collaborative BrAPI v2.1 workspace for multi-agent research via MCP. Search studies, germplasm, genotypes, & more - across Breedbase, T3, Sweetpotatobase, & any BrAPI v2-compliant server.",
   "author": "Casey Hand @cyanheads (https://github.com/cyanheads/brapi-mcp-server#readme)",
   "type": "module",
@@ -31,7 +31,7 @@
     "lint:mcp": "bun run scripts/lint-mcp.ts",
     "lint:packaging": "bun run scripts/lint-packaging.ts",
     "list-skills": "bun run scripts/list-skills.ts",
-    "bundle": "bun run build && bunx -y @anthropic-ai/mcpb pack . dist/brapi-mcp-server.mcpb",
+    "bundle": "bun run build && bunx -y @anthropic-ai/mcpb pack . dist/brapi-mcp-server.mcpb && bun run scripts/clean-mcpb.ts dist/brapi-mcp-server.mcpb",
     "audit:refresh": "rm -f bun.lock && bun install && bun audit",
     "changelog:build": "bun run scripts/build-changelog.ts",
     "changelog:check": "bun run scripts/build-changelog.ts --check",
@@ -81,14 +81,14 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.9.21",
+    "@cyanheads/mcp-ts-core": "^0.10.6",
     "@duckdb/node-api": "^1.5.3-r.3",
     "pino-pretty": "^13.1.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.16",
-    "@types/node": "^25.9.1",
+    "@types/node": "^25.9.3",
     "depcheck": "^1.4.7",
     "ignore": "^7.0.5",
     "tsc-alias": "^1.8.17",

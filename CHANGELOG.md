@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.4](changelog/0.7.x/0.7.4.md) — 2026-06-12
+
+Adopt @cyanheads/mcp-ts-core ^0.10.6, migrate boolean env flags to z.stringbool(), set explicit createApp identity, and harden MCPB bundle packaging
+
 ## [0.7.3](changelog/0.7.x/0.7.3.md) — 2026-06-08
 
 Decouple spillover pageSize from loadLimit via BRAPI_PAGE_SIZE — fixes spillover timeout when agents request a small inline preview
