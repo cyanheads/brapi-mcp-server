@@ -37,10 +37,12 @@ WORKDIR /usr/src/app
 ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+ARG APP_VERSION=dev
 LABEL org.opencontainers.image.title="@cyanheads/brapi-mcp-server"
 LABEL org.opencontainers.image.description="BrAPI v2.1 MCP server — studies, germplasm, observations, genotypes, images, and pedigrees across Breedbase, T3, Sweetpotatobase, and any BrAPI-compliant server."
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/brapi-mcp-server"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.version="${APP_VERSION}"
 
 # Copy dependency manifests
 COPY package.json bun.lock ./
@@ -103,6 +105,10 @@ ENV MCP_FORCE_CONSOLE_LOGGING="true"
 
 # Expose the port the server listens on
 EXPOSE ${MCP_HTTP_PORT}
+
+# Health check — hits the framework's /healthz endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:${MCP_HTTP_PORT}/healthz || exit 1
 
 # The command to start the server
 CMD ["bun", "run", "dist/index.js"]
