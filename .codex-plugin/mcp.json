@@ -1,5 +1,5 @@
 {
-  "@cyanheads/brapi-mcp-server": {
+  "brapi-mcp-server": {
     "command": "npx",
     "args": ["-y", "@cyanheads/brapi-mcp-server"],
     "env": {

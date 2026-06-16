@@ -1,5 +1,5 @@
 {
-  "name": "@cyanheads/brapi-mcp-server",
+  "name": "brapi-mcp-server",
   "version": "0.7.4",
   "description": "A collaborative BrAPI v2.1 workspace for multi-agent research via MCP. Search studies, germplasm, genotypes, & more - across Breedbase, T3, Sweetpotatobase, & any BrAPI v2-compliant server.",
   "author": {
@@ -9,7 +9,7 @@
   "repository": "https://github.com/cyanheads/brapi-mcp-server",
   "license": "Apache-2.0",
   "mcpServers": {
-    "@cyanheads/brapi-mcp-server": {
+    "brapi-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/brapi-mcp-server"],
       "env": {
