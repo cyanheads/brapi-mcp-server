@@ -491,6 +491,56 @@ describe('CanvasBridge.describe', () => {
     expect(tables).toHaveLength(1);
     expect(tables[0]?.provenance).toBeUndefined();
   });
+
+  // Regression for #39: the framework's DuckDB provider rejects a describe-by-name
+  // with an ambiguous `table_name` Binder error (it pushes an unqualified
+  // predicate into an information_schema ⋈ duckdb_tables() join). The bridge must
+  // never forward a tableName — it lists all tables and filters in JS. The fake
+  // below mirrors the framework failure: describe-by-name throws.
+  it('describes by name via list-all + JS filter, never forwarding tableName to the framework', async () => {
+    const canvas = new FakeDataCanvas();
+    const bridge = new CanvasBridge(asCanvas(canvas), baseConfig);
+    const ctx = createMockContext({ tenantId: 't1' });
+    const target = await bridge.registerDataframe(ctx, {
+      source: 'find_observations',
+      baseUrl: 'https://b/v2',
+      query: {},
+      rows: [{ observationDbId: 'o1' }],
+    });
+    await bridge.registerDataframe(ctx, {
+      source: 'find_studies',
+      baseUrl: 'https://b/v2',
+      query: {},
+      rows: [{ studyDbId: 's1' }, { studyDbId: 's2' }],
+    });
+
+    const describeOpts: Array<{ tableName?: string } | undefined> = [];
+    const realAcquire = canvas.acquire.bind(canvas);
+    vi.spyOn(canvas, 'acquire').mockImplementation(async (id, c) => {
+      const instance = await realAcquire(id, c);
+      const wrapped = instance as unknown as {
+        describe: (opts?: { tableName?: string }) => Promise<unknown[]>;
+      };
+      const realDescribe = wrapped.describe.bind(wrapped);
+      wrapped.describe = async (opts) => {
+        describeOpts.push(opts);
+        if (opts?.tableName !== undefined) {
+          throw new Error('Binder Error: Ambiguous reference to column name "table_name"');
+        }
+        return realDescribe(opts);
+      };
+      return instance;
+    });
+
+    const tables = await bridge.describe(ctx, { tableName: target.tableName });
+    expect(tables).toHaveLength(1);
+    expect(tables[0]?.name).toBe(target.tableName);
+    expect(tables[0]?.rowCount).toBe(1);
+    expect(tables[0]?.provenance?.source).toBe('find_observations');
+    // The underlying framework describe was only ever called list-all (no name).
+    expect(describeOpts.length).toBeGreaterThan(0);
+    expect(describeOpts.every((o) => o?.tableName === undefined)).toBe(true);
+  });
 });
 
 describe('CanvasBridge.drop', () => {

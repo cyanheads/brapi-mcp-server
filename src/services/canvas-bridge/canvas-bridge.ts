@@ -348,10 +348,21 @@ export class CanvasBridge {
    */
   async describe(ctx: Context, options: { tableName?: string } = {}): Promise<DescribedTable[]> {
     const instance = await this.getInstance(ctx);
-    const describeOpts: { tableName?: string } = {};
-    if (options.tableName !== undefined) describeOpts.tableName = options.tableName;
-    const tables = await instance.describe(describeOpts);
-    return Promise.all(tables.map((t) => this.augmentTableInfo(ctx, t)));
+    // Always list every table and narrow by name in JS rather than forwarding a
+    // `tableName` to the framework's describe-by-name path. That path pushes an
+    // unqualified `table_name` predicate into a catalog query that LEFT JOINs
+    // `information_schema.tables` with `duckdb_tables()` — both expose
+    // `table_name`, so DuckDB rejects it as ambiguous. Forwarding a name breaks
+    // every describe-by-name AND every dataframe_query (its internal type-probe
+    // describes the freshly-registered result by name, so even `SELECT 1`
+    // fails). The list-all query filters on the unambiguous `table_schema`
+    // alone, so it stays safe; we select the requested table here. Bounded by
+    // the per-session dataframe count. Tracked upstream for a root-cause fix in
+    // the mcp-ts-core DuckDB provider.
+    const tables = await instance.describe({});
+    const selected =
+      options.tableName === undefined ? tables : tables.filter((t) => t.name === options.tableName);
+    return Promise.all(selected.map((t) => this.augmentTableInfo(ctx, t)));
   }
 
   private async augmentTableInfo(ctx: Context, table: TableInfo): Promise<DescribedTable> {
