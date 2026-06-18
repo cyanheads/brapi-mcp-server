@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.5](changelog/0.7.x/0.7.5.md) — 2026-06-18
+
+Fix dataframe describe/query failing on an ambiguous table_name probe, and stop get_study from reporting server-wide companion counts as study-scoped
+
 ## [0.7.4](changelog/0.7.x/0.7.4.md) — 2026-06-12
 
 Adopt @cyanheads/mcp-ts-core ^0.10.6, migrate boolean env flags to z.stringbool(), set explicit createApp identity, and harden MCPB bundle packaging
