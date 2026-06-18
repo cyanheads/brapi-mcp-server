@@ -70,6 +70,56 @@ describe('brapi://study/{studyDbId} resource', () => {
     expect(result.study.studyName).toBe('Cassava 2022');
   });
 
+  it('omits unscopable counts and surfaces the warning, mirroring the tool (#40)', async () => {
+    // Connect to a dialect that can't scope the counts, advertising the count
+    // endpoints so the probes run.
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/serverinfo')) {
+        return jsonResponse(
+          envelope({
+            serverName: 'BrAPI Community Test Server',
+            calls: [
+              { service: 'studies', methods: ['GET'], versions: ['2.1'] },
+              { service: 'observations', methods: ['GET'], versions: ['2.1'] },
+              { service: 'observationunits', methods: ['GET'], versions: ['2.1'] },
+              { service: 'variables', methods: ['GET'], versions: ['2.1'] },
+            ],
+          }),
+        );
+      }
+      if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiStudyResource.errors });
+    await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
+    fetcher.mockReset();
+
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/studies/study3')) {
+        return jsonResponse(envelope({ studyDbId: 'study3', observationVariableDbIds: [] }));
+      }
+      if (path.endsWith('/observationunits')) {
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      }
+      // /variables returns the same total filtered or not (server ignores the
+      // filter); /observations is dropped by the dialect and never probed.
+      return jsonResponse(envelope({ data: [] }, { totalCount: 4 }));
+    });
+
+    const result = (await brapiStudyResource.handler({ studyDbId: 'study3' }, ctx)) as {
+      observationCount?: number;
+      variableCount?: number;
+      observationUnitCount?: number;
+      warnings: string[];
+    };
+    expect(result.observationCount).toBeUndefined();
+    expect(result.variableCount).toBeUndefined();
+    expect(result.observationUnitCount).toBe(0);
+    expect(result.warnings.join('\n')).toMatch(/variableCount omitted/);
+  });
+
   it('throws NotFound when the study payload is empty', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({})));

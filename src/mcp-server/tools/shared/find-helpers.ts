@@ -330,6 +330,129 @@ export function companionRequestOptions(
 }
 
 /**
+ * Read `metadata.pagination.totalCount` from a BrAPI list endpoint with a
+ * `pageSize: 1` probe. Returns `undefined` when the server omits the count.
+ * Shared by the companion-count probes on the `get_*` tools.
+ */
+export async function fetchTotalCount(
+  client: BrapiClient,
+  baseUrl: string,
+  path: string,
+  ctx: Context,
+  options: BrapiRequestOptions,
+): Promise<number | undefined> {
+  const env = await client.get<unknown>(baseUrl, path, ctx, options);
+  const total = env.metadata?.pagination?.totalCount;
+  return typeof total === 'number' ? total : undefined;
+}
+
+/** Input to {@link fetchValidatedScopedCount}. */
+export interface ValidatedScopedCountInput {
+  client: BrapiClient;
+  connection: RegisteredServer;
+  ctx: Context;
+  dialect: BrapiDialect;
+  /** Output-field name used in the omission warning (e.g. `observationCount`). */
+  label: string;
+  /** Endpoint path to count against (e.g. `/observations`). */
+  path: string;
+  /** Human label for the scope in warnings (e.g. `study filter`). */
+  scopeDescription: string;
+  /** The scoping filter to apply (e.g. `{ studyDbIds: [studyDbId] }`). */
+  scopeFilter: Record<string, unknown>;
+  /** Dialect resource segment for filter adaptation (e.g. `observations`). */
+  service: string;
+  warnings: string[];
+}
+
+/**
+ * Fetch a study/germplasm-scoped total count, omitting it when the upstream
+ * can't actually scope the query — so a per-entity count is never silently
+ * reported as the server-wide total. Two guards, in order:
+ *
+ *   1. **Dropped filter** — if the dialect drops the scope filter entirely
+ *      (the server doesn't honor it), the count would be the global total;
+ *      skip the probe and warn.
+ *   2. **Ignored filter** — run the scoped probe and an unfiltered baseline in
+ *      parallel; if the totals match, the upstream silently ignored the filter
+ *      (accepted it on the wire but returned the unfiltered set), so the
+ *      "scoped" count is really the global total. Drop it and warn.
+ *
+ * Returns the trustworthy scoped total, or `undefined` (with a warning pushed
+ * onto `warnings`) when neither guard can vouch for it. Both probes run at
+ * `pageSize: 1` under the companion budget (tight timeout, no retries) — these
+ * counts decorate a response, never gate it, so a slow or non-conforming
+ * upstream surfaces as one missing count rather than a wrong one or a stall.
+ *
+ * The scope filter is adapted through the dialect here (so per-server key
+ * translation / drops take effect) and sent with `buildRequestOptions` — never
+ * re-threaded through the client, which would double-apply the dialect.
+ */
+export async function fetchValidatedScopedCount(
+  input: ValidatedScopedCountInput,
+): Promise<number | undefined> {
+  const {
+    client,
+    connection,
+    ctx,
+    dialect,
+    label,
+    path,
+    scopeDescription,
+    scopeFilter,
+    service,
+    warnings,
+  } = input;
+  const config = getServerConfig();
+  const companion = (params: BrapiRequestOptions['params']): BrapiRequestOptions =>
+    buildRequestOptions(connection, params, {
+      timeoutMs: config.companionTimeoutMs,
+      retryMaxAttempts: 0,
+    });
+
+  const adapted = dialect.adaptGetFilters(service, scopeFilter);
+  warnings.push(...adapted.warnings);
+
+  // Guard 1: the dialect dropped the scope filter — the server doesn't honor
+  // it, so any count we got back would be the global total.
+  if (Object.keys(adapted.filters).length === 0) {
+    warnings.push(
+      `${label} omitted: the '${dialect.id}' dialect drops the ${scopeDescription} for ${path}, so a scoped count can't be computed (the server does not honor it).`,
+    );
+    return;
+  }
+
+  const filteredParams = {
+    ...(adapted.filters as Record<
+      string,
+      string | number | boolean | readonly (string | number)[] | undefined
+    >),
+    pageSize: 1,
+  };
+
+  const [filtered, baseline] = await Promise.all([
+    fetchTotalCount(client, connection.baseUrl, path, ctx, companion(filteredParams)),
+    fetchTotalCount(client, connection.baseUrl, path, ctx, companion({ pageSize: 1 })).catch(
+      () => undefined,
+    ),
+  ]);
+
+  if (typeof filtered !== 'number') return;
+
+  // Guard 2: the scoped probe and the unfiltered baseline returned the same
+  // total — the upstream silently ignored the filter, so this is the global
+  // count wearing a per-entity label.
+  if (typeof baseline === 'number' && baseline > 0 && filtered === baseline) {
+    warnings.push(
+      `${label} omitted: ${path} returned the same total (${baseline}) for both the scoped probe and an unfiltered baseline — the upstream silently ignored the ${scopeDescription}, so a scoped count can't be trusted.`,
+    );
+    return;
+  }
+
+  return filtered;
+}
+
+/**
  * Compute a frequency distribution for one field across a result set.
  * Accepts a field accessor that may return a scalar or array; arrays are
  * exploded. Returns `{value -> count}` sorted by count desc.

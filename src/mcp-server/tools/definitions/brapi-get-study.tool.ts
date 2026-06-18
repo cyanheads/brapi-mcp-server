@@ -21,6 +21,8 @@ import {
   buildRequestOptions,
   companionRequestOptions,
   extractCoordinates,
+  fetchTotalCount,
+  fetchValidatedScopedCount,
   isUpstreamNotFound,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
@@ -131,7 +133,9 @@ const OutputSchema = z.object({
     .int()
     .nonnegative()
     .optional()
-    .describe('Total observations recorded against this study.'),
+    .describe(
+      'Total observations recorded against this study. Omitted (with a warning) when the upstream server cannot scope the count to the study — never reported as the server-wide total.',
+    ),
   observationUnitCount: z
     .number()
     .int()
@@ -143,7 +147,9 @@ const OutputSchema = z.object({
     .int()
     .nonnegative()
     .optional()
-    .describe('Total observation variables (traits) measured in this study.'),
+    .describe(
+      'Total observation variables (traits) measured in this study. Omitted (with a warning) when the upstream server cannot scope the count to the study — never reported as the server-wide total.',
+    ),
   warnings: z.array(z.string()).describe('Advisory messages — failed FK lookups, missing counts.'),
 });
 
@@ -264,17 +270,23 @@ export const brapiGetStudy = tool('brapi_get_study', {
             .catch((err) => recordWarning(warnings, 'location FK lookup failed', err))
         : Promise.resolve(undefined),
       supportsObservations
-        ? fetchTotalCount(
+        ? fetchValidatedScopedCount({
             client,
-            connection.baseUrl,
-            '/observations',
+            connection,
             ctx,
-            companionRequestOptions(connection, dialect, config, warnings, {
-              studyDbIds: [input.studyDbId],
-              pageSize: 1,
-            }),
-          ).catch((err) => recordWarning(warnings, 'observation count probe failed', err))
+            dialect,
+            label: 'observationCount',
+            path: '/observations',
+            scopeDescription: 'study filter',
+            scopeFilter: { studyDbIds: [input.studyDbId] },
+            service: 'observations',
+            warnings,
+          }).catch((err) => recordWarning(warnings, 'observation count probe failed', err))
         : Promise.resolve(undefined),
+      // observationUnitCount stays a plain probe — the test server (and the
+      // SGN family) honor studyDbId on /observationunits, so it's reliably
+      // study-scoped. The dialect is threaded through the client here so the
+      // plural→singular translation happens at the wire edge.
       supportsObservationUnits
         ? fetchTotalCount(
             client,
@@ -288,20 +300,23 @@ export const brapiGetStudy = tool('brapi_get_study', {
           ).catch((err) => recordWarning(warnings, 'observation-unit count probe failed', err))
         : Promise.resolve(undefined),
       supportsVariables
-        ? fetchTotalCount(
+        ? fetchValidatedScopedCount({
             client,
-            connection.baseUrl,
-            '/variables',
+            connection,
             ctx,
-            companionRequestOptions(connection, dialect, config, warnings, {
-              // /variables historically responded to singular `studyDbId` on
-              // SGN deployments — keep the singular here so the dialect (which
-              // doesn't carry a `variables.studyDbIds → studyDbId` entry) is a
-              // pass-through, not a silent translation that breaks the probe.
-              studyDbId: input.studyDbId,
-              pageSize: 1,
-            }),
-          ).catch((err) => recordWarning(warnings, 'variable count probe failed', err))
+            dialect,
+            label: 'variableCount',
+            path: '/variables',
+            scopeDescription: 'study filter',
+            // /variables historically responded to singular `studyDbId` on SGN
+            // deployments — keep the singular key so the dialect (which carries
+            // no `variables.studyDbIds → studyDbId` entry) passes it through
+            // rather than dropping it; the baseline cross-check still catches
+            // servers (e.g. the BrAPI test server) that accept but ignore it.
+            scopeFilter: { studyDbId: input.studyDbId },
+            service: 'variables',
+            warnings,
+          }).catch((err) => recordWarning(warnings, 'variable count probe failed', err))
         : Promise.resolve(undefined),
     ]);
 
@@ -419,18 +434,6 @@ function asString(value: unknown): string | undefined {
 function recordWarning(warnings: string[], label: string, err: unknown): undefined {
   warnings.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
   return;
-}
-
-async function fetchTotalCount(
-  client: ReturnType<typeof getBrapiClient>,
-  baseUrl: string,
-  path: string,
-  ctx: Parameters<typeof client.get>[2],
-  options: Parameters<typeof client.get>[3],
-): Promise<number | undefined> {
-  const env = await client.get<unknown>(baseUrl, path, ctx, options);
-  const total = env.metadata?.pagination?.totalCount;
-  return typeof total === 'number' ? total : undefined;
 }
 
 function renderKeyValues(lines: string[], record: Record<string, unknown>): void {

@@ -96,13 +96,17 @@ describe('brapi_get_study tool', () => {
         );
       }
       if (path.endsWith('/observations')) {
-        return jsonResponse(envelope({ data: [] }, { totalCount: 412 }));
+        // Scoped probe vs unfiltered baseline must differ so the validated
+        // count is trusted (filtered ≠ baseline → the server honored the scope).
+        const scoped = u.searchParams.has('studyDbIds') || u.searchParams.has('studyDbId');
+        return jsonResponse(envelope({ data: [] }, { totalCount: scoped ? 412 : 9000 }));
       }
       if (path.endsWith('/observationunits')) {
         return jsonResponse(envelope({ data: [] }, { totalCount: 120 }));
       }
       if (path.endsWith('/variables')) {
-        return jsonResponse(envelope({ data: [] }, { totalCount: 18 }));
+        const scoped = u.searchParams.has('studyDbId') || u.searchParams.has('studyDbIds');
+        return jsonResponse(envelope({ data: [] }, { totalCount: scoped ? 18 : 9000 }));
       }
       throw new Error(`Unexpected path: ${path}`);
     });
@@ -217,13 +221,17 @@ describe('brapi_get_study tool', () => {
         );
       }
       if (path.endsWith('/observations')) {
-        return jsonResponse(envelope({ data: [] }, { totalCount: 7 }));
+        // The scoped count now runs a filtered probe + an unfiltered baseline;
+        // distinct totals confirm the (singular) study filter was honored.
+        const scoped = u.searchParams.has('studyDbId') || u.searchParams.has('studyDbIds');
+        return jsonResponse(envelope({ data: [] }, { totalCount: scoped ? 7 : 70 }));
       }
       if (path.endsWith('/observationunits')) {
         return jsonResponse(envelope({ data: [] }, { totalCount: 4 }));
       }
       if (path.endsWith('/variables')) {
-        return jsonResponse(envelope({ data: [] }, { totalCount: 3 }));
+        const scoped = u.searchParams.has('studyDbId') || u.searchParams.has('studyDbIds');
+        return jsonResponse(envelope({ data: [] }, { totalCount: scoped ? 3 : 70 }));
       }
       throw new Error(`Unexpected path: ${path}`);
     });
@@ -234,7 +242,11 @@ describe('brapi_get_study tool', () => {
     const trialsCall = calls.find((u) => u.pathname.endsWith('/trials'))!;
     const programsCall = calls.find((u) => u.pathname.endsWith('/programs'))!;
     const locationsCall = calls.find((u) => u.pathname.endsWith('/locations'))!;
-    const observationsCall = calls.find((u) => u.pathname.endsWith('/observations'))!;
+    // Scoped-count probes now fire a filtered call + an unfiltered baseline;
+    // pick the filtered one (carries the study key) to assert the singular wire.
+    const observationsCall = calls.find(
+      (u) => u.pathname.endsWith('/observations') && u.searchParams.has('studyDbId'),
+    )!;
     const observationUnitsCall = calls.find((u) => u.pathname.endsWith('/observationunits'))!;
 
     // Singular keys reach the wire — the v0.4.7 fix.
@@ -286,5 +298,54 @@ describe('brapi_get_study tool', () => {
     );
     expect(result.study.studyDbId).toBe('s-cb');
     expect(result.study.studyCode).toBeNull();
+  });
+
+  // #40: the BrAPI Community Test Server drops studyDbId(s) on /observations and
+  // silently ignores it on /variables, so those counts would collapse to the
+  // server-wide total. The validated probe must omit them (with a warning)
+  // rather than report a global count as study-scoped. observationUnitCount is
+  // honored and stays correct.
+  it('omits observation/variable counts and warns when the dialect cannot scope them (#40)', async () => {
+    const ctx = await connect(fetcher, 'BrAPI Community Test Server');
+
+    const observationsCalls: string[] = [];
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const path = u.pathname;
+      if (path.endsWith('/studies/study3')) {
+        return jsonResponse(envelope({ studyDbId: 'study3', observationVariableDbIds: [] }));
+      }
+      if (path.endsWith('/observations')) {
+        observationsCalls.push(u.search);
+        return jsonResponse(envelope({ data: [] }, { totalCount: 999 }));
+      }
+      if (path.endsWith('/observationunits')) {
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      }
+      if (path.endsWith('/variables')) {
+        // Filtered probe and unfiltered baseline return the same global total —
+        // the server accepted the filter on the wire but ignored it.
+        return jsonResponse(envelope({ data: [] }, { totalCount: 4 }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiGetStudy.handler(
+      brapiGetStudy.input.parse({ studyDbId: 'study3' }),
+      ctx,
+    );
+
+    expect(result.observationCount).toBeUndefined();
+    expect(result.variableCount).toBeUndefined();
+    expect(result.observationUnitCount).toBe(0);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/observationCount omitted.*\/observations/),
+        expect.stringMatching(/variableCount omitted.*4/),
+      ]),
+    );
+    // The dialect drop short-circuits the /observations count probe — it never
+    // fires a request, so no global total can leak through.
+    expect(observationsCalls).toEqual([]);
   });
 });
