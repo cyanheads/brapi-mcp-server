@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "brapi-mcp-server",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "Collaborative BrAPI v2.1 MCP workspace — studies, germplasm, genotypes across Breedbase, T3, more.",
   "author": {
     "name": "cyanheads"
