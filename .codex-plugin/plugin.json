@@ -1,6 +1,6 @@
 {
   "name": "brapi-mcp-server",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "A collaborative BrAPI v2.1 workspace for multi-agent research via MCP. Search studies, germplasm, genotypes, & more - across Breedbase, T3, Sweetpotatobase, & any BrAPI v2-compliant server.",
   "author": {
     "name": "cyanheads",
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "brapi-mcp-server",
     "shortDescription": "A collaborative BrAPI v2.1 workspace for multi-agent research via MCP. Search studies, germplasm, genotypes, & more - across Breedbase, T3, Sweetpotatobase, & any BrAPI v2-compliant server.",
-    "longDescription": "",
+    "longDescription": "Bridges any BrAPI v2.1-compliant server (Breedbase, T3, Sweetpotatobase, and others) into a collaborative MCP workspace for plant and crop breeding research. Connect to one or more servers under named aliases, then search and fetch across studies, germplasm, observations, observation variables, locations, images, variants, and genotype calls. Result sets that exceed the per-call cap spill into a DuckDB-backed canvas dataframe you query with SELECT-only SQL, enabling cross-study phenotype and genotype matrices, pedigree traversal, and per-germplasm performance summaries. Per-server dialect adapters and a capability registry keep calls aligned with what each backend actually advertises, and raw GET / search passthroughs cover endpoints no curated tool maps yet.",
     "developerName": "cyanheads",
     "category": "",
     "capabilities": ["Read"],
