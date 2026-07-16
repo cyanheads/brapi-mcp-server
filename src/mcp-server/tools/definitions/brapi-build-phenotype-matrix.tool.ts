@@ -33,7 +33,7 @@ import {
   renderDataframeHandle,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
-import { type NormObs, pullStudyObservations } from '../shared/observations.js';
+import { type NormObs, pullObservationsForStudies } from '../shared/observations.js';
 
 // ---------------------------------------------------------------------------
 // Output schema
@@ -166,31 +166,34 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     const warnings: string[] = [];
     const allObs: NormObs[] = [];
 
-    // Collect observations study-by-study. Isolation per study avoids
-    // unbounded queries and preserves studyDbId on each row.
-    for (const studyDbId of input.studies) {
-      const studyObs = await pullStudyObservations({
-        studyDbId,
-        input,
-        client,
-        connection,
-        profile: profile.supported,
-        dialect,
-        config,
-        loadLimit,
-        warnings,
-        ctx,
-      });
-
-      if (studyObs === null) {
+    // Collect observations across the studies with bounded concurrency,
+    // reassembled in input order so the wide-matrix column/row layout (derived
+    // from study encounter order below) stays deterministic across identical
+    // runs. Fail-fast: aborts the whole call on the first study with no
+    // observation path or a hard error, preserving studyDbId on each row.
+    const outcomes = await pullObservationsForStudies({
+      studyDbIds: input.studies,
+      input,
+      client,
+      connection,
+      profile: profile.supported,
+      dialect,
+      config,
+      loadLimit,
+      failFast: true,
+      ctx,
+    });
+    for (const outcome of outcomes) {
+      if (outcome.error !== undefined) throw outcome.error;
+      warnings.push(...outcome.warnings);
+      if (outcome.observations === null) {
         throw ctx.fail(
           'no_observation_path',
-          `Neither /observations nor /observationunits returned a usable path for study '${studyDbId}'. Check brapi_server_info for the capability list.`,
-          { ...ctx.recoveryFor('no_observation_path'), studyDbId },
+          `Neither /observations nor /observationunits returned a usable path for study '${outcome.studyDbId}'. Check brapi_server_info for the capability list.`,
+          { ...ctx.recoveryFor('no_observation_path'), studyDbId: outcome.studyDbId },
         );
       }
-
-      allObs.push(...studyObs);
+      allObs.push(...outcome.observations);
     }
 
     // Apply variable and germplasm filters if requested

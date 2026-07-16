@@ -212,6 +212,127 @@ export async function pullStudyObservations(
   return [];
 }
 
+/**
+ * Per-study outcome from {@link pullObservationsForStudies}. Carries the pull
+ * result, the `null` no-observation-path sentinel, or the thrown `error`, plus
+ * the study's own warnings buffer. The caller merges the warnings in input order
+ * and applies its own failure policy (warn-and-continue vs abort) — the helper
+ * itself is policy-neutral.
+ */
+export interface StudyObservationOutcome {
+  /** The error {@link pullStudyObservations} threw for this study, when it threw. */
+  error?: unknown;
+  /**
+   * Observations for the study, or `null` when no usable observation path exists
+   * (mirrors {@link pullStudyObservations}'s `null` return). Also `null` when the
+   * pull threw — disambiguate via `error`.
+   */
+  observations: NormObs[] | null;
+  studyDbId: string;
+  /**
+   * Warnings this study's pull produced. Kept per-study (not a shared array) so
+   * concurrent pulls never interleave their warnings — the caller concatenates
+   * them in input order for a deterministic result.
+   */
+  warnings: string[];
+}
+
+/**
+ * Shared inputs for {@link pullObservationsForStudies} — everything a per-study
+ * pull needs except the `studyDbId` and its warnings buffer (both per-study).
+ */
+export interface PullObservationsForStudiesArgs {
+  client: BrapiClient;
+  config: ServerConfig;
+  connection: RegisteredServer;
+  ctx: Context;
+  dialect: BrapiDialect;
+  /**
+   * When true, stop launching further batches once a batch contains a study that
+   * threw or has no observation path — `brapi_build_phenotype_matrix` aborts on
+   * the first such study, so pulling the rest would be wasted upstream load. When
+   * false (`brapi_germplasm_performance`), every study is pulled regardless.
+   */
+  failFast: boolean;
+  input: ObservationPullFilters;
+  loadLimit: number;
+  profile: Record<string, CallDescriptor>;
+  studyDbIds: string[];
+}
+
+/**
+ * Pull observations for many studies with bounded concurrency, returning
+ * per-study outcomes in **input order** — never completion order.
+ *
+ * Studies are processed in sequential batches of `config.maxConcurrentRequests`
+ * (this is the first and only consumer of that config); within a batch the
+ * per-study pulls run concurrently, so a slow study no longer serializes the
+ * rest of its batch. `Promise.all` over internally-caught tasks preserves input
+ * order for free and never rejects: a single study's failure is folded into its
+ * outcome rather than aborting the batch or losing the others' results.
+ *
+ * Callers own the failure policy — `brapi_germplasm_performance` walks every
+ * outcome and warns-and-continues; `brapi_build_phenotype_matrix` sets
+ * `failFast` and rethrows the `error` / raises `no_observation_path` on the first
+ * failing study. Input-order reassembly is load-bearing: both tools derive
+ * deterministic column/row ordering from study encounter order, so a
+ * completion-order reassembly would make an identical query's output flap.
+ *
+ * @param pull - the per-study pull, injectable for tests; defaults to {@link pullStudyObservations}.
+ */
+export async function pullObservationsForStudies(
+  args: PullObservationsForStudiesArgs,
+  pull: (a: PullStudyObservationsArgs) => Promise<NormObs[] | null> = pullStudyObservations,
+): Promise<StudyObservationOutcome[]> {
+  const {
+    studyDbIds,
+    input,
+    client,
+    config,
+    connection,
+    ctx,
+    dialect,
+    loadLimit,
+    profile,
+    failFast,
+  } = args;
+  const batchSize = Math.max(1, config.maxConcurrentRequests);
+  const outcomes: StudyObservationOutcome[] = [];
+
+  for (let start = 0; start < studyDbIds.length; start += batchSize) {
+    if (ctx.signal.aborted) break;
+    const batch = studyDbIds.slice(start, start + batchSize);
+    const batchOutcomes = await Promise.all(
+      batch.map(async (studyDbId): Promise<StudyObservationOutcome> => {
+        const warnings: string[] = [];
+        try {
+          const observations = await pull({
+            studyDbId,
+            input,
+            client,
+            connection,
+            profile,
+            dialect,
+            config,
+            loadLimit,
+            warnings,
+            ctx,
+          });
+          return { studyDbId, observations, warnings };
+        } catch (error) {
+          return { studyDbId, observations: null, error, warnings };
+        }
+      }),
+    );
+    outcomes.push(...batchOutcomes);
+    if (failFast && batchOutcomes.some((o) => o.error !== undefined || o.observations === null)) {
+      break;
+    }
+  }
+
+  return outcomes;
+}
+
 function supportsGet(profile: Record<string, CallDescriptor>, service: string): boolean {
   const descriptor = profile[service];
   if (!descriptor) return false;

@@ -38,7 +38,7 @@ import {
   isUpstreamNotFound,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
-import { type NormObs, pullStudyObservations } from '../shared/observations.js';
+import { type NormObs, pullObservationsForStudies } from '../shared/observations.js';
 
 /** Upper bound on studies discovered per germplasm (guards the filter-ignored case). */
 const STUDY_DISCOVERY_CAP = 200;
@@ -216,42 +216,42 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
       }
     }
 
-    // 3. Pull observations per study, scoped to the germplasm. Filter returned
-    //    rows to the iterated study + target germplasm so the aggregate stays
-    //    correct on servers that ignore the studyDbId filter or over-return.
+    // 3. Pull observations per study, scoped to the germplasm, with bounded
+    //    concurrency. Filter returned rows to the iterated study + target
+    //    germplasm so the aggregate stays correct on servers that ignore the
+    //    studyDbId filter or over-return. Per-study failures warn and continue.
     const collected: NormObs[] = [];
     const wantVariables = input.variables?.length ? new Set(input.variables) : undefined;
-    for (const studyDbId of studyDbIds) {
-      let studyObs: NormObs[] | null;
-      try {
-        studyObs = await pullStudyObservations({
-          studyDbId,
-          input: input.variables
-            ? { germplasm: [input.germplasmDbId], variables: input.variables }
-            : { germplasm: [input.germplasmDbId] },
-          client,
-          connection,
-          profile: profile.supported,
-          dialect,
-          config,
-          loadLimit,
-          warnings,
-          ctx,
-        });
-      } catch (err) {
+    const outcomes = await pullObservationsForStudies({
+      studyDbIds,
+      input: input.variables
+        ? { germplasm: [input.germplasmDbId], variables: input.variables }
+        : { germplasm: [input.germplasmDbId] },
+      client,
+      connection,
+      profile: profile.supported,
+      dialect,
+      config,
+      loadLimit,
+      failFast: false,
+      ctx,
+    });
+    for (const outcome of outcomes) {
+      warnings.push(...outcome.warnings);
+      if (outcome.error !== undefined) {
         warnings.push(
-          `Study '${studyDbId}': observation pull failed (${err instanceof Error ? err.message : String(err)}).`,
+          `Study '${outcome.studyDbId}': observation pull failed (${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}).`,
         );
         continue;
       }
-      if (studyObs === null) {
+      if (outcome.observations === null) {
         warnings.push(
-          `Study '${studyDbId}': no observation path (server exposes neither /observations nor /observationunits).`,
+          `Study '${outcome.studyDbId}': no observation path (server exposes neither /observations nor /observationunits).`,
         );
         continue;
       }
-      for (const o of studyObs) {
-        if (o.studyDbId !== studyDbId) continue;
+      for (const o of outcome.observations) {
+        if (o.studyDbId !== outcome.studyDbId) continue;
         if (o.germplasmDbId !== input.germplasmDbId) continue;
         if (wantVariables && !wantVariables.has(o.observationVariableDbId)) continue;
         collected.push(o);

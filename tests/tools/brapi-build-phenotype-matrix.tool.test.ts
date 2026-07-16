@@ -20,25 +20,41 @@ import {
   resetTestServices,
 } from './_tool-test-helpers.js';
 
-/** Connect with observations + observationunits + observations/table advertised. */
-async function connect(fetcher: MockFetcher) {
+/**
+ * Connect with observations + observationunits advertised. Pass
+ * `advertiseObservationPaths: false` to advertise a server that exposes neither
+ * (drives the `no_observation_path` fail-fast path); pass `errors` to wire the
+ * typed `ctx.fail` so that path's thrown reason is assertable.
+ */
+async function connect(
+  fetcher: MockFetcher,
+  opts: {
+    advertiseObservationPaths?: boolean;
+    errors?: typeof brapiBuildPhenotypeMatrix.errors;
+  } = {},
+) {
+  const advertise = opts.advertiseObservationPaths ?? true;
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
           serverName: 'Test',
-          calls: [
-            { service: 'observations', methods: ['GET'], versions: ['2.1'] },
-            { service: 'observationunits', methods: ['GET'], versions: ['2.1'] },
-          ],
+          calls: advertise
+            ? [
+                { service: 'observations', methods: ['GET'], versions: ['2.1'] },
+                { service: 'observationunits', methods: ['GET'], versions: ['2.1'] },
+              ]
+            : [{ service: 'studies', methods: ['GET'], versions: ['2.1'] }],
         }),
       );
     }
     if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
     return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
   });
-  const ctx = createMockContext({ tenantId: 't1' });
+  const ctx = createMockContext(
+    opts.errors ? { tenantId: 't1', errors: opts.errors } : { tenantId: 't1' },
+  );
   await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
   fetcher.mockReset();
   return ctx;
@@ -457,5 +473,83 @@ describe('brapi_build_phenotype_matrix tool', () => {
     const formatted = brapiBuildPhenotypeMatrix.format(result);
     expect(formatted[0]?.text).toMatch(/1 germplasm × 1 variables/);
     expect(formatted[0]?.text).toMatch(/tableName/);
+  });
+
+  // -------------------------------------------------------------------------
+  // Concurrent pull — deterministic input-order column layout
+  // -------------------------------------------------------------------------
+  it('preserves input-order column layout under concurrent fetch (deterministic across runs)', async () => {
+    const ctx = await connect(fetcher);
+    // study1 carries variable v1 (slow response); study2 carries v2 (fast). The
+    // studies fetch concurrently, so study2 (2nd in input) resolves FIRST —
+    // completion order != input order. Wide-matrix columns must still follow
+    // study encounter order (v1 before v2), or an identical query's column
+    // layout would flap between runs.
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const path = pathnameOf(url);
+      const studyId =
+        u.searchParams.get('studyDbIds') ?? u.searchParams.get('studyDbId') ?? 'unknown';
+      if (path.endsWith('/observations')) {
+        if (studyId === 'study1') {
+          await new Promise((r) => setTimeout(r, 30));
+          return jsonResponse(
+            envelope(
+              { data: [obsRow('g1', 'G1', 'v1', 'Height', '10', 'study1')] },
+              { totalCount: 1 },
+            ),
+          );
+        }
+        if (studyId === 'study2') {
+          await new Promise((r) => setTimeout(r, 1));
+          return jsonResponse(
+            envelope(
+              { data: [obsRow('g1', 'G1', 'v2', 'Width', '20', 'study2')] },
+              { totalCount: 1 },
+            ),
+          );
+        }
+      }
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const run = () =>
+      brapiBuildPhenotypeMatrix.handler(
+        brapiBuildPhenotypeMatrix.input.parse({
+          studies: ['study1', 'study2'],
+          shape: 'wide',
+          aggregate: 'first',
+        }),
+        ctx,
+      );
+    const a = await run();
+    const b = await run();
+
+    // Columns follow study input order: v1 (study1) before v2 (study2), even
+    // though study2's fetch resolves first. A completion-order reassembly would
+    // yield ['v2', 'v1'] here.
+    const varCols = (a.dataframe?.columns ?? []).filter((c) => c === 'v1' || c === 'v2');
+    expect(varCols).toEqual(['v1', 'v2']);
+    // Identical across identical runs.
+    expect(b.dataframe?.columns ?? []).toEqual(a.dataframe?.columns ?? []);
+    expect(Object.keys(b.variableLegend)).toEqual(Object.keys(a.variableLegend));
+  });
+
+  // -------------------------------------------------------------------------
+  // Fail-fast — no observation path aborts the whole call
+  // -------------------------------------------------------------------------
+  it('fail-fast: throws no_observation_path when the server exposes neither observations endpoint', async () => {
+    const ctx = await connect(fetcher, {
+      advertiseObservationPaths: false,
+      errors: brapiBuildPhenotypeMatrix.errors,
+    });
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await expect(
+      brapiBuildPhenotypeMatrix.handler(
+        brapiBuildPhenotypeMatrix.input.parse({ studies: ['study1', 'study2'], shape: 'long' }),
+        ctx,
+      ),
+    ).rejects.toMatchObject({ data: { reason: 'no_observation_path' } });
   });
 });

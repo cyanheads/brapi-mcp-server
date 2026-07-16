@@ -293,4 +293,52 @@ describe('brapi_germplasm_performance tool', () => {
     expect(warnings).toContain('extraFilters.germplasmDbIds');
     expect(warnings).toContain('studyDbIds');
   });
+
+  it('aggregates across multiple studies under concurrent fetch — deterministic across runs', async () => {
+    const ctx = await connect(fetcher);
+    // germplasm1 observed for variable1 in two studies (values 10, 20). The
+    // germplasm-anchored /observations pull returns both rows; each study
+    // iteration filters to its own studyDbId, so the aggregate combines both.
+    mockServer(fetcher, {
+      obs: [
+        {
+          observationDbId: 'o1',
+          observationVariableDbId: 'variable1',
+          observationVariableName: 'Corn Stalk Height',
+          germplasmDbId: 'germplasm1',
+          studyDbId: 'study1',
+          value: '10',
+        },
+        {
+          observationDbId: 'o2',
+          observationVariableDbId: 'variable1',
+          observationVariableName: 'Corn Stalk Height',
+          germplasmDbId: 'germplasm1',
+          studyDbId: 'study2',
+          value: '20',
+        },
+      ],
+    });
+
+    const run = () =>
+      brapiGermplasmPerformance.handler(
+        brapiGermplasmPerformance.input.parse({
+          germplasmDbId: 'germplasm1',
+          studyDbIds: ['study1', 'study2'],
+        }),
+        ctx,
+      );
+    const a = await run();
+    const b = await run();
+
+    expect(a.studyDbIds).toEqual(['study1', 'study2']);
+    expect(a.studyCount).toBe(2);
+    expect(a.perVariable).toHaveLength(1);
+    expect(a.perVariable[0]?.n).toBe(2);
+    expect(a.perVariable[0]?.mean).toBe(15);
+    expect(a.perVariable[0]?.studyDbIds).toEqual(['study1', 'study2']);
+    // Output (including warning order) is identical across identical runs — the
+    // per-study warnings buffers keep the concurrent fan-out deterministic.
+    expect(b).toEqual(a);
+  });
 });
