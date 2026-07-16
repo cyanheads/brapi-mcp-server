@@ -444,4 +444,60 @@ describe('brapi_find_locations tool', () => {
     expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.locationDbId).toBe('in');
   });
+
+  it('resolves a country name to its ISO alpha-3 code and filters upstream', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({ countryNames: ['Uganda'] }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('countryCodes')).toEqual(['UGA']);
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('"Uganda" → UGA');
+  });
+
+  it('resolves country names case-insensitively and via aliases', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({ countryNames: ['united states'] }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('countryCodes')).toEqual(['USA']);
+  });
+
+  it('warns when a country name cannot be resolved and sends no country filter', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({ countryNames: ['Atlantis'] }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.has('countryCodes')).toBe(false);
+    const warnings = getEnrichment(ctx).warnings.join('\n');
+    expect(warnings).toContain('Could not resolve');
+    expect(warnings).toContain('Atlantis');
+  });
+
+  it('unions explicit countryCodes with codes resolved from countryNames', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    await brapiFindLocations.handler(
+      brapiFindLocations.input.parse({ countryCodes: ['NGA'], countryNames: ['Uganda'] }),
+      ctx,
+    );
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('countryCodes').sort()).toEqual(['NGA', 'UGA']);
+  });
 });

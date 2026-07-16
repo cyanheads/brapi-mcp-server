@@ -15,6 +15,7 @@ import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
+import { resolveCountryName } from '@/services/iso-country/index.js';
 import {
   AliasInput,
   applyDialectFiltersOrFail,
@@ -124,7 +125,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindLocations = tool('brapi_find_locations', {
   description:
-    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Optional bbox parameter restricts rows to a latitude/longitude window. When the spec-correct GeoJSON [lon, lat, alt] reading produces zero matches and at least one row carries a Point geometry, the bbox filter retries once with axes swapped (handles non-conformant servers that store [lat, lon, alt]) and surfaces a warning + `coordinateAxisOrder: "swapped"`. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
+    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Countries filter by ISO 3166-1 alpha-3 code via countryCodes, or by free-form English country name via countryNames (resolved client-side to alpha-3 — "Uganda" → "UGA"). Optional bbox parameter restricts rows to a latitude/longitude window. When the spec-correct GeoJSON [lon, lat, alt] reading produces zero matches and at least one row carries a Point geometry, the bbox filter retries once with axes swapped (handles non-conformant servers that store [lat, lon, alt]) and surfaces a warning + `coordinateAxisOrder: "swapped"`. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -147,6 +148,12 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     locations: z.array(z.string()).optional().describe('Filter by locationDbIds.'),
     locationNames: z.array(z.string()).optional().describe('Filter by display name.'),
     countryCodes: z.array(z.string()).optional().describe('ISO 3166-1 alpha-3 country codes.'),
+    countryNames: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Free-form English country names or aliases (e.g. "Uganda", "United States", "USA") resolved client-side to ISO 3166-1 alpha-3 codes and merged into countryCodes. Names that do not resolve surface as a warning. Prefer countryCodes when you already have alpha-3 codes.',
+      ),
     locationTypes: z
       .array(z.string())
       .optional()
@@ -254,11 +261,21 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
     const warnings: string[] = [];
+
+    // Resolve free-form country names to ISO 3166-1 alpha-3 codes and union
+    // them into the countryCodes filter slot before mergeFilters runs, so
+    // dialect adaptation, routing, and filter-match checks all see one set.
+    const combinedCountryCodes = resolveCountryCodes(
+      input.countryCodes,
+      input.countryNames,
+      warnings,
+    );
+
     const merged = mergeFilters(
       {
         locationDbIds: input.locations,
         locationNames: input.locationNames,
-        countryCodes: input.countryCodes,
+        countryCodes: combinedCountryCodes,
         locationTypes: input.locationTypes,
         abbreviations: input.abbreviations,
       },
@@ -365,7 +382,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     checkFilterMatchRates(warnings, filteredFull.length, [
       {
         paramName: 'countryCodes',
-        requestedValues: input.countryCodes,
+        requestedValues: combinedCountryCodes,
         distribution: distributions.countryCode,
         caseInsensitive: true,
         requireEveryRowMatch: true,
@@ -386,6 +403,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         'locations',
         'locationNames',
         'countryCodes',
+        'countryNames',
         'locationTypes',
         'abbreviations',
         'bbox',
@@ -547,4 +565,42 @@ function insideBbox(
   if (!coords) return false;
   const { latitude: lat, longitude: lon } = coords;
   return lat >= bbox.minLat && lat <= bbox.maxLat && lon >= bbox.minLon && lon <= bbox.maxLon;
+}
+
+/**
+ * Resolve free-form `countryNames` to ISO 3166-1 alpha-3 codes and union them
+ * with any explicit `countryCodes`. Pushes a resolution advisory for names
+ * that mapped and a warning for names that did not. Returns the combined,
+ * de-duplicated code list, or `undefined` when neither input carried a value
+ * (so the upstream call stays unfiltered rather than sending an empty array).
+ */
+function resolveCountryCodes(
+  countryCodes: string[] | undefined,
+  countryNames: string[] | undefined,
+  warnings: string[],
+): string[] | undefined {
+  const resolved: Array<{ input: string; code: string }> = [];
+  const unresolved: string[] = [];
+  for (const name of countryNames ?? []) {
+    const code = resolveCountryName(name);
+    if (code) resolved.push({ input: name, code });
+    else unresolved.push(name);
+  }
+  if (resolved.length > 0) {
+    warnings.push(
+      `Resolved country name(s) to ISO 3166-1 alpha-3: ${resolved
+        .map((p) => `"${p.input}" → ${p.code}`)
+        .join(', ')}.`,
+    );
+  }
+  if (unresolved.length > 0) {
+    warnings.push(
+      `Could not resolve country name(s) to an ISO 3166-1 alpha-3 code: ${unresolved
+        .map((n) => `"${n}"`)
+        .join(', ')}. Pass the alpha-3 code directly via countryCodes, or check the spelling.`,
+    );
+  }
+  const resolvedCodes = resolved.map((p) => p.code);
+  if (!countryCodes && resolvedCodes.length === 0) return;
+  return [...new Set([...(countryCodes ?? []), ...resolvedCodes])];
 }
