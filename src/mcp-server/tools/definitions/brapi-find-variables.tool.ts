@@ -41,7 +41,6 @@ import {
   renderFindHeader,
   requireRegisteredConnection,
   resolveFindRoute,
-  truncationMeta,
 } from '../shared/find-helpers.js';
 
 const VariableRowSchema = z
@@ -495,8 +494,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     }
     lines.push('## Distributions');
     lines.push(
-      renderDistributions(result.distributions, truncationMeta(result.dataframe)) ||
-        '_No values to summarize._',
+      renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
     lines.push('## Variables');
@@ -524,7 +522,9 @@ export const brapiFindVariables = tool('brapi_find_variables', {
         if (v.trait) parts.push(`trait=${JSON.stringify(v.trait)}`);
         if (v.scale) parts.push(`scale=${JSON.stringify(v.scale)}`);
         if (v.method) parts.push(`method=${JSON.stringify(v.method)}`);
-        parts.push(...collectPassthroughParts(v as Record<string, unknown>, RENDERED));
+        parts.push(
+          ...collectPassthroughParts(v as Record<string, unknown>, RENDERED, result.dataframe),
+        );
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

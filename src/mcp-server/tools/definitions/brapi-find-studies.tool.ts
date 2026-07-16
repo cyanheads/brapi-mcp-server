@@ -38,7 +38,6 @@ import {
   renderFindHeader,
   requireRegisteredConnection,
   resolveFindRoute,
-  truncationMeta,
 } from '../shared/find-helpers.js';
 
 const StudyRowSchema = z
@@ -367,7 +366,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       lines.push('');
     }
     lines.push('## Distributions');
-    const rendered = renderDistributions(result.distributions, truncationMeta(result.dataframe));
+    const rendered = renderDistributions(result.distributions, result.dataframe);
     lines.push(rendered || '_No values to summarize._');
     lines.push('');
     lines.push('## Studies');
@@ -412,7 +411,9 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         if (study.studyCode) parts.push(`code=${study.studyCode}`);
         if (study.studyPUI) parts.push(`pui=${study.studyPUI}`);
         if (study.studyDescription) parts.push(`desc=${study.studyDescription}`);
-        parts.push(...collectPassthroughParts(study as Record<string, unknown>, RENDERED));
+        parts.push(
+          ...collectPassthroughParts(study as Record<string, unknown>, RENDERED, result.dataframe),
+        );
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

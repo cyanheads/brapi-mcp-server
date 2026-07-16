@@ -39,7 +39,6 @@ import {
   renderFindHeader,
   requireRegisteredConnection,
   resolveFindRoute,
-  truncationMeta,
 } from '../shared/find-helpers.js';
 
 const LocationRowSchema = z
@@ -439,8 +438,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     }
     lines.push('## Distributions');
     lines.push(
-      renderDistributions(result.distributions, truncationMeta(result.dataframe)) ||
-        '_No values to summarize._',
+      renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
     lines.push('## Locations');
@@ -481,7 +479,9 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         if (loc.instituteName) parts.push(`institute=${loc.instituteName}`);
         if (loc.instituteAddress) parts.push(`addr=${loc.instituteAddress}`);
         if (loc.documentationURL) parts.push(`docs=${loc.documentationURL}`);
-        parts.push(...collectPassthroughParts(loc as Record<string, unknown>, RENDERED));
+        parts.push(
+          ...collectPassthroughParts(loc as Record<string, unknown>, RENDERED, result.dataframe),
+        );
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

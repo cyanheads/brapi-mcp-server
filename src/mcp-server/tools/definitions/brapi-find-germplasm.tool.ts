@@ -37,7 +37,6 @@ import {
   renderFindHeader,
   requireRegisteredConnection,
   resolveFindRoute,
-  truncationMeta,
 } from '../shared/find-helpers.js';
 
 const GermplasmRowSchema = z
@@ -438,8 +437,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     }
     lines.push('## Distributions');
     lines.push(
-      renderDistributions(result.distributions, truncationMeta(result.dataframe)) ||
-        '_No values to summarize._',
+      renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
     lines.push('## Germplasm');
@@ -492,7 +490,9 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
             .join(',');
           parts.push(`synonyms=${synStr}`);
         }
-        parts.push(...collectPassthroughParts(g as Record<string, unknown>, RENDERED));
+        parts.push(
+          ...collectPassthroughParts(g as Record<string, unknown>, RENDERED, result.dataframe),
+        );
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

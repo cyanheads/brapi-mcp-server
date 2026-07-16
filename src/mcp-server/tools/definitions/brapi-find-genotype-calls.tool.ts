@@ -35,7 +35,6 @@ import {
   renderFindHeader,
   requireRegisteredConnection,
   toDataframeHandle,
-  truncationMeta,
 } from '../shared/find-helpers.js';
 import { buildCallsSearchBody, collectCalls } from '../shared/genotype-calls.js';
 
@@ -351,8 +350,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     lines.push('');
     lines.push('## Distributions');
     lines.push(
-      renderDistributions(result.distributions, truncationMeta(result.dataframe)) ||
-        '_No values to summarize._',
+      renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
     lines.push('## Calls');
@@ -379,7 +377,9 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         if (call.genotype) parts.push(`genotype=${JSON.stringify(call.genotype)}`);
         if (call.genotypeValue) parts.push(`genotypeValue=${call.genotypeValue}`);
         if (call.phaseSet) parts.push(`phaseSet=${call.phaseSet}`);
-        parts.push(...collectPassthroughParts(call as Record<string, unknown>, RENDERED));
+        parts.push(
+          ...collectPassthroughParts(call as Record<string, unknown>, RENDERED, result.dataframe),
+        );
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

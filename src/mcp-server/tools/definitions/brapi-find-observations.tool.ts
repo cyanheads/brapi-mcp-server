@@ -47,7 +47,6 @@ import {
   renderFindHeader,
   requireRegisteredConnection,
   resolveFindRoute,
-  truncationMeta,
 } from '../shared/find-helpers.js';
 
 const ObservationRowSchema = z
@@ -483,8 +482,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     }
     lines.push('## Distributions');
     lines.push(
-      renderDistributions(result.distributions, truncationMeta(result.dataframe)) ||
-        '_No values to summarize._',
+      renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
     lines.push('## Observations');
@@ -527,7 +525,9 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         if (o.observationTimeStamp) parts.push(`time=${o.observationTimeStamp}`);
         if (o.collector) parts.push(`collector=${o.collector}`);
         if (o.uploadedBy) parts.push(`uploadedBy=${o.uploadedBy}`);
-        parts.push(...collectPassthroughParts(o as Record<string, unknown>, RENDERED));
+        parts.push(
+          ...collectPassthroughParts(o as Record<string, unknown>, RENDERED, result.dataframe),
+        );
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

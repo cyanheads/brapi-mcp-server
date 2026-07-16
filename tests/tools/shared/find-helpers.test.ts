@@ -12,10 +12,23 @@ import { describe, expect, it } from 'vitest';
 import {
   appendPassthroughLines,
   collectPassthroughParts,
+  type DataframeHandle,
   renderDataframeHandle,
   renderDistributions,
   toDataframeHandle,
 } from '@/mcp-server/tools/shared/find-helpers.js';
+
+/** A spilled-result dataframe handle, as a `find_*` format() would receive it. */
+function handle(overrides: Partial<DataframeHandle> = {}): DataframeHandle {
+  return {
+    tableName: 'df_AAAAA_BBBBB',
+    rowCount: 26,
+    columns: ['studyDbId', 'additionalInfo'],
+    createdAt: '2026-06-01T00:00:00.000Z',
+    expiresAt: '2999-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
 
 describe('collectPassthroughParts', () => {
   it('renders scalars verbatim', () => {
@@ -46,6 +59,23 @@ describe('collectPassthroughParts', () => {
     expect(rendered).toMatch(/^additionalInfo=<30 keys, \d+\.\d+KB — see structuredContent>$/);
     // The raw object data must not leak into the placeholder.
     expect(rendered).not.toContain('value-0-padded');
+  });
+
+  it('points an oversized value at the dataframe that holds it, not structuredContent', () => {
+    const big: Record<string, string> = {};
+    for (let i = 0; i < 30; i++) big[`k${i}`] = `value-${i}-padded`;
+    const parts = collectPassthroughParts(
+      { additionalInfo: big },
+      new Set(),
+      handle({ tableName: 'df_XHBZO_ZO23P' }),
+    );
+    const rendered = parts[0]!;
+    expect(rendered).toMatch(
+      /^additionalInfo=<30 keys, \d+\.\d+KB — query `df_XHBZO_ZO23P` via brapi_dataframe_query>$/,
+    );
+    // A content-only client cannot read structuredContent — naming it here is
+    // the bug, so the pointer must not fall back to it when a dataframe exists.
+    expect(rendered).not.toContain('structuredContent');
   });
 
   it('collapses large arrays with an entries count', () => {
@@ -94,6 +124,55 @@ describe('renderDataframeHandle', () => {
   it('omits the renamedColumns line when no columns were renamed', () => {
     expect(renderDataframeHandle(base).join('\n')).not.toContain('renamedColumns');
   });
+
+  it('renders a realistic column list complete — the budget must not fire on find_* shapes', () => {
+    // The live bti-breedbase-demo find_studies dataframe: 18 columns.
+    const columns = [
+      'locationName',
+      'studyName',
+      'externalReferences',
+      'trialName',
+      'dataLinks',
+      'experimentalDesign',
+      'commonCropName',
+      'seasons',
+      'studyType',
+      'studyDescription',
+      'trialDbId',
+      'documentationURL',
+      'studyDbId',
+      'additionalInfo',
+      'locationDbId',
+      'active',
+      'startDate',
+      'endDate',
+    ];
+    const out = renderDataframeHandle({ ...base, columns }).join('\n');
+    for (const col of columns) expect(out).toContain(col);
+    expect(out).not.toContain('…+');
+  });
+
+  it('caps a pathological column list at the describe path, but never the sole decoder', () => {
+    // A genotype matrix's wide pivot: one column per variant.
+    const columns = ['germplasmDbId', ...Array.from({ length: 5_000 }, (_, i) => `v_${i}`)];
+    // renamedColumns is the only safe→original mapping, with no describe or
+    // re-call path behind it — it renders complete however long it gets.
+    const columnLegend = Object.fromEntries(
+      Array.from({ length: 40 }, (_, i) => [`v_${i}`, `variant-${i}`]),
+    );
+    const out = renderDataframeHandle({ ...base, columns, columnLegend }).join('\n');
+
+    const columnsLine = out.split('\n').find((l) => l.startsWith('- columns:')) ?? '';
+    expect(columnsLine).toContain('…+');
+    expect(columnsLine).toContain('brapi_dataframe_describe lists the full schema');
+    expect(columnsLine.length).toBeLessThan(700);
+
+    const renamedLine = out.split('\n').find((l) => l.startsWith('- renamedColumns:')) ?? '';
+    for (const [safe, original] of Object.entries(columnLegend)) {
+      expect(renamedLine).toContain(`${safe} → ${original}`);
+    }
+    expect(renamedLine).not.toContain('…+');
+  });
 });
 
 describe('renderDistributions', () => {
@@ -103,18 +182,15 @@ describe('renderDistributions', () => {
     expect(out).not.toContain('Computed over');
   });
 
-  it('omits the caveat when truncated is false', () => {
-    const out = renderDistributions(
-      { crop: { Maize: 3 } },
-      { truncated: false, rowCount: 3, totalCount: 3 },
-    );
+  it('omits the caveat when the dataframe was not truncated', () => {
+    const out = renderDistributions({ crop: { Maize: 3 } }, handle({ rowCount: 3 }));
     expect(out).not.toContain('Computed over');
   });
 
   it('prepends a caveat when truncated is true', () => {
     const out = renderDistributions(
       { crop: { Soybean: 250 } },
-      { truncated: true, rowCount: 250, totalCount: 880 },
+      handle({ truncated: true, rowCount: 250, totalCount: 880 }),
     );
     expect(out).toContain('_Computed over 250 of 880 upstream rows');
     expect(out).toContain('- **crop:** Soybean (250)');
@@ -122,6 +198,53 @@ describe('renderDistributions', () => {
 
   it('returns empty string for empty distributions (no caveat with no data)', () => {
     expect(renderDistributions({})).toBe('');
+  });
+
+  it('renders every value when the distribution fits the line budget', () => {
+    // The studyType distribution of the 26-study bti-breedbase-demo server:
+    // 9 values over an unspilled result set, where rendering all of them costs
+    // ~200 chars. A fixed top-5 cap dropped four of them for no benefit.
+    const studyType = {
+      'drone trial': 7,
+      activity_record: 2,
+      phenotyping_trial: 2,
+      storage_trial: 2,
+      'Flight trial': 1,
+      transformation_project: 1,
+      'Preliminary Yield Trial': 1,
+      'Clonal Evaluation': 1,
+      health_status_trial: 1,
+    };
+    const out = renderDistributions({ studyType });
+    for (const value of Object.keys(studyType)) expect(out).toContain(value);
+    expect(out).not.toContain('more');
+  });
+
+  it('caps a high-cardinality distribution and names the dataframe holding the rest', () => {
+    const counts = Object.fromEntries(
+      Array.from({ length: 5_000 }, (_, i) => [`germplasm-accession-${i}`, 1]),
+    );
+    const out = renderDistributions({ germplasmName: counts }, handle({ tableName: 'df_BIG' }));
+    expect(out).toContain('…+');
+    expect(out).toContain('aggregate dataframe `df_BIG` with brapi_dataframe_query');
+    // The whole point of capping: the line stays bounded regardless of input.
+    expect(out.length).toBeLessThan(700);
+  });
+
+  it('falls back to structuredContent when a capped distribution has no dataframe', () => {
+    const counts = Object.fromEntries(
+      Array.from({ length: 5_000 }, (_, i) => [`germplasm-accession-${i}`, 1]),
+    );
+    const out = renderDistributions({ germplasmName: counts });
+    expect(out).toContain('…+');
+    expect(out).toContain('see structuredContent.distributions');
+    expect(out).not.toContain('brapi_dataframe_query');
+  });
+
+  it('renders the leading value even when it alone overruns the budget', () => {
+    const out = renderDistributions({ note: { ['x'.repeat(900)]: 2 } });
+    expect(out).toContain('x'.repeat(900));
+    expect(out).toContain('(2)');
   });
 });
 

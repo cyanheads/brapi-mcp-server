@@ -36,7 +36,6 @@ import {
   renderFindHeader,
   requireRegisteredConnection,
   resolveFindRoute,
-  truncationMeta,
 } from '../shared/find-helpers.js';
 
 const ImageRowSchema = z
@@ -365,8 +364,7 @@ export const brapiFindImages = tool('brapi_find_images', {
     }
     lines.push('## Distributions');
     lines.push(
-      renderDistributions(result.distributions, truncationMeta(result.dataframe)) ||
-        '_No values to summarize._',
+      renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
     lines.push('## Images');
@@ -413,7 +411,9 @@ export const brapiFindImages = tool('brapi_find_images', {
         if (img.imageURL) parts.push(`url=${img.imageURL}`);
         if (img.copyright) parts.push(`©${img.copyright}`);
         if (img.description) parts.push(`desc=${img.description}`);
-        parts.push(...collectPassthroughParts(img as Record<string, unknown>, RENDERED));
+        parts.push(
+          ...collectPassthroughParts(img as Record<string, unknown>, RENDERED, result.dataframe),
+        );
         lines.push(`- ${parts.join(' · ')}`);
       }
     }

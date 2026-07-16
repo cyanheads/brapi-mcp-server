@@ -527,48 +527,89 @@ export function renderAppliedFilters(
 }
 
 /**
- * Render a distributions block in markdown. When `truncated` metadata is
- * supplied and `truncated.truncated` is true, a caveat line is prepended so
- * readers know the distribution covers only the fetched subset.
+ * Character budget for one rendered comma-joined list line before it caps.
+ *
+ * Sized by rendered width rather than a fixed entry count so a line adapts to
+ * its data: the common case (a distribution over a 26-study server, a `find_*`
+ * dataframe's ~18 columns) renders complete, while a pathological one (a
+ * spilled set whose `fullRows` reach {@link MAX_SPILLOVER_ROWS}; a genotype
+ * matrix's 500,000 variant columns) caps instead of emitting megabytes into
+ * `content[]`. Mirrors {@link MAX_INLINE_JSON}'s size-aware philosophy; a
+ * hardcoded top-N did neither job well.
+ *
+ * Applied only to lines whose omitted entries stay retrievable elsewhere —
+ * never to a line that is the sole carrier of a mapping (see
+ * `renderDataframeHandle`'s `renamedColumns`).
+ */
+const MAX_LIST_LINE = 400;
+
+/**
+ * Join `parts` with `, ` until `budget` characters are consumed. Always emits
+ * at least one part — a line naming no value carries less than one that
+ * overruns the budget slightly. Returns the rendered prefix plus how many parts
+ * were left out, so callers can append their own recovery hint.
+ */
+function joinWithinBudget(
+  parts: readonly string[],
+  budget: number,
+): { omitted: number; text: string } {
+  const shown: string[] = [];
+  let remaining = budget;
+  for (const part of parts) {
+    if (shown.length > 0 && part.length + 2 > remaining) break;
+    shown.push(part);
+    remaining -= part.length + 2;
+  }
+  return { text: shown.join(', '), omitted: parts.length - shown.length };
+}
+
+/**
+ * Name where a capped distribution's remaining entries can actually be read.
+ * When the result spilled, the dataframe holds every row the distribution was
+ * computed from, so aggregating there reconstructs it in full — a path a
+ * content-only client can take. Without a dataframe there is nothing to point
+ * at but `structuredContent`, which those clients cannot read; that residual
+ * is only reachable when a small result set carries a very high-cardinality
+ * field.
+ *
+ * Deliberately does not emit a `GROUP BY` snippet: distribution accessors may
+ * explode array-valued fields (`find_studies.seasons`), so a per-field
+ * `GROUP BY` would return per-array-literal counts rather than the exploded
+ * distribution it claims to reconstruct.
+ */
+function distributionRecoveryHint(dataframe: DataframeHandle | undefined): string {
+  return dataframe
+    ? ` — aggregate dataframe \`${dataframe.tableName}\` with brapi_dataframe_query for the full distribution`
+    : ' (see structuredContent.distributions)';
+}
+
+/**
+ * Render a distributions block in markdown. Pass the `find_*` result's
+ * dataframe handle (when it spilled): a truncation caveat is prepended when the
+ * dataframe hit a row cap, and capped lines point at the dataframe as the
+ * content-visible path to the remaining entries.
  */
 export function renderDistributions(
   distributions: Record<string, Record<string, number>>,
-  truncated?: { truncated: boolean; rowCount: number; totalCount: number },
+  dataframe?: DataframeHandle,
 ): string {
   const lines: string[] = [];
-  if (truncated?.truncated) {
+  if (dataframe?.truncated) {
     lines.push(
-      `_Computed over ${truncated.rowCount} of ${truncated.totalCount} upstream rows — narrow filters or raise loadLimit for a representative sample._`,
+      `_Computed over ${dataframe.rowCount} of ${dataframe.totalCount ?? dataframe.rowCount} upstream rows — narrow filters or raise loadLimit for a representative sample._`,
     );
   }
   for (const [field, counts] of Object.entries(distributions)) {
     const entries = Object.entries(counts);
     if (entries.length === 0) continue;
-    const summary = entries
-      .slice(0, 5)
-      .map(([value, count]) => `${value} (${count})`)
-      .join(', ');
-    const suffix = entries.length > 5 ? `, …+${entries.length - 5} more` : '';
-    lines.push(`- **${field}:** ${summary}${suffix}`);
+    const { text, omitted } = joinWithinBudget(
+      entries.map(([value, count]) => `${value} (${count})`),
+      MAX_LIST_LINE,
+    );
+    const suffix = omitted > 0 ? `, …+${omitted} more${distributionRecoveryHint(dataframe)}` : '';
+    lines.push(`- **${field}:** ${text}${suffix}`);
   }
   return lines.join('\n');
-}
-
-/**
- * Project a `DataframeHandle | undefined` to the `truncated` metadata shape
- * expected by `renderDistributions`. Returns `undefined` when no dataframe is
- * present or when the dataframe was not truncated, so the caller doesn't need
- * to guard — just pass the result straight through.
- */
-export function truncationMeta(
-  dataframe: DataframeHandle | undefined,
-): { truncated: boolean; rowCount: number; totalCount: number } | undefined {
-  if (!dataframe?.truncated) return;
-  return {
-    truncated: true,
-    rowCount: dataframe.rowCount,
-    totalCount: dataframe.totalCount ?? dataframe.rowCount,
-  };
 }
 
 export interface LoadedRows<T> {
@@ -798,12 +839,27 @@ export type DataframeHandle = z.infer<typeof DataframeHandleSchema>;
  * format. Centralized so the truncated/maxRows fields surface consistently.
  * `expiresAt` is paired with a human-readable `expires in Xh / Xd` so the
  * agent doesn't have to subtract dates to know when the handle goes stale.
+ *
+ * This is a *summary* surface — it is not the authoritative carrier of the
+ * schema, so `columns` is budgeted: it costs megabytes on a wide pivot (a
+ * genotype matrix reaches 500,000 variant columns) while
+ * `brapi_dataframe_describe` lists the full schema on demand, uncapped, from
+ * `content[]`. `renamedColumns` is deliberately NOT budgeted — it is the only
+ * mapping from a sanitized column back to its upstream key, with no describe
+ * or re-call path behind it, and capping the sole decoder is the same defect as
+ * capping the tool-level variant legend. It stays bounded in practice anyway:
+ * real upstream rows carry at most a key or two needing a rename, and the two
+ * matrix pivots pre-sanitize their keys before registration, so the field never
+ * populates for them at all.
  */
 export function renderDataframeHandle(handle: DataframeHandle): string[] {
+  const { text: columns, omitted } = joinWithinBudget(handle.columns, MAX_LIST_LINE);
+  const columnsSuffix =
+    omitted > 0 ? `, …+${omitted} more — brapi_dataframe_describe lists the full schema` : '';
   const lines = [
     `- tableName: \`${handle.tableName}\` (query via brapi_dataframe_query)`,
     `- rowCount: ${handle.rowCount}`,
-    `- columns: ${handle.columns.join(', ')}`,
+    `- columns: ${columns}${columnsSuffix}`,
     `- createdAt: ${handle.createdAt}`,
     `- expiresAt: ${handle.expiresAt} (${formatExpiresIn(handle.expiresAt)})`,
   ];
@@ -1445,31 +1501,43 @@ export function buildRefinementHint(
 }
 
 /**
- * Inline JSON over this many characters renders as a `<N keys, Xkb — see
- * structuredContent>` placeholder instead of the raw stringified value. Picked
- * to keep a single bulleted row under one display line while still showing
- * small objects (`{traitDbId: "...", traitName: "..."}`) inline. Structured
- * clients (Codex Desktop) still receive the full object via
- * `structuredContent.results[]`; this cap only affects the `content[]` text
- * surface that Claude Desktop reads.
+ * Inline JSON over this many characters renders as a `<N keys, Xkb — …>`
+ * placeholder instead of the raw stringified value. Picked to keep a single
+ * bulleted row under one display line while still showing small objects
+ * (`{traitDbId: "...", traitName: "..."}`) inline. Rendering every oversized
+ * value in full is not an option at the row scale these helpers run at — a
+ * `loadLimit`-sized page of GeoJSON-heavy rows reaches megabytes, and
+ * `content[]` carries it a second time on top of `structuredContent`.
  */
 const MAX_INLINE_JSON = 240;
 
 /**
  * Render a value for the row/line passthrough surface. Scalars are stringified
  * via `String(value)`; objects/arrays are JSON-encoded and replaced with a
- * size-aware placeholder when they exceed `MAX_INLINE_JSON`.
+ * size-aware placeholder when they exceed {@link MAX_INLINE_JSON}.
+ *
+ * When the caller's result spilled, the placeholder names the dataframe rather
+ * than `structuredContent`. That matters for correctness, not just wording:
+ * the dataframe stores the value untruncated (object-shaped columns register
+ * as DuckDB `JSON` and round-trip through `JSON.stringify`), and
+ * `brapi_dataframe_query` reaches it from a content-only client — which
+ * `structuredContent` never does. Callers whose rows are not in a dataframe
+ * (the `get_*` detail tools, `get_germplasm`'s parent/attribute companions)
+ * must pass nothing: pointing those at a dataframe would name a table that
+ * does not contain the record.
  */
-function renderPassthroughValue(value: unknown): string {
+function renderPassthroughValue(value: unknown, dataframe?: DataframeHandle): string {
   if (typeof value !== 'object') return String(value);
   const json = JSON.stringify(value);
   if (json.length <= MAX_INLINE_JSON) return json;
   const kb = (json.length / 1024).toFixed(1);
-  if (Array.isArray(value)) {
-    return `<${value.length} entries, ${kb}KB — see structuredContent>`;
-  }
-  const keyCount = Object.keys(value as Record<string, unknown>).length;
-  return `<${keyCount} keys, ${kb}KB — see structuredContent>`;
+  const size = Array.isArray(value)
+    ? `${value.length} entries`
+    : `${Object.keys(value as Record<string, unknown>).length} keys`;
+  const where = dataframe
+    ? `query \`${dataframe.tableName}\` via brapi_dataframe_query`
+    : 'see structuredContent';
+  return `<${size}, ${kb}KB — ${where}>`;
 }
 
 /**
@@ -1478,16 +1546,22 @@ function renderPassthroughValue(value: unknown): string {
  * structuredContent parity — server fields beyond the declared schema are
  * still emitted to text-only clients (Claude Desktop sees content[] only).
  * Large nested objects (over `MAX_INLINE_JSON` chars when stringified) collapse
- * to a size-aware placeholder; the full payload remains in `structuredContent`.
+ * to a size-aware placeholder.
+ *
+ * `dataframe` is the calling `find_*` result's handle, when it spilled — the
+ * rows rendered inline are a prefix of the rows it holds, so the placeholder
+ * can name it as the retrieval path. Omit it for records the dataframe does
+ * not contain.
  */
 export function collectPassthroughParts(
   row: Record<string, unknown>,
   renderedKeys: ReadonlySet<string>,
+  dataframe?: DataframeHandle,
 ): string[] {
   const parts: string[] = [];
   for (const [key, value] of Object.entries(row)) {
     if (renderedKeys.has(key) || value === undefined || value === null) continue;
-    parts.push(`${key}=${renderPassthroughValue(value)}`);
+    parts.push(`${key}=${renderPassthroughValue(value, dataframe)}`);
   }
   return parts;
 }
@@ -1498,6 +1572,15 @@ export function collectPassthroughParts(
  * `collectPassthroughParts` for detail-view (get_*) tools that use a
  * line-per-field layout instead of bullet-part lists. Honors the same inline
  * JSON cap.
+ *
+ * Takes no dataframe: its three callers (`get_study`, `get_germplasm`,
+ * `get_image`) fetch a single record by ID and never register one, so an
+ * oversized field on those tools still resolves only to `structuredContent`.
+ * Re-calling the sibling `get_*` tool is not a recovery path for a `find_*`
+ * row either — that lands back on this helper and re-renders the same
+ * placeholder. Closing that gap needs a mechanism these helpers do not have
+ * (see the `outline-on-overflow` technique, which suits the single-document
+ * shape of the `get_*` tools).
  */
 export function appendPassthroughLines(
   lines: string[],
