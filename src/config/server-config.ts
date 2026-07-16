@@ -20,6 +20,17 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
  */
 export const GENOTYPE_CALLS_MAX_PULL_CEILING = 500_000;
 
+/**
+ * Absolute upper bound on `genotypeMatrixMaxColumns`, and therefore on any
+ * caller-supplied `maxColumns` override to `brapi_export_genotype_matrix`. A
+ * matrix's distinct-variant column count can never exceed the genotype-call
+ * pull it is derived from, so it shares {@link GENOTYPE_CALLS_MAX_PULL_CEILING}'s
+ * absolute ceiling; the tool input schema bounds against this constant rather
+ * than restating the literal, keeping the advertised input range and the
+ * deployment ceiling from drifting apart.
+ */
+export const GENOTYPE_MATRIX_MAX_COLUMNS_CEILING = 500_000;
+
 export const ServerConfigSchema = z.object({
   defaultBaseUrl: z
     .preprocess(
@@ -139,6 +150,15 @@ export const ServerConfigSchema = z.object({
     .describe(
       'Hard ceiling on rows pulled from the upstream BrAPI server in a single brapi_find_genotype_calls or brapi_export_genotype_matrix invocation. Bounds total page count per query — protects the upstream from unbounded pagination loops. brapi_export_genotype_matrix accepts a maxCalls override but clamps it to this value, so the ceiling holds regardless of caller input. Default 100,000 (≈10 pages at the standard pageSize=10,000); maximum 500,000 (≈50 pages, matching the per-query budget of other find_* tools).',
     ),
+  genotypeMatrixMaxColumns: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(GENOTYPE_MATRIX_MAX_COLUMNS_CEILING)
+    .default(10_000)
+    .describe(
+      'Hard ceiling on the number of distinct variant columns brapi_export_genotype_matrix pivots into a single germplasm × variant matrix. Bounds the wide canvas dataframe, the variantColumnLegend, and any VCF/PLINK serialization — all of which scale with column count independently of the row (call) pull cap. A schema-legal skew (one germplasm × many variants) can otherwise drive the column count to the full genotypeCallsMaxPull budget and emit a multi-megabyte legend. brapi_export_genotype_matrix accepts a maxColumns override but clamps it to this value, so the ceiling holds regardless of caller input. Default 10,000 (legend ≈ 250 KB) — an order of magnitude below genotypeCallsMaxPull; maximum 500,000. Raise it only when a wide panel genuinely needs more variant columns inline.',
+    ),
 
   canvasDropEnabled: z
     .stringbool()
@@ -202,6 +222,7 @@ export function getServerConfig(): ServerConfig {
     allowPrivateIps: 'BRAPI_ALLOW_PRIVATE_IPS',
     enableWrites: 'BRAPI_ENABLE_WRITES',
     genotypeCallsMaxPull: 'BRAPI_GENOTYPE_CALLS_MAX_PULL',
+    genotypeMatrixMaxColumns: 'BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS',
     canvasDropEnabled: 'BRAPI_CANVAS_DROP_ENABLED',
     exportDir: 'BRAPI_EXPORT_DIR',
     canvasMaxRows: 'BRAPI_CANVAS_MAX_ROWS',

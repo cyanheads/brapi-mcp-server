@@ -48,6 +48,15 @@ describe('ServerConfigSchema defaults', () => {
     );
   });
 
+  it('defaults genotypeMatrixMaxColumns to 10000 with a 500000 ceiling', () => {
+    const config = ServerConfigSchema.parse({});
+    expect(config.genotypeMatrixMaxColumns).toBe(10_000);
+    expect(() => ServerConfigSchema.parse({ genotypeMatrixMaxColumns: 500_001 })).toThrow();
+    expect(
+      ServerConfigSchema.parse({ genotypeMatrixMaxColumns: 500_000 }).genotypeMatrixMaxColumns,
+    ).toBe(500_000);
+  });
+
   it('defaults the gated tools off (canvasDropEnabled, enableWrites)', () => {
     const config = ServerConfigSchema.parse({});
     expect(config.canvasDropEnabled).toBe(false);

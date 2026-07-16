@@ -31,7 +31,11 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { GENOTYPE_CALLS_MAX_PULL_CEILING, getServerConfig } from '@/config/server-config.js';
+import {
+  GENOTYPE_CALLS_MAX_PULL_CEILING,
+  GENOTYPE_MATRIX_MAX_COLUMNS_CEILING,
+  getServerConfig,
+} from '@/config/server-config.js';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge, type RegisterDataframeInput } from '@/services/canvas-bridge/index.js';
@@ -127,7 +131,9 @@ const OutputSchema = z.object({
     ),
   truncated: z
     .boolean()
-    .describe('True when the call pull was capped before exhausting upstream data.'),
+    .describe(
+      'True when the matrix is not the complete upstream result — either the call pull hit the row ceiling (BRAPI_GENOTYPE_CALLS_MAX_PULL) or the distinct-variant count hit the column ceiling (BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS). `warnings` names which ceiling fired.',
+    ),
   warnings: z.array(z.string()).describe('Advisory messages (truncation, missing fields, etc.).'),
 });
 
@@ -187,6 +193,15 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       .describe(
         'Lower the pull cap for this call. Omit to use the deployment ceiling (BRAPI_GENOTYPE_CALLS_MAX_PULL). Cannot raise it: a value above the deployment ceiling is clamped down to it and the effective cap is reported in `warnings`.',
       ),
+    maxColumns: z
+      .number()
+      .int()
+      .positive()
+      .max(GENOTYPE_MATRIX_MAX_COLUMNS_CEILING)
+      .optional()
+      .describe(
+        'Lower the distinct-variant column cap for this call. Omit to use the deployment ceiling (BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS). Cannot raise it: a value above the deployment ceiling is clamped down to it. When the variant set resolves more distinct variants than the effective cap, the matrix is capped at that many variant columns, `truncated` is set, and the effective cap is reported in `warnings`. Independent of `maxCalls`, which bounds the row (call) pull.',
+      ),
   }),
   output: OutputSchema,
 
@@ -232,6 +247,20 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       );
     }
 
+    // Same deployment-ceiling-wins shape as `maxCalls`, on the orthogonal axis:
+    // `maxCalls` bounds the rows pulled, `maxColumns` bounds the distinct-variant
+    // columns those rows pivot into. Nothing constrains the germplasm-to-variant
+    // ratio, so a schema-legal skew (one germplasm × `maxCalls` variants) would
+    // otherwise drive `columnCount` — and the variantColumnLegend, the wide
+    // dataframe, and the vcf/ped/map text with it — to the full call budget.
+    const requestedMaxColumns = input.maxColumns ?? config.genotypeMatrixMaxColumns;
+    const maxColumns = Math.min(requestedMaxColumns, config.genotypeMatrixMaxColumns);
+    if (maxColumns < requestedMaxColumns) {
+      warnings.push(
+        `maxColumns=${requestedMaxColumns} exceeds this deployment's genotype-matrix column ceiling (BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS=${config.genotypeMatrixMaxColumns}); the matrix is capped at ${maxColumns} variant columns. See \`truncated\`.`,
+      );
+    }
+
     const searchOpts: Parameters<typeof buildCallsSearchBody>[0] = {
       variantSetDbId: input.variantSetDbId,
     };
@@ -256,7 +285,16 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     });
 
     // Build the pivot matrix plus the structured data the text encoders need.
-    const matrix = buildMatrix(collected.rows, collected.callFormatting);
+    // The column cap is applied *inside* the pivot loop (net-new variants past
+    // `maxColumns` are skipped as rows stream in), so the over-wide legend and
+    // matrix are never materialized then trimmed — a true resource bound, not
+    // post-hoc waste.
+    const matrix = buildMatrix(collected.rows, collected.callFormatting, maxColumns);
+    if (matrix.columnsTruncated) {
+      warnings.push(
+        `The variant set resolved more than ${maxColumns} distinct variants; the matrix was capped at ${maxColumns} variant columns (BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS) and the remaining variants were dropped. Every germplasm is still present — one whose calls all fall in the dropped variants appears as an all-null row. Narrow germplasmDbIds or the variant set and re-pull to capture the rest.`,
+      );
+    }
 
     // Register the wide matrix as a canvas dataframe (used by all three formats).
     const registerInput: RegisterDataframeInput = {
@@ -265,8 +303,14 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       query: searchBody,
       rows: matrix.matrixRows,
     };
-    if (collected.truncated) {
+    // A column cap leaves the dataframe incomplete too — flag it so a reader who
+    // inspects the handle without reading `warnings` doesn't take the matrix as
+    // whole. `maxRows` stays row-scoped: it's set only when the call pull hit the
+    // row ceiling, never for a pure column cap (which doesn't reduce row count).
+    if (collected.truncated || matrix.columnsTruncated) {
       registerInput.truncated = true;
+    }
+    if (collected.truncated) {
       registerInput.maxRows = maxCalls;
     }
     const dfResult = await bridge.registerDataframe(ctx, registerInput);
@@ -305,7 +349,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       variantColumnLegend: matrix.variantColumnLegend,
       callFormatting: collected.callFormatting,
       dataframe: dataframeHandle,
-      truncated: collected.truncated,
+      truncated: collected.truncated || matrix.columnsTruncated,
       warnings,
     };
     if (vcf !== undefined) result.vcf = vcf;
@@ -321,7 +365,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     lines.push(
       `# Genotype matrix — ${result.format} — ${result.rowCount} germplasm × ${result.columnCount} variants — \`${result.alias}\``,
     );
-    if (result.truncated) lines.push('> **Truncated** at pull cap. See `warnings` for details.');
+    if (result.truncated) lines.push('> **Truncated.** See `warnings` for which cap fired.');
     lines.push('');
 
     lines.push('## Dataframe');
@@ -429,8 +473,10 @@ function renderTextPreview(opts: {
 // ---------------------------------------------------------------------------
 
 interface MatrixBuildResult {
-  /** Number of distinct variant columns. */
+  /** Number of distinct variant columns (≤ the `maxColumns` cap). */
   columnCount: number;
+  /** True when distinct variants exceeded `maxColumns` and net-new ones were dropped. */
+  columnsTruncated: boolean;
   /** sample → variantDbId → rendered genotype string. */
   genotypeAt: Map<string, Map<string, string>>;
   /** Wide rows registered as the canvas dataframe (one per sample). */
@@ -451,26 +497,52 @@ interface MatrixBuildResult {
  *
  * Row identity: `callSetDbId` (preferred) or `callSetName`, else `'unknown'`.
  * Variant identity: `variantDbId` (preferred) or `variantName`.
+ *
+ * `maxColumns` bounds the distinct-variant column count only — never the
+ * germplasm rows. Every germplasm seen in any row is registered as a matrix
+ * row; the cap drops variant *columns*, not rows. The cap is enforced as rows
+ * stream in: once `maxColumns` distinct variants have been seen, a row
+ * introducing a *net-new* variant contributes no column and no stored genotype,
+ * but its germplasm is still registered first. A germplasm whose calls all
+ * reference beyond-cap variants therefore renders as an honest all-null row —
+ * present, empty in the kept columns — never a vanished row. This stays a
+ * resource bound: the over-wide legend and per-column genotype cells are never
+ * built, not built-then-trimmed.
  */
-function buildMatrix(rows: CallRow[], callFormatting: CallFormatting): MatrixBuildResult {
+function buildMatrix(
+  rows: CallRow[],
+  callFormatting: CallFormatting,
+  maxColumns: number,
+): MatrixBuildResult {
   const variantSeen = new Set<string>();
   const variantIdOrder: string[] = [];
   const sampleSeen = new Set<string>();
   const sampleOrder: string[] = [];
   const sampleLabels: Record<string, string> = {};
   const genotypeAt = new Map<string, Map<string, string>>();
+  let columnsTruncated = false;
 
   for (const row of rows) {
     const vid = row.variantDbId ?? row.variantName ?? 'unknown_variant';
-    if (!variantSeen.has(vid)) {
-      variantSeen.add(vid);
-      variantIdOrder.push(vid);
-    }
+    // Register the germplasm (sample) on its first appearance, BEFORE the
+    // variant-cap check below. Gating registration on a kept variant would drop
+    // the entire row of any germplasm whose calls all reference beyond-cap
+    // variants — silent row loss under germplasm-major, disjoint coverage (the
+    // common Breedbase /search/calls shape). It must still appear, empty in the
+    // kept columns.
     const sampleKey = row.callSetDbId ?? row.callSetName ?? 'unknown';
     if (!sampleSeen.has(sampleKey)) {
       sampleSeen.add(sampleKey);
       sampleOrder.push(sampleKey);
       sampleLabels[sampleKey] = row.callSetName ?? sampleKey;
+    }
+    if (!variantSeen.has(vid)) {
+      if (variantIdOrder.length >= maxColumns) {
+        columnsTruncated = true;
+        continue;
+      }
+      variantSeen.add(vid);
+      variantIdOrder.push(vid);
     }
     const gt = renderGenotypeString(row, callFormatting);
     let byVariant = genotypeAt.get(sampleKey);
@@ -498,6 +570,7 @@ function buildMatrix(rows: CallRow[], callFormatting: CallFormatting): MatrixBui
     matrixRows,
     variantColumnLegend,
     columnCount: variantIdOrder.length,
+    columnsTruncated,
     variantIdOrder,
     sampleOrder,
     sampleLabels,

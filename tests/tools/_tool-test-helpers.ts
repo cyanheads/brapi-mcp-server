@@ -48,6 +48,7 @@ export const TEST_CONFIG: ServerConfig = {
   allowPrivateIps: false,
   enableWrites: false,
   genotypeCallsMaxPull: 100_000,
+  genotypeMatrixMaxColumns: 10_000,
   canvasDropEnabled: false,
   canvasMaxRows: 10_000,
   canvasQueryTimeoutMs: 30_000,

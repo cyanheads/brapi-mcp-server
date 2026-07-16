@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.8-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.9-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
 </div>
 
@@ -60,7 +60,7 @@
 | `brapi_dataframe_export` | _Opt-in via `BRAPI_EXPORT_DIR=<path>`, stdio-only._ Export a dataframe to disk (CSV / Parquet / JSON) under the configured directory and return the absolute path for the human to open. Optional `columns` projection or `sql` filter materializes a derived table for the export, dropped after. |
 | `brapi_build_phenotype_matrix` | Build a germplasm × trait matrix from one or more studies and materialize it as a canvas dataframe. Supports wide (pivot) or long shape with configurable per-cell aggregation. |
 | `brapi_germplasm_performance` | Per-variable performance aggregates (n, mean, median, sd, min, max, studyCount) for a single germplasm across all studies where it has observations. |
-| `brapi_export_genotype_matrix` | Export genotype calls for a variant set as a germplasm × variant canvas dataframe; also serializes to VCF-lite or PLINK `.ped`/`.map` text. |
+| `brapi_export_genotype_matrix` | Export genotype calls for a variant set as a germplasm × variant canvas dataframe; also serializes to VCF-lite or PLINK `.ped`/`.map` text. Distinct-variant columns bounded by `BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS` (default 10k, max 500k). |
 
 ### Write (opt-in: `BRAPI_ENABLE_WRITES=true`)
 
@@ -219,6 +219,7 @@ Every variable is optional.
 | `BRAPI_ALLOW_PRIVATE_IPS` | Allow RFC 1918 / loopback targets. Dev-only. | `false` |
 | `BRAPI_ENABLE_WRITES` | Opt-in for `brapi_submit_observations` registration. | `false` |
 | `BRAPI_GENOTYPE_CALLS_MAX_PULL` | Upstream row ceiling per `brapi_find_genotype_calls` invocation. Max 500,000. | `100000` |
+| `BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS` | Distinct-variant column ceiling per `brapi_export_genotype_matrix` matrix — bounds the wide dataframe, the `variantColumnLegend`, and any VCF/PLINK text (all scale with column count, independent of the row pull). A `maxColumns` input may lower it, not raise it. Max 500,000. | `10000` |
 | `BRAPI_CANVAS_DROP_ENABLED` | Opt-in for `brapi_dataframe_drop` registration. Off by default; dataframes expire via TTL when left unmanaged. | `false` |
 | `BRAPI_EXPORT_DIR` | Directory for `brapi_dataframe_export` output files. Setting a path is the opt-in (no separate enable flag); unset leaves the tool out of `tools/list`. Stdio-only — the tool stays disabled under HTTP transport regardless of this value. Bridged to the framework's `CANVAS_EXPORT_PATH` automatically. | — |
 | `BRAPI_CANVAS_MAX_ROWS` / `BRAPI_CANVAS_QUERY_TIMEOUT_MS` | Per-query response row cap and wall-clock timeout for `brapi_dataframe_query`. | `10000` / `30000` |

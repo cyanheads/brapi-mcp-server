@@ -541,6 +541,119 @@ describe('brapi_export_genotype_matrix tool', () => {
     ).not.toThrow();
   });
 
+  it('clamps columnCount to the deployment ceiling on a skewed one-germplasm pull', async () => {
+    vi.stubEnv('BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS', '2');
+    const ctx = await connect(fetcher);
+    // The schema-legal skew #46 bounds: one germplasm × five distinct variants.
+    const rows = Array.from({ length: 5 }, (_, i) =>
+      call({ callSetDbId: 'cs-1', variantDbId: `v-${i + 1}` }),
+    );
+    fetcher.mockResolvedValueOnce(jsonResponse(envelope({ data: rows })));
+
+    const result = await brapiExportGenotypeMatrix.handler(
+      brapiExportGenotypeMatrix.input.parse({
+        variantSetDbId: 'vset-1',
+        format: 'matrix-json',
+      }),
+      ctx,
+    );
+
+    // Distinct variants (5) exceed the column ceiling (2) → capped, not 5.
+    expect(result.columnCount).toBe(2);
+    expect(Object.keys(result.variantColumnLegend)).toHaveLength(2);
+    expect(result.truncated).toBe(true);
+    expect(result.dataframe.truncated).toBe(true);
+    // `maxRows` stays row-scoped — a pure column cap never sets it.
+    expect(result.dataframe.maxRows).toBeUndefined();
+    expect(result.warnings.some((w) => w.includes('more than 2 distinct variants'))).toBe(true);
+    // The single germplasm row survives; only beyond-cap variant columns drop.
+    expect(result.rowCount).toBe(1);
+    expect(result.dataframe.columns).toContain('germplasmDbId');
+  });
+
+  it('preserves every germplasm row when a germplasm covers only beyond-cap variants (#46)', async () => {
+    const ctx = await connect(fetcher);
+    // Germplasm-major order with disjoint variant coverage — the common
+    // Breedbase /search/calls shape. cs-1 fills the 2-column cap (v-1, v-2);
+    // cs-2's calls reference ONLY v-3/v-4, both net-new after the cap filled.
+    // cs-2 must still appear — as an all-null row — not vanish from the matrix.
+    const rows = [
+      call({ callSetDbId: 'cs-1', callSetName: 'G1', variantDbId: 'v-1' }),
+      call({ callSetDbId: 'cs-1', callSetName: 'G1', variantDbId: 'v-2' }),
+      call({ callSetDbId: 'cs-2', callSetName: 'G2', variantDbId: 'v-3' }),
+      call({ callSetDbId: 'cs-2', callSetName: 'G2', variantDbId: 'v-4' }),
+    ];
+    fetcher.mockResolvedValueOnce(jsonResponse(envelope({ data: rows })));
+
+    const result = await brapiExportGenotypeMatrix.handler(
+      brapiExportGenotypeMatrix.input.parse({
+        variantSetDbId: 'vset-1',
+        format: 'matrix-json',
+        maxColumns: 2,
+      }),
+      ctx,
+    );
+
+    // Both germplasm survive — the point of the fix. Pre-fix, cs-2 (whose calls
+    // all hit the beyond-cap `continue`) was never registered, so rowCount was 1
+    // and its entire row silently disappeared.
+    expect(result.rowCount).toBe(2);
+    expect(result.dataframe.rowCount).toBe(2);
+    // Columns are capped to the kept variants only; v-3/v-4 are dropped.
+    expect(result.columnCount).toBe(2);
+    expect(Object.keys(result.variantColumnLegend)).toHaveLength(2);
+    expect(Object.values(result.variantColumnLegend)).toContain('v-1');
+    expect(Object.values(result.variantColumnLegend)).toContain('v-2');
+    expect(Object.values(result.variantColumnLegend)).not.toContain('v-3');
+    expect(Object.values(result.variantColumnLegend)).not.toContain('v-4');
+    // The cap still trips the truncation flags.
+    expect(result.truncated).toBe(true);
+    expect(result.dataframe.truncated).toBe(true);
+  });
+
+  it('honors a maxColumns that lowers the cap below the ceiling, without a clamp warning', async () => {
+    vi.stubEnv('BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS', '10000');
+    const ctx = await connect(fetcher);
+    const rows = Array.from({ length: 5 }, (_, i) =>
+      call({ callSetDbId: 'cs-1', variantDbId: `v-${i + 1}` }),
+    );
+    fetcher.mockResolvedValueOnce(jsonResponse(envelope({ data: rows })));
+
+    const result = await brapiExportGenotypeMatrix.handler(
+      brapiExportGenotypeMatrix.input.parse({
+        variantSetDbId: 'vset-1',
+        format: 'matrix-json',
+        maxColumns: 2,
+      }),
+      ctx,
+    );
+
+    expect(result.columnCount).toBe(2);
+    expect(result.truncated).toBe(true);
+    // A caller-lowered cap is not a deployment-ceiling breach — no clamp warning.
+    expect(result.warnings.some((w) => w.includes('exceeds this deployment'))).toBe(false);
+    // ...but the genuine column-truncation warning still fires.
+    expect(result.warnings.some((w) => w.includes('distinct variants'))).toBe(true);
+  });
+
+  it('rejects a maxColumns above the absolute ceiling at Zod parse', () => {
+    expect(() =>
+      brapiExportGenotypeMatrix.input.parse({
+        variantSetDbId: 'vset-1',
+        format: 'matrix-json',
+        maxColumns: 500_001,
+      }),
+    ).toThrow();
+    // The ceiling itself stays accepted.
+    expect(() =>
+      brapiExportGenotypeMatrix.input.parse({
+        variantSetDbId: 'vset-1',
+        format: 'matrix-json',
+        maxColumns: 500_000,
+      }),
+    ).not.toThrow();
+  });
+
   it('format(): renders every column remapping, not just the first 20', () => {
     const legend = Object.fromEntries(
       Array.from({ length: 30 }, (_, i) => [`v_variant_${i}`, `variant-${i}`]),
