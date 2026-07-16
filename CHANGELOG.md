@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.10](changelog/0.7.x/0.7.10.md) — 2026-07-16
+
+brapi_germplasm_performance and brapi_build_phenotype_matrix now pull per-study observations in bounded-concurrency batches sized by BRAPI_MAX_CONCURRENT_REQUESTS (default 4, previously inert) instead of serially; outcomes reassemble in input order, so matrix column/row order and each tool's failure behavior are unchanged.
+
 ## [0.7.9](changelog/0.7.x/0.7.9.md) — 2026-07-16
 
 brapi_export_genotype_matrix bounds distinct-variant columns via a new maxColumns input and BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS ceiling while keeping every germplasm row; brapi_dataframe_describe budgets its per-column listing and points overflow at brapi_dataframe_query.

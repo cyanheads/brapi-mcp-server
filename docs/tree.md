@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-07-16 09:39:42
+Generated on: 2026-07-16 20:37:54
 
 ```text
 brapi-mcp-server/
@@ -267,6 +267,7 @@ brapi-mcp-server/
 │   ├── tools/
 │   │   ├── shared/
 │   │   │   ├── find-helpers.test.ts
+│   │   │   ├── observations.test.ts
 │   │   │   └── orientation-envelope.test.ts
 │   │   ├── _tool-test-helpers.ts
 │   │   ├── brapi-build-phenotype-matrix.tool.test.ts
