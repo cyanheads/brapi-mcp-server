@@ -11,6 +11,15 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
+/**
+ * Absolute upper bound on `genotypeCallsMaxPull`, and therefore on any
+ * caller-supplied `maxCalls` override. No deployment can configure a ceiling
+ * above this, so a tool input above it can never be honored — the input schemas
+ * bound against this constant rather than restating the literal, keeping the
+ * advertised input range and the deployment ceiling from drifting apart.
+ */
+export const GENOTYPE_CALLS_MAX_PULL_CEILING = 500_000;
+
 export const ServerConfigSchema = z.object({
   defaultBaseUrl: z
     .preprocess(
@@ -125,10 +134,10 @@ export const ServerConfigSchema = z.object({
     .number()
     .int()
     .positive()
-    .max(500_000)
+    .max(GENOTYPE_CALLS_MAX_PULL_CEILING)
     .default(100_000)
     .describe(
-      'Hard ceiling on rows pulled from the upstream BrAPI server in a single brapi_find_genotype_calls invocation. Bounds total page count per query — protects the upstream from unbounded pagination loops. Default 100,000 (≈10 pages at the standard pageSize=10,000); maximum 500,000 (≈50 pages, matching the per-query budget of other find_* tools).',
+      'Hard ceiling on rows pulled from the upstream BrAPI server in a single brapi_find_genotype_calls or brapi_export_genotype_matrix invocation. Bounds total page count per query — protects the upstream from unbounded pagination loops. brapi_export_genotype_matrix accepts a maxCalls override but clamps it to this value, so the ceiling holds regardless of caller input. Default 100,000 (≈10 pages at the standard pageSize=10,000); maximum 500,000 (≈50 pages, matching the per-query budget of other find_* tools).',
     ),
 
   canvasDropEnabled: z

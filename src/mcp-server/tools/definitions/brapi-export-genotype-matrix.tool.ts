@@ -31,7 +31,7 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getServerConfig } from '@/config/server-config.js';
+import { GENOTYPE_CALLS_MAX_PULL_CEILING, getServerConfig } from '@/config/server-config.js';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge, type RegisterDataframeInput } from '@/services/canvas-bridge/index.js';
@@ -69,7 +69,7 @@ interface VariantMeta {
 const MAX_VARIANT_METADATA_ROWS = 50_000;
 const VARIANT_METADATA_PAGE_SIZE = 1_000;
 
-/** Lines of format text shown inline in content[]; full text lives in structuredContent. */
+/** Lines of format text shown inline in content[] before the preview notice fires. */
 const FORMAT_PREVIEW_LINES = 25;
 
 // ---------------------------------------------------------------------------
@@ -182,9 +182,10 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       .number()
       .int()
       .positive()
+      .max(GENOTYPE_CALLS_MAX_PULL_CEILING)
       .optional()
       .describe(
-        'Override the deployment-level pull cap (BRAPI_GENOTYPE_CALLS_MAX_PULL). Useful for large panels where the default is too low.',
+        'Lower the pull cap for this call. Omit to use the deployment ceiling (BRAPI_GENOTYPE_CALLS_MAX_PULL). Cannot raise it: a value above the deployment ceiling is clamped down to it and the effective cap is reported in `warnings`.',
       ),
   }),
   output: OutputSchema,
@@ -215,7 +216,21 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     }
 
     const config = getServerConfig();
-    const maxCalls = input.maxCalls ?? config.genotypeCallsMaxPull;
+    const warnings: string[] = [];
+
+    // The deployment ceiling wins: `maxCalls` may lower the pull for this call
+    // but never raise it past what the operator configured. `maxCalls` is the
+    // only bound on the generated matrix — and therefore on the vcf/ped/map
+    // text and the canvas table — so an unclamped override would let a single
+    // call page far past the operator's limit and generate an artifact sized
+    // to match.
+    const requestedMaxCalls = input.maxCalls ?? config.genotypeCallsMaxPull;
+    const maxCalls = Math.min(requestedMaxCalls, config.genotypeCallsMaxPull);
+    if (maxCalls < requestedMaxCalls) {
+      warnings.push(
+        `maxCalls=${requestedMaxCalls} exceeds this deployment's genotype-call ceiling (BRAPI_GENOTYPE_CALLS_MAX_PULL=${config.genotypeCallsMaxPull}); the pull was capped at ${maxCalls} calls. Results may be truncated — see \`truncated\`.`,
+      );
+    }
 
     const searchOpts: Parameters<typeof buildCallsSearchBody>[0] = {
       variantSetDbId: input.variantSetDbId,
@@ -231,7 +246,6 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       );
     }
 
-    const warnings: string[] = [];
     const collected = await collectCalls({
       client,
       connection,
@@ -326,24 +340,36 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     if (legendEntries.length > 0) {
       const remapped = legendEntries.filter(([col, orig]) => col !== orig);
       if (remapped.length > 0) {
+        // Rendered in full: this legend is the only thing that decodes the
+        // sanitized column names back to variant IDs, and it has no dataframe
+        // or re-call path to fall back on — a cap here silently drops the
+        // decoding for columns the `## Dataframe` section above already names.
         lines.push('## Column name remappings (sanitized → original)');
-        for (const [col, orig] of remapped.slice(0, 20)) {
+        for (const [col, orig] of remapped) {
           lines.push(`- \`${col}\` → \`${orig}\``);
         }
-        if (remapped.length > 20) lines.push(`- …and ${remapped.length - 20} more`);
         lines.push('');
       }
     }
 
-    // Render the format text (preview-capped; full text is in structuredContent).
+    // Independent `if`s, never an if/else chain on `format`: the parity linter
+    // populates every output field at once, so an untaken branch would render
+    // nothing and fail the check. Render on field presence.
+    const tableName = result.dataframe.tableName;
     if (result.vcf !== undefined) {
-      lines.push(...renderTextPreview('VCF-lite', 'vcf', result.vcf));
+      lines.push(
+        ...renderTextPreview({ label: 'VCF-lite', field: 'vcf', text: result.vcf, tableName }),
+      );
     }
     if (result.map !== undefined) {
-      lines.push(...renderTextPreview('PLINK .map', 'map', result.map));
+      lines.push(
+        ...renderTextPreview({ label: 'PLINK .map', field: 'map', text: result.map, tableName }),
+      );
     }
     if (result.ped !== undefined) {
-      lines.push(...renderTextPreview('PLINK .ped', 'ped', result.ped));
+      lines.push(
+        ...renderTextPreview({ label: 'PLINK .ped', field: 'ped', text: result.ped, tableName }),
+      );
     }
 
     if (result.warnings.length > 0) {
@@ -360,16 +386,41 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
 // content[] text preview
 // ---------------------------------------------------------------------------
 
-function renderTextPreview(label: string, field: string, text: string): string[] {
-  const allLines = text.split('\n');
+/**
+ * Render a format text field as a capped preview plus a notice naming where the
+ * rest can actually be read.
+ *
+ * The text is not rendered complete on purpose: `maxCalls` bounds
+ * `rowCount × columnCount`, but nothing constrains the germplasm-to-variant
+ * ratio, so a schema-legal skew (one germplasm × `maxCalls` variants) drives a
+ * single `vcf` or `map` string to ~16MB at the 500,000 ceiling — and
+ * `content[]` would carry it a second time on top of `structuredContent`.
+ *
+ * The notice names the dataframe rather than only `structuredContent`, which
+ * content-only clients cannot read. It is registered for every format, so it
+ * always exists by the time this runs. The coordinate caveat is not hedging:
+ * the dataframe holds `{germplasmDbId, <variant columns>: genotype}` and none
+ * of the CHROM/POS/REF/ALT metadata pulled separately from `/variants`, so
+ * presenting it as a complete substitute for the text would be false.
+ */
+function renderTextPreview(opts: {
+  /** Section heading, e.g. `PLINK .map`. */
+  label: string;
+  /** Output-schema field carrying the complete text, e.g. `map`. */
+  field: string;
+  /** Dataframe holding the genotypes behind this serialization. */
+  tableName: string;
+  text: string;
+}): string[] {
+  const allLines = opts.text.split('\n');
   const preview = allLines.slice(0, FORMAT_PREVIEW_LINES);
-  const out = [`## ${label}`, '```', ...preview];
+  const out = [`## ${opts.label}`, '```', ...preview, '```'];
   if (allLines.length > FORMAT_PREVIEW_LINES) {
     out.push(
-      `… ${allLines.length - FORMAT_PREVIEW_LINES} more line(s) — full text in structuredContent.${field}`,
+      `… ${allLines.length - FORMAT_PREVIEW_LINES} more line(s) not shown. Complete text: \`structuredContent.${opts.field}\`. Every germplasm × variant genotype is also in dataframe \`${opts.tableName}\` — query it with brapi_dataframe_query; it carries genotypes only, not the CHROM/POS/REF/ALT coordinates shown above.`,
     );
   }
-  out.push('```', '');
+  out.push('');
   return out;
 }
 

@@ -36,6 +36,50 @@ function call(overrides: Record<string, unknown> = {}): Record<string, unknown> 
   };
 }
 
+/**
+ * Render `format()` over a complete, schema-valid result. Exercises the real
+ * content[] surface — the only place the preview cap and the legend live.
+ */
+function renderExport(
+  overrides: {
+    columnCount?: number;
+    dataframeTableName?: string;
+    map?: string;
+    ped?: string;
+    variantColumnLegend?: Record<string, string>;
+    vcf?: string;
+  } = {},
+): string {
+  const legend = overrides.variantColumnLegend ?? { v_1: 'v-1' };
+  const result = {
+    alias: 'default',
+    format: 'vcf-lite' as const,
+    rowCount: 1,
+    columnCount: overrides.columnCount ?? Object.keys(legend).length,
+    variantColumnLegend: legend,
+    callFormatting: {
+      expandHomozygotes: null,
+      unknownString: '.',
+      sepPhased: null,
+      sepUnphased: '/',
+    },
+    dataframe: {
+      tableName: overrides.dataframeTableName ?? 'df_AAAAA_BBBBB',
+      rowCount: 1,
+      columns: ['germplasmDbId', ...Object.keys(legend)],
+      createdAt: '2026-06-01T00:00:00.000Z',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+    },
+    truncated: false,
+    warnings: [],
+    ...(overrides.vcf !== undefined ? { vcf: overrides.vcf } : {}),
+    ...(overrides.ped !== undefined ? { ped: overrides.ped } : {}),
+    ...(overrides.map !== undefined ? { map: overrides.map } : {}),
+  };
+  const parts = brapiExportGenotypeMatrix.format(result) as { text: string }[];
+  return parts[0]!.text;
+}
+
 /** Register a default connection with /search/calls advertised. */
 async function connect(fetcher: MockFetcher, calls = ['search/calls']) {
   fetcher.mockImplementation(async (url: string) => {
@@ -432,6 +476,97 @@ describe('brapi_export_genotype_matrix tool', () => {
     // FID IID PAT MAT SEX PHENO + biallelic pairs (variant01 A/A → A A, variant02 A/G → A G)
     expect(result.ped).toBe('0\tS1\t0\t0\t0\t0\tA\tA\tA\tG');
     expect(result.vcf).toBeUndefined();
+  });
+
+  it('clamps maxCalls to the deployment ceiling and reports the effective cap', async () => {
+    vi.stubEnv('BRAPI_GENOTYPE_CALLS_MAX_PULL', '2');
+    const ctx = await connect(fetcher);
+    const rows = Array.from({ length: 5 }, (_, i) =>
+      call({ callSetDbId: `cs-${i + 1}`, variantDbId: 'v-1' }),
+    );
+    fetcher.mockResolvedValueOnce(jsonResponse(envelope({ data: rows })));
+
+    const result = await brapiExportGenotypeMatrix.handler(
+      brapiExportGenotypeMatrix.input.parse({
+        variantSetDbId: 'vset-1',
+        format: 'matrix-json',
+        maxCalls: 400_000,
+      }),
+      ctx,
+    );
+
+    // The operator's ceiling wins over the caller's override.
+    expect(result.rowCount).toBeLessThanOrEqual(2);
+    expect(result.dataframe.maxRows).toBe(2);
+    expect(result.warnings.some((w) => w.includes('BRAPI_GENOTYPE_CALLS_MAX_PULL=2'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('capped at 2 calls'))).toBe(true);
+  });
+
+  it('honors a maxCalls that lowers the pull below the ceiling, without warning', async () => {
+    vi.stubEnv('BRAPI_GENOTYPE_CALLS_MAX_PULL', '100000');
+    const ctx = await connect(fetcher);
+    const rows = Array.from({ length: 5 }, (_, i) =>
+      call({ callSetDbId: `cs-${i + 1}`, variantDbId: 'v-1' }),
+    );
+    fetcher.mockResolvedValueOnce(jsonResponse(envelope({ data: rows })));
+
+    const result = await brapiExportGenotypeMatrix.handler(
+      brapiExportGenotypeMatrix.input.parse({
+        variantSetDbId: 'vset-1',
+        format: 'matrix-json',
+        maxCalls: 3,
+      }),
+      ctx,
+    );
+
+    expect(result.rowCount).toBeLessThanOrEqual(3);
+    expect(result.warnings.some((w) => w.includes('exceeds this deployment'))).toBe(false);
+  });
+
+  it('rejects a maxCalls above the absolute ceiling at Zod parse', () => {
+    expect(() =>
+      brapiExportGenotypeMatrix.input.parse({
+        variantSetDbId: 'vset-1',
+        format: 'matrix-json',
+        maxCalls: 500_001,
+      }),
+    ).toThrow();
+    // The ceiling itself stays accepted.
+    expect(() =>
+      brapiExportGenotypeMatrix.input.parse({
+        variantSetDbId: 'vset-1',
+        format: 'matrix-json',
+        maxCalls: 500_000,
+      }),
+    ).not.toThrow();
+  });
+
+  it('format(): renders every column remapping, not just the first 20', () => {
+    const legend = Object.fromEntries(
+      Array.from({ length: 30 }, (_, i) => [`v_variant_${i}`, `variant-${i}`]),
+    );
+    const text = renderExport({ variantColumnLegend: legend, columnCount: 30 });
+    for (const [col, orig] of Object.entries(legend)) {
+      expect(text).toContain(`\`${col}\` → \`${orig}\``);
+    }
+    expect(text).not.toContain('and 10 more');
+  });
+
+  it('format(): the vcf preview notice names the dataframe and discloses the coordinate gap', () => {
+    const vcf = ['#CHROM\tPOS\tID\tREF\tALT\tS1']
+      .concat(Array.from({ length: 30 }, (_, i) => `chr1\t${i}\tvariant${i}\tA\tT\t0/1`))
+      .join('\n');
+    const text = renderExport({ vcf, dataframeTableName: 'df_QWERT_12345' });
+
+    // Named the retrieval path a content-only client can actually take...
+    expect(text).toContain('df_QWERT_12345');
+    expect(text).toContain('brapi_dataframe_query');
+    // ...without overclaiming it as a complete substitute for the text.
+    expect(text).toContain('genotypes only');
+    expect(text).toContain('CHROM/POS/REF/ALT');
+    // Still a preview — complete render is unsafe at the pull ceiling.
+    expect(text).toContain('more line(s) not shown');
+    expect(text).not.toContain('variant29');
   });
 
   it('plink: missing genotype → "0 0", absent variant coords → "0"', async () => {
