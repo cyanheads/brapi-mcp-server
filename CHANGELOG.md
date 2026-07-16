@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.9](changelog/0.7.x/0.7.9.md) — 2026-07-16
+
+brapi_export_genotype_matrix bounds distinct-variant columns via a new maxColumns input and BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS ceiling while keeping every germplasm row; brapi_dataframe_describe budgets its per-column listing and points overflow at brapi_dataframe_query.
+
 ## [0.7.8](changelog/0.7.x/0.7.8.md) — 2026-07-16
 
 brapi_germplasm_performance gains an optional studyDbIds bypass for its study-discovery cap; brapi_walk_pedigree spills node and edge sets exceeding loadLimit to two JOINable canvas dataframes; brapi_find_locations resolves free-form country names to ISO 3166-1 alpha-3 codes via a new iso-country service
