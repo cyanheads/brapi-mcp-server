@@ -129,7 +129,7 @@ type PerVariable = z.infer<typeof PerVariableSchema>;
 
 export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
   description:
-    "Aggregate a single germplasm's observations across every study it appears in, returning per-variable summary statistics (n, mean, median, sd, min, max), the contributing studies, and seasons. Study-anchored: discovers the germplasm's studies first (with a dialect-honor cross-check), then pulls observations per study — avoids the unanchored germplasm-only pull that stalls on SGN/Breedbase. For the underlying observation matrix, use brapi_build_phenotype_matrix.",
+    "Aggregate a single germplasm's observations across every study it appears in, returning per-variable summary statistics (n, mean, median, sd, min, max), the contributing studies, and seasons. Study-anchored: discovers the germplasm's studies first (with a dialect-honor cross-check, capped at 200 studies), then pulls observations per study — avoids the unanchored germplasm-only pull that stalls on SGN/Breedbase. Pass an explicit studyDbIds set to skip discovery and its 200-study cap — e.g. process a chunk of the full study list retrieved via brapi_find_studies with extraFilters.germplasmDbIds. For the underlying observation matrix, use brapi_build_phenotype_matrix.",
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -150,6 +150,12 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
   input: z.object({
     alias: AliasInput,
     germplasmDbId: z.string().min(1).describe('The germplasmDbId to summarize performance for.'),
+    studyDbIds: z
+      .array(z.string().min(1))
+      .optional()
+      .describe(
+        'Optional explicit set of studyDbIds to aggregate over. When supplied, skips automatic study discovery and its 200-study cap entirely — use it to process a specific slice of studies, e.g. the full germplasm-scoped study set retrieved via brapi_find_studies with extraFilters.germplasmDbIds. Omit to let the tool discover the germplasm’s studies automatically.',
+      ),
     variables: z
       .array(z.string())
       .optional()
@@ -182,23 +188,32 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
     const loadLimit = config.loadLimit;
     const warnings: string[] = [];
 
-    // 2. Discover the germplasm's studies (study-anchoring requirement).
-    const discovery = await discoverStudiesForGermplasm({
-      client,
-      connection,
-      dialect,
-      germplasmDbId: input.germplasmDbId,
-      ctx,
-      warnings,
-    });
-    if (discovery.studyDbIds.length === 0) {
-      warnings.push(
-        `No studies discovered for germplasm '${input.germplasmDbId}'. It may not be associated with any study on this server, or /studies does not support a germplasm filter — use brapi_build_phenotype_matrix with explicit studies instead.`,
-      );
-    } else if (discovery.studyDbIds.length >= STUDY_DISCOVERY_CAP) {
-      warnings.push(
-        `Study discovery capped at ${STUDY_DISCOVERY_CAP} studies — aggregates may be incomplete. Narrow with brapi_build_phenotype_matrix on specific studies if needed.`,
-      );
+    // 2. Determine the study set. An explicit studyDbIds set bypasses automatic
+    //    discovery (and its STUDY_DISCOVERY_CAP) entirely — e.g. a caller
+    //    feeding back a chunk of the full germplasm-scoped study list retrieved
+    //    via brapi_find_studies with extraFilters.germplasmDbIds.
+    let studyDbIds: string[];
+    if (input.studyDbIds && input.studyDbIds.length > 0) {
+      studyDbIds = [...new Set(input.studyDbIds)];
+    } else {
+      const discovery = await discoverStudiesForGermplasm({
+        client,
+        connection,
+        dialect,
+        germplasmDbId: input.germplasmDbId,
+        ctx,
+        warnings,
+      });
+      studyDbIds = discovery.studyDbIds;
+      if (studyDbIds.length === 0) {
+        warnings.push(
+          `No studies discovered for germplasm '${input.germplasmDbId}'. It may not be associated with any study on this server, or /studies does not support a germplasm filter — use brapi_build_phenotype_matrix with explicit studies instead.`,
+        );
+      } else if (studyDbIds.length >= STUDY_DISCOVERY_CAP) {
+        warnings.push(
+          `Study discovery capped at ${STUDY_DISCOVERY_CAP} studies — aggregates may be incomplete. To retrieve the full study set, call brapi_find_studies with extraFilters.germplasmDbIds set to ['${input.germplasmDbId}'] — it pages the complete germplasm-scoped study list (dataframe-backed when large) — then pass those studyDbIds back as the studyDbIds input here to aggregate the omitted slice. Or narrow with brapi_build_phenotype_matrix on specific studies.`,
+        );
+      }
     }
 
     // 3. Pull observations per study, scoped to the germplasm. Filter returned
@@ -206,7 +221,7 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
     //    correct on servers that ignore the studyDbId filter or over-return.
     const collected: NormObs[] = [];
     const wantVariables = input.variables?.length ? new Set(input.variables) : undefined;
-    for (const studyDbId of discovery.studyDbIds) {
+    for (const studyDbId of studyDbIds) {
       let studyObs: NormObs[] | null;
       try {
         studyObs = await pullStudyObservations({

@@ -233,4 +233,64 @@ describe('brapi_germplasm_performance tool', () => {
     expect(result.perVariable).toHaveLength(1);
     expect(result.perVariable[0]?.observationVariableDbId).toBe('variable1');
   });
+
+  it('bypasses study discovery (and its cap) when explicit studyDbIds are supplied', async () => {
+    const ctx = await connect(fetcher);
+    mockServer(fetcher);
+
+    const result = await brapiGermplasmPerformance.handler(
+      brapiGermplasmPerformance.input.parse({
+        germplasmDbId: 'germplasm1',
+        studyDbIds: ['study1'],
+      }),
+      ctx,
+    );
+
+    // Discovery is skipped entirely — /studies is never queried.
+    const studiesCalls = fetcher.mock.calls.filter((c) => pathnameOf(c[0]).endsWith('/studies'));
+    expect(studiesCalls).toHaveLength(0);
+    // Still aggregates from the supplied study.
+    expect(result.studyDbIds).toEqual(['study1']);
+    expect(result.perVariable).toHaveLength(1);
+    expect(result.perVariable[0]?.observationVariableDbId).toBe('variable1');
+  });
+
+  it('names the brapi_find_studies retrieval path when study discovery hits the cap', async () => {
+    const ctx = await connect(fetcher);
+    // /studies (germplasm-filtered) returns more than STUDY_DISCOVERY_CAP (200)
+    // distinct studies in one page, tripping the cap. Observations stay empty so
+    // the per-study pulls are cheap — the capped warning text is what we assert.
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const path = pathnameOf(url);
+      if (path.endsWith('/serverinfo')) {
+        return jsonResponse(envelope({ serverName: 'Test', calls: SERVER_CALLS }));
+      }
+      if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
+      if (path.includes('/germplasm/')) {
+        return jsonResponse(envelope({ germplasmDbId: 'germplasm1', germplasmName: 'Germ One' }));
+      }
+      if (path.endsWith('/studies')) {
+        const filtered =
+          u.searchParams.has('germplasmDbIds') || u.searchParams.has('germplasmDbId');
+        if (filtered) {
+          const data = Array.from({ length: 250 }, (_, i) => ({ studyDbId: `study-${i}` }));
+          return jsonResponse(envelope({ data }, { totalCount: 250 }));
+        }
+        return jsonResponse(envelope({ data: [{ studyDbId: 'study-0' }] }, { totalCount: 999 }));
+      }
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const result = await brapiGermplasmPerformance.handler(
+      brapiGermplasmPerformance.input.parse({ germplasmDbId: 'germplasm1' }),
+      ctx,
+    );
+
+    const warnings = result.warnings.join('\n');
+    expect(warnings).toContain('Study discovery capped at 200');
+    expect(warnings).toContain('brapi_find_studies');
+    expect(warnings).toContain('extraFilters.germplasmDbIds');
+    expect(warnings).toContain('studyDbIds');
+  });
 });

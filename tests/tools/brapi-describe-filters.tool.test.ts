@@ -21,6 +21,7 @@ describe('brapi_describe_filters tool', () => {
     const names = result.filters.map((f) => f.name);
     expect(names).toContain('commonCropNames');
     expect(names).toContain('seasonDbIds');
+    expect(names).toContain('germplasmDbIds');
     expect(names).toContain('pageSize');
     expect(result.specReference).toContain('brapi.org');
     expect(result.availableEndpoints.length).toBeGreaterThanOrEqual(7);

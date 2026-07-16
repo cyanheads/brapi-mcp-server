@@ -64,6 +64,13 @@ const STUDIES: FilterDescriptor[] = [
     example: 'IBA-2022-YT',
   },
   {
+    name: 'germplasmDbIds',
+    type: 'string[]',
+    description:
+      'Restrict to studies that include specific germplasm by DbId. Retrieves the full study set a germplasm appears in — feed the studyDbIds back into brapi_germplasm_performance to aggregate a chunk beyond its discovery cap.',
+    example: 'germplasm-1',
+  },
+  {
     name: 'trialDbIds',
     type: 'string[]',
     description: 'Restrict to studies inside specific trials.',
