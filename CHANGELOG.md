@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.7](changelog/0.7.x/0.7.7.md) — 2026-07-15
+
+mcp-ts-core ^0.10.9 → ^0.10.14, adopting the supply-chain install guard (bunfig minimumReleaseAge, Socket scanner) and a bun-native Docker HEALTHCHECK the slim image can actually run; capped find_* renders and the genotype-matrix preview now name the dataframe holding the rest; export_genotype_matrix clamps maxCalls to the deployment ceiling
+
 ## [0.7.6](changelog/0.7.x/0.7.6.md) — 2026-06-20
 
 mcp-ts-core ^0.10.6 → ^0.10.9 — ctx.content media collector, two new devcheck guards (dependency specifiers, plugin marketplace manifests), sharper canvas SQL error classification; @duckdb/node-api and @types/node bumps; eight skills re-synced
