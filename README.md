@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.7-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.8-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
 </div>
 
@@ -46,7 +46,7 @@
 | `brapi_find_observations` | Pull observation records by study / germplasm / variable / season / unit / timestamp. Dataframe spillover. |
 | `brapi_find_images` | Filter image metadata by unit / study / ontology / MIME type. Bytes via `brapi_get_image`. |
 | `brapi_get_image` | Fetch image bytes for up to 5 imageDbIds inline as `type: image` blocks. Prefers `/imagecontent`, falls back to `imageURL`. |
-| `brapi_find_locations` | Find research stations by country / type / abbreviation, with optional client-side bbox filter. |
+| `brapi_find_locations` | Find research stations by country (ISO alpha-3 code, or English country name resolved client-side) / type / abbreviation, with optional client-side bbox filter. |
 | `brapi_find_variants` | Find variant records by variant set, reference, or genomic region (1-based inclusive / exclusive). |
 | `brapi_find_genotype_calls` | Pull genotype calls via async-search polling. Upstream pull bounded by `BRAPI_GENOTYPE_CALLS_MAX_PULL` (default 100k, max 500k). |
 
@@ -133,7 +133,7 @@ Within one (tenant, session), dataframes act as a self-cleaning shared notebook:
 - **Dialect adaptation** — `spec` / `brapi-test` / `breedbase` / `cassavabase` / `bms` dialects translate v2.1 plural filter keys to the singular form each server family honors, drop filters known to be broken, normalize sparse-shape encodings, and escalate to POST `/search/{noun}` when GET would silently downcast multi-value filters. Detected from `/serverinfo` (server-name / organization-name); pin per-alias via `BRAPI_<ALIAS>_DIALECT`. Verified-vs-inferred mapping counts surface on the orientation envelope so agents see the confidence floor at a glance.
 - **DuckDB required** — `@duckdb/node-api` is a regular dependency; startup fails closed when the framework canvas is unavailable. Not supported on Cloudflare Workers (no native binary in that runtime).
 - **Async-search transparency** — `brapi_find_genotype_calls` and `brapi_raw_search` handle the `POST /search/{noun}` → `GET /search/{noun}/{id}` 202-retry pattern automatically.
-- **Pedigree DAG walks** — `brapi_walk_pedigree` BFS-traverses ancestry / descendancy with cycle detection (BrAPI only exposes one generation per call); a 1,000-node safety cap bounds the walk and sets `truncated` when reached.
+- **Pedigree DAG walks** — `brapi_walk_pedigree` BFS-traverses ancestry / descendancy with cycle detection (BrAPI only exposes one generation per call); a 1,000-node safety cap bounds the walk and sets `truncated` when reached. Walks larger than `loadLimit` spill their node and edge sets to two JOINable canvas dataframes and return a bounded inline preview.
 - **Image content** — `brapi_get_image` fetches bytes inline as MCP `type: image` blocks, preferring `/images/{id}/imagecontent` with `imageURL` fallback.
 - **Free-text variable ranking** — `OntologyResolver` scores variables against a query (PUI / name / synonym / trait-class) so `find_variables text:"..."` returns ranked candidates even without `/ontologies`.
 - **Auth variants in one schema** — tagged-union covers `none` / `bearer` / `api_key` / `sgn` (session-token exchange) / `oauth2` (client-credentials).

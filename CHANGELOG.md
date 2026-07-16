@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.8](changelog/0.7.x/0.7.8.md) — 2026-07-16
+
+brapi_germplasm_performance gains an optional studyDbIds bypass for its study-discovery cap; brapi_walk_pedigree spills node and edge sets exceeding loadLimit to two JOINable canvas dataframes; brapi_find_locations resolves free-form country names to ISO 3166-1 alpha-3 codes via a new iso-country service
+
 ## [0.7.7](changelog/0.7.x/0.7.7.md) — 2026-07-15
 
 mcp-ts-core ^0.10.9 → ^0.10.14, adopting the supply-chain install guard (bunfig minimumReleaseAge, Socket scanner) and a bun-native Docker HEALTHCHECK the slim image can actually run; capped find_* renders and the genotype-matrix preview now name the dataframe holding the rest; export_genotype_matrix clamps maxCalls to the deployment ceiling
