@@ -11,14 +11,21 @@
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getServerConfig } from '@/config/server-config.js';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
   AliasInput,
   buildRequestOptions,
+  type DataframeHandle,
+  DataframeHandleSchema,
   isUpstreamNotFound,
+  LoadLimitInput,
+  renderDataframeHandle,
   requireRegisteredConnection,
+  toDataframeHandle,
 } from '../shared/find-helpers.js';
 
 const DEFAULT_MAX_DEPTH = 3;
@@ -105,6 +112,12 @@ const OutputSchema = z.object({
   warnings: z
     .array(z.string())
     .describe('Advisory messages (capability gaps, per-node expansion failures).'),
+  nodesDataframe: DataframeHandleSchema.optional().describe(
+    'Canvas dataframe holding the full node set, present when the walk exceeds loadLimit — nodes[] is then a bounded preview. Query with brapi_dataframe_query (SQL); JOIN to the edges dataframe on germplasmDbId.',
+  ),
+  edgesDataframe: DataframeHandleSchema.optional().describe(
+    'Canvas dataframe holding the full edge set, present when the walk exceeds loadLimit — edges[] is then a bounded preview. Any edge field that is a reserved SQL word (e.g. `from` → `from_`) is renamed to a SQL-safe identifier; columnLegend maps it back. Query with brapi_dataframe_query (SQL).',
+  ),
 });
 
 type Output = z.infer<typeof OutputSchema>;
@@ -139,6 +152,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       .max(10)
       .default(DEFAULT_MAX_DEPTH)
       .describe(`Max generations to walk per direction (default ${DEFAULT_MAX_DEPTH}, cap 10).`),
+    loadLimit: LoadLimitInput,
     alias: AliasInput,
   }),
   output: OutputSchema,
@@ -290,12 +304,54 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
 
     const leafCount = computeLeafCount(nodes, edges, input.direction);
 
+    // Spillover: when the full graph exceeds loadLimit, materialize the node
+    // and edge sets as two canvas dataframes (JOINable on germplasmDbId) and
+    // return a bounded preview inline — mirrors the find_* pattern. The stats
+    // above still describe the full walk; small walks stay inline-only.
+    const loadLimit = input.loadLimit ?? getServerConfig().loadLimit;
+    let previewNodes = nodes;
+    let previewEdges = edges;
+    let nodesDataframe: DataframeHandle | undefined;
+    let edgesDataframe: DataframeHandle | undefined;
+    if (nodes.length > loadLimit || edges.length > loadLimit) {
+      const bridge = getCanvasBridge();
+      const query = {
+        germplasmDbIds: input.germplasmDbIds,
+        direction: input.direction,
+        maxDepth: input.maxDepth,
+      };
+      // Register sequentially, not in parallel: the first call resolves and
+      // caches the default canvas in ctx.state; a concurrent second call would
+      // race that cache and land the two tables on different canvases, breaking
+      // the JOIN. Both tables must share one canvas.
+      if (nodes.length > 0) {
+        const reg = await bridge.registerDataframe(ctx, {
+          source: 'walk_pedigree_nodes',
+          baseUrl: connection.baseUrl,
+          query,
+          rows: nodes,
+        });
+        nodesDataframe = toDataframeHandle(reg, nodes.length);
+        previewNodes = nodes.slice(0, loadLimit);
+      }
+      if (edges.length > 0) {
+        const reg = await bridge.registerDataframe(ctx, {
+          source: 'walk_pedigree_edges',
+          baseUrl: connection.baseUrl,
+          query,
+          rows: edges,
+        });
+        edgesDataframe = toDataframeHandle(reg, edges.length);
+        previewEdges = edges.slice(0, loadLimit);
+      }
+    }
+
     const result: Output = {
       alias: connection.alias,
       direction: input.direction,
       maxDepth: input.maxDepth,
-      nodes,
-      edges,
+      nodes: previewNodes,
+      edges: previewEdges,
       depthReached,
       rootCount: input.germplasmDbIds.length,
       leafCount,
@@ -304,6 +360,8 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       truncated,
       warnings,
     };
+    if (nodesDataframe) result.nodesDataframe = nodesDataframe;
+    if (edgesDataframe) result.edgesDataframe = edgesDataframe;
     return result;
   },
 
@@ -324,7 +382,11 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
 
     if (result.nodes.length > 0) {
       lines.push('');
-      lines.push('## Nodes');
+      lines.push(
+        result.nodesDataframe
+          ? `## Nodes (preview — ${result.nodes.length} of ${result.nodesDataframe.rowCount}; full set in dataframe \`${result.nodesDataframe.tableName}\`)`
+          : '## Nodes',
+      );
       for (const node of result.nodes) {
         const parts: string[] = [`**${node.germplasmName ?? node.germplasmDbId}**`];
         parts.push(`id=\`${node.germplasmDbId}\``);
@@ -336,12 +398,28 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
 
     if (result.edges.length > 0) {
       lines.push('');
-      lines.push('## Edges');
+      lines.push(
+        result.edgesDataframe
+          ? `## Edges (preview — ${result.edges.length} of ${result.edgesDataframe.rowCount}; full set in dataframe \`${result.edgesDataframe.tableName}\`)`
+          : '## Edges',
+      );
       for (const edge of result.edges) {
         const suffix = edge.parentType ? ` (${edge.parentType})` : '';
         const arrow = edge.relationship === 'parent' ? '→' : '←';
         lines.push(`- \`${edge.from}\` ${arrow} \`${edge.to}\` · ${edge.relationship}${suffix}`);
       }
+    }
+
+    if (result.nodesDataframe) {
+      lines.push('');
+      lines.push('## Nodes dataframe');
+      lines.push(...renderDataframeHandle(result.nodesDataframe));
+    }
+
+    if (result.edgesDataframe) {
+      lines.push('');
+      lines.push('## Edges dataframe');
+      lines.push(...renderDataframeHandle(result.edgesDataframe));
     }
 
     if (result.warnings.length > 0) {

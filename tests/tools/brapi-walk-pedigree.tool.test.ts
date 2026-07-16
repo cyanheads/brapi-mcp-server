@@ -360,6 +360,9 @@ describe('brapi_walk_pedigree tool', () => {
         germplasmDbIds: ['g-root'],
         direction: 'ancestors',
         maxDepth: 3,
+        // Pin loadLimit above the node cap so this test isolates the MAX_NODES
+        // ceiling; loadLimit-driven dataframe spillover is covered separately.
+        loadLimit: 2_000,
       }),
       ctx,
     );
@@ -370,5 +373,78 @@ describe('brapi_walk_pedigree tool', () => {
     expect(result.warnings.join('\n')).toContain('safety cap');
     const text = (brapiWalkPedigree.format!(result)[0] as { text: string }).text;
     expect(text).toContain('truncated: true');
+  });
+
+  it('spills the node and edge sets to canvas dataframes when the walk exceeds loadLimit', async () => {
+    const ctx = await connect(fetcher);
+    // Root fans out to 20 parents → 21 nodes, 20 edges. loadLimit=5 forces
+    // spillover of both sets.
+    const parents = Array.from({ length: 20 }, (_, i) => ({ germplasmDbId: `g-p-${i}` }));
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      const m = path.match(/\/germplasm\/([^/]+)\/pedigree$/);
+      if (m) {
+        const id = decodeURIComponent(m[1]!);
+        return jsonResponse(envelope(id === 'g-root' ? { parents } : { parents: [] }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiWalkPedigree.handler(
+      brapiWalkPedigree.input.parse({
+        germplasmDbIds: ['g-root'],
+        direction: 'ancestors',
+        maxDepth: 2,
+        loadLimit: 5,
+      }),
+      ctx,
+    );
+
+    // Full sets land in the dataframes; the inline arrays are bounded previews.
+    expect(result.nodesDataframe).toBeDefined();
+    expect(result.nodesDataframe?.rowCount).toBe(21);
+    expect(result.edgesDataframe).toBeDefined();
+    expect(result.edgesDataframe?.rowCount).toBe(20);
+    expect(result.nodes.length).toBe(5);
+    expect(result.edges.length).toBe(5);
+    // The reserved SQL word `from` in the edge schema is renamed to `from_`,
+    // with a legend mapping it back.
+    expect(result.edgesDataframe?.columnLegend).toMatchObject({ from_: 'from' });
+    // Stats still describe the full walk, not the preview.
+    expect(result.rootCount).toBe(1);
+    // Dataframe handles surface in format() output.
+    const text = (brapiWalkPedigree.format!(result)[0] as { text: string }).text;
+    expect(text).toContain(result.nodesDataframe!.tableName);
+    expect(text).toContain('preview');
+  });
+
+  it('stays inline-only for small walks (no dataframe spillover)', async () => {
+    const ctx = await connect(fetcher);
+    const pedigrees: Record<string, Pedigree> = {
+      'g-1': { parents: [{ germplasmDbId: 'g-2' }, { germplasmDbId: 'g-3' }] },
+    };
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      const m = path.match(/\/germplasm\/([^/]+)\/pedigree$/);
+      if (m) {
+        return jsonResponse(envelope(pedigrees[decodeURIComponent(m[1]!)] ?? { parents: [] }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiWalkPedigree.handler(
+      brapiWalkPedigree.input.parse({
+        germplasmDbIds: ['g-1'],
+        direction: 'ancestors',
+        maxDepth: 2,
+      }),
+      ctx,
+    );
+
+    // 3 nodes, 2 edges — well under the default loadLimit; nothing spills.
+    expect(result.nodesDataframe).toBeUndefined();
+    expect(result.edgesDataframe).toBeUndefined();
+    expect(result.nodes.length).toBe(3);
+    expect(result.edges.length).toBe(2);
   });
 });
