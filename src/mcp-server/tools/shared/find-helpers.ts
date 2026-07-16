@@ -540,8 +540,11 @@ export function renderAppliedFilters(
  * Applied only to lines whose omitted entries stay retrievable elsewhere —
  * never to a line that is the sole carrier of a mapping (see
  * `renderDataframeHandle`'s `renamedColumns`).
+ *
+ * Exported so `brapi_dataframe_describe` can bound its own per-column listing
+ * with the same width-aware budget rather than reimplementing an equivalent.
  */
-const MAX_LIST_LINE = 400;
+export const MAX_LIST_LINE = 400;
 
 /**
  * Join `parts` with `, ` until `budget` characters are consumed. Always emits
@@ -549,7 +552,7 @@ const MAX_LIST_LINE = 400;
  * overruns the budget slightly. Returns the rendered prefix plus how many parts
  * were left out, so callers can append their own recovery hint.
  */
-function joinWithinBudget(
+export function joinWithinBudget(
   parts: readonly string[],
   budget: number,
 ): { omitted: number; text: string } {
@@ -842,9 +845,12 @@ export type DataframeHandle = z.infer<typeof DataframeHandleSchema>;
  *
  * This is a *summary* surface — it is not the authoritative carrier of the
  * schema, so `columns` is budgeted: it costs megabytes on a wide pivot (a
- * genotype matrix reaches 500,000 variant columns) while
- * `brapi_dataframe_describe` lists the full schema on demand, uncapped, from
- * `content[]`. `renamedColumns` is deliberately NOT budgeted — it is the only
+ * genotype matrix reaches 500,000 variant columns). The omission notice points
+ * at `brapi_dataframe_query` (`SELECT * FROM <table> LIMIT 0` renders the full
+ * column list, uncapped, in `content[]`) rather than at
+ * `brapi_dataframe_describe`, whose own per-column listing is now budgeted the
+ * same way — pointing a capped line at another capped line is circular.
+ * `renamedColumns` is deliberately NOT budgeted — it is the only
  * mapping from a sanitized column back to its upstream key, with no describe
  * or re-call path behind it, and capping the sole decoder is the same defect as
  * capping the tool-level variant legend. It stays bounded in practice anyway:
@@ -855,7 +861,9 @@ export type DataframeHandle = z.infer<typeof DataframeHandleSchema>;
 export function renderDataframeHandle(handle: DataframeHandle): string[] {
   const { text: columns, omitted } = joinWithinBudget(handle.columns, MAX_LIST_LINE);
   const columnsSuffix =
-    omitted > 0 ? `, …+${omitted} more — brapi_dataframe_describe lists the full schema` : '';
+    omitted > 0
+      ? `, …+${omitted} more — list all columns via brapi_dataframe_query: \`SELECT * FROM ${handle.tableName} LIMIT 0\``
+      : '';
   const lines = [
     `- tableName: \`${handle.tableName}\` (query via brapi_dataframe_query)`,
     `- rowCount: ${handle.rowCount}`,

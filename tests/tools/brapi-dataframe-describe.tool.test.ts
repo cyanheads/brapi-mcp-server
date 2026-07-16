@@ -189,4 +189,48 @@ describe('brapi_dataframe_describe', () => {
     expect(text).toContain('source: find_observations');
     expect(text).toContain('baseUrl: https://b/v2');
   });
+
+  it('caps a pathological wide column list and points recovery at brapi_dataframe_query', () => {
+    // A genotype-matrix pivot: one column per variant. Uncapped, this renders a
+    // line per variant into content[] and scales to megabytes on a wide matrix.
+    const columns = Array.from({ length: 200 }, (_, i) => ({
+      name: `variant_col_${i}`,
+      type: 'VARCHAR',
+    }));
+    const formatted = brapiDataframeDescribe.format?.({
+      tables: [{ name: 'df_wide', rowCount: 3, columns }],
+    });
+    const text =
+      (formatted ?? [])[0]?.type === 'text' ? (formatted![0] as { text: string }).text : '';
+
+    // The total count still reports every column...
+    expect(text).toContain('- columns: 200');
+    // ...but the per-column listing is capped with an honest omission notice.
+    expect(text).toContain('variant_col_0: VARCHAR');
+    expect(text).not.toContain('variant_col_199');
+    expect(text).toMatch(/…\+\d+ more column\(s\) not shown/);
+    // Recovery names the real uncapped path — brapi_dataframe_query, not another
+    // (now equally capped) describe call, and structuredContent (unreadable to
+    // content-only clients) is not cited.
+    expect(text).toContain('brapi_dataframe_query');
+    expect(text).toContain('SELECT * FROM df_wide LIMIT 0');
+
+    // structuredContent still carries the complete schema regardless of render.
+    const structured = { tables: [{ name: 'df_wide', rowCount: 3, columns }] };
+    expect(structured.tables[0]?.columns).toHaveLength(200);
+  });
+
+  it('renders every column when the list fits the budget (normal find_* shape)', () => {
+    const columns = Array.from({ length: 12 }, (_, i) => ({
+      name: `col_${i}`,
+      type: 'VARCHAR',
+    }));
+    const formatted = brapiDataframeDescribe.format?.({
+      tables: [{ name: 'df_narrow', rowCount: 3, columns }],
+    });
+    const text =
+      (formatted ?? [])[0]?.type === 'text' ? (formatted![0] as { text: string }).text : '';
+    for (const col of columns) expect(text).toContain(`${col.name}: VARCHAR`);
+    expect(text).not.toContain('not shown');
+  });
 });

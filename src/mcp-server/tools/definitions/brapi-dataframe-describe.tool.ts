@@ -16,6 +16,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { config } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { joinWithinBudget, MAX_LIST_LINE } from '../shared/find-helpers.js';
 
 const ColumnSchema = z.object({
   name: z.string().describe('Column name.'),
@@ -113,9 +114,26 @@ function renderDescribe(tables: z.infer<typeof DescribedTableSchema>[]): string 
       lines.push(`- approxSizeBytes: ${table.approxSizeBytes}`);
     }
     lines.push(`- columns: ${table.columns.length}`);
-    for (const col of table.columns) {
+    // Width-aware budget on the per-column listing: a normal find_* dataframe
+    // (~18 columns) renders every column with its type, while a wide genotype
+    // matrix (one column per variant, up to hundreds of thousands) caps instead
+    // of emitting a line per variant into content[]. Safe to omit here because
+    // the full column set stays retrievable — brapi_dataframe_query renders it
+    // uncapped via `SELECT * FROM <table> LIMIT 0`, and the complete schema is
+    // in structuredContent.tables[].columns regardless of what this renders.
+    const { omitted } = joinWithinBudget(
+      table.columns.map((col) => col.name),
+      MAX_LIST_LINE,
+    );
+    const shownCount = table.columns.length - omitted;
+    for (const col of table.columns.slice(0, shownCount)) {
       const nullable = col.nullable === undefined ? '' : ` (nullable: ${col.nullable})`;
       lines.push(`  - ${col.name}: ${col.type}${nullable}`);
+    }
+    if (omitted > 0) {
+      lines.push(
+        `  - …+${omitted} more column(s) not shown — list all columns via brapi_dataframe_query: \`SELECT * FROM ${table.name} LIMIT 0\``,
+      );
     }
     if (table.provenance) {
       lines.push('- provenance:');

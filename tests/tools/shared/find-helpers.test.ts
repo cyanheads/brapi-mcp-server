@@ -152,7 +152,7 @@ describe('renderDataframeHandle', () => {
     expect(out).not.toContain('…+');
   });
 
-  it('caps a pathological column list at the describe path, but never the sole decoder', () => {
+  it('caps a pathological column list at the query path, but never the sole decoder', () => {
     // A genotype matrix's wide pivot: one column per variant.
     const columns = ['germplasmDbId', ...Array.from({ length: 5_000 }, (_, i) => `v_${i}`)];
     // renamedColumns is the only safe→original mapping, with no describe or
@@ -164,7 +164,11 @@ describe('renderDataframeHandle', () => {
 
     const columnsLine = out.split('\n').find((l) => l.startsWith('- columns:')) ?? '';
     expect(columnsLine).toContain('…+');
-    expect(columnsLine).toContain('brapi_dataframe_describe lists the full schema');
+    // Points at the uncapped path (a query), not describe — whose own per-column
+    // listing is now budgeted the same way, so pointing there would be circular.
+    expect(columnsLine).toContain('brapi_dataframe_query');
+    expect(columnsLine).toContain(`SELECT * FROM ${base.tableName} LIMIT 0`);
+    expect(columnsLine).not.toContain('brapi_dataframe_describe lists the full schema');
     expect(columnsLine.length).toBeLessThan(700);
 
     const renamedLine = out.split('\n').find((l) => l.startsWith('- renamedColumns:')) ?? '';
