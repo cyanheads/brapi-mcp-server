@@ -1,8 +1,10 @@
 # Agent Protocol
 
 **Server:** brapi-mcp-server
-**Version:** 0.7.10
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.14`
+**Version:** 0.7.11
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.12.3`
+**Engines:** Bun ≥1.3.0, Node ≥24.0.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.0.0 (protocol revisions 2026-07-28 and 2025-*)
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -32,7 +34,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. The framework catches, classifies, and formats. Default to typed contracts: declare `errors: [...]` and throw via `ctx.fail(reason, …)` so failures carry stable `data.reason` codes for agent-client routing. Fall back to error factories (`notFound()`, `validationError()`, etc.) only for services or when no contract entry fits.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
-- **Check `ctx.elicit` / `ctx.sample`** for presence before calling.
+- **Need input the caller didn't supply?** `return ctx.requestInput(...)` and read `ctx.inputs` when the handler is re-entered. Never `await` for user input mid-handler.
 - **Secrets in env vars only** — never hardcoded.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
@@ -161,14 +163,16 @@ Handlers receive a unified `ctx` object. Currently used surface:
 
 | Property | Description |
 |:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
+| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
 | `ctx.state` | Tenant-scoped KV — used by `ServerRegistry` (connection aliases), `CanvasBridge` (default canvas pointer + per-table provenance), and `CapabilityRegistry` (cached profiles). Spilled `find_*` rows live on the canvas (DuckDB), not in `ctx.state`. |
-| `ctx.sessionId` | Mcp-Session-Id (HTTP stateful/auto); `undefined` for stdio and stateless HTTP unless `exposeStatelessSessionId` is opted in. Composed into `ServerRegistry.connKey` and `CanvasBridge.defaultCanvasKey` when `BRAPI_SESSION_ISOLATION=true` (default), so concurrent HTTP sessions in the same tenant don't share connection state or canvas. Discovery / scoping key on top of tenant-keyed state — not an authorization principal. |
+| `ctx.sessionId` | Mcp-Session-Id (HTTP stateful/auto); `undefined` for stdio, stateless HTTP unless `exposeStatelessSessionId` is opted in, and every request on protocol revision 2026-07-28, which is session-less by design. Composed into `ServerRegistry.connKey` and `CanvasBridge.defaultCanvasKey` when `BRAPI_SESSION_ISOLATION=true` (default), so concurrent HTTP sessions in the same tenant don't share connection state or canvas. Discovery / scoping key on top of tenant-keyed state — not an authorization principal. |
 | `ctx.signal` | `AbortSignal` — threaded into every BrAPI HTTP call so client-side cancellation aborts the upstream request. |
 | `ctx.requestId` | Unique request ID — auto-attached to every `ctx.log` entry. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio / HTTP+`auth=none` — outer scope on all `ctx.state` reads/writes. |
+| `ctx.requestInput` / `ctx.inputs` | Multi-round-trip input. `brapi_submit_observations` gates apply-mode writes on a `confirm` elicitation: it reads `ctx.inputs.view('confirm')`, returns `ctx.requestInput({ inputRequests: … })` when the answer is missing, and treats a declined, cancelled, or unparseable answer as terminal (`user_declined`). `force: true` skips the round. |
+| `ctx.enrich` | Success-path agent context. `brapi_dataframe_query` and `brapi_build_phenotype_matrix` disclose capped results with `ctx.enrich.truncated({ shown, cap, guidance })`. |
 
-`ctx.elicit` is used by `brapi_submit_observations` to gate apply-mode writes behind user confirmation (with explicit `force: true` as the bypass). `ctx.sample` and `ctx.progress` are not used yet — they'll show up when long-running workflows (pedigree traversal, genotype-call pulls) need progress reporting or LLM sampling. `ctx.fail(reason, …)` is the typed thrower keyed off declared `errors[]` contracts — used by 14 tools and 1 resource today. `ctx.recoveryFor(reason)` resolves the matching contract entry's recovery hint into `data.recovery.hint` so it surfaces on the wire.
+`ctx.fail(reason, …)` is the typed thrower keyed off declared `errors[]` contracts — used by 14 tools and 1 resource today. `ctx.recoveryFor(reason)` resolves the matching contract entry's recovery hint into `data.recovery.hint` so it surfaces on the wire. `ctx.content` is unused — no tool emits media blocks outside `brapi_get_image`, which returns image bytes through its own output schema.
 
 ---
 
@@ -257,7 +261,7 @@ src/
         brapi-build-phenotype-matrix.tool.ts  # Germplasm × trait matrix from studies; materialized as canvas dataframe
         brapi-germplasm-performance.tool.ts   # Per-variable aggregates (n, mean, median, sd) for a single germplasm
         brapi-export-genotype-matrix.tool.ts  # Genotype calls → germplasm × variant dataframe + VCF-lite / PLINK serialization
-        brapi-submit-observations.tool.ts # Two-phase observation write — preview / apply (POST + PUT) with elicit gate
+        brapi-submit-observations.tool.ts # Two-phase observation write — preview / apply (POST + PUT) behind a confirmation round trip
         brapi-raw-get.tool.ts             # Last-resort GET passthrough with routing nudge
         brapi-raw-search.tool.ts          # Last-resort POST /search passthrough with async polling
       shared/
@@ -317,6 +321,7 @@ Available skills:
 | `tool-defs-analysis` | Read-only audit of MCP definition language across the surface — voice, leaks, defaults, recovery hints, output descriptions |
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
 | `code-simplifier` | Post-session cleanup against `git diff` — modernize syntax, consolidate duplication, align with the codebase |
+| `techniques` | Catalog of response/data-shaping techniques — overflow handling, payload shaping, retrieval patterns |
 | `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
 | `git-wrapup` | Land working-tree changes as a versioned commit + annotated tag — version bump, changelog, verify, tag. Local only. |
@@ -329,7 +334,7 @@ Available skills:
 | `api-linter` | Definition lint rule reference (`format-parity`, `schema-*`, `name-*`, `server-json-*`, …) |
 | `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
 | `api-config` | AppConfig, parseConfig, env vars |
-| `api-context` | Context interface, logger, state, progress |
+| `api-context` | Context interface, RequestContext, logger, state, multi-round-trip input |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
 | `api-mirror` | MirrorService: persistent SQLite-backed local mirror of a bulk upstream dataset with FTS5 — Tier 3 opt-in |
 | `api-services` | LLM, Speech, Graph services |
@@ -360,7 +365,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting via Biome |
 | `bun run lint:mcp` | Validate MCP tool / resource / prompt definitions against the spec |
 | `bun run lint:packaging` | Verify env var alignment between `manifest.json` and `server.json` |
-| `bun run bundle` | Build and pack as `.mcpb` for one-click Claude Desktop install |
+| `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
 | `bun run test` | Vitest suite |
 | `bun run start` | Production mode — defers transport selection to `MCP_TRANSPORT_TYPE` (stdio default) |
 | `bun run start:stdio` | Production mode (stdio) — requires prior `bun run build` |
@@ -372,7 +377,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. MCPB is stdio-only — HTTP deployments are unaffected. To opt out, delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly when `manifest.json` is absent.
+`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. The bundle therefore ships portable without the DuckDB native — `@duckdb/node-api` is loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected. To opt out, delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly when `manifest.json` is absent.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match.
 
@@ -388,14 +393,14 @@ Each per-version file opens with YAML frontmatter:
 ---
 summary: One-line headline, ≤350 chars  # required — powers the rollup index
 breaking: false                          # optional — true flags breaking changes
-security: false                          # optional — true flags security fixes
+security: false                          # optional — true ONLY for a source-code security fix, never a dependency CVE bump
 ---
 
 # 0.1.0 — YYYY-MM-DD
 ...
 ```
 
-`breaking: true` renders a `· ⚠️ Breaking` badge — use it when consumers must update code on upgrade (signature changes, removed APIs, config renames). `security: true` renders a `· 🛡️ Security` badge and pairs with a `## Security` body section. When both are set, badges render `· ⚠️ Breaking · 🛡️ Security`.
+`breaking: true` renders a `· ⚠️ Breaking` badge — use it when consumers must update code on upgrade (signature changes, removed APIs, config renames). `security: true` renders a `· 🛡️ Security` badge and pairs with a `## Security` body section — set it only for a security fix in this server's *own source code*, never for a routine dependency or transitive CVE bump (record those under `## Dependencies`). When both are set, badges render `· ⚠️ Breaking · 🛡️ Security`.
 
 `agent-notes` is an optional free-form field for maintenance agents processing the release downstream. Content here won't appear in the rendered CHANGELOG — it's consumed by agents running the `maintenance` skill. Use it for adoption instructions that don't fit the human-facing sections: new files to create, fields to populate, one-time migration steps. Omit entirely when there's nothing to say.
 
@@ -425,7 +430,7 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] JSDoc `@fileoverview` + `@module` on every file
 - [ ] `ctx.log` for logging, `ctx.state` for storage — no `console`, no direct persistence access
 - [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
-- [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Codex → `structuredContent`, Codex Desktop → `content[]`); both must carry the same data
+- [ ] `format()` renders all data the LLM needs — different clients forward different surfaces (Claude Code → `structuredContent`, Claude Desktop → `content[]`); both must carry the same data
 - [ ] BrAPI tool: resolves connection via `ServerRegistry.get(ctx, alias ?? DEFAULT_ALIAS)` before touching the client
 - [ ] BrAPI tool: gates the call with `CapabilityRegistry.ensure(...)` — never fires against an endpoint the server didn't advertise
 - [ ] BrAPI tool: raw / domain / output schemas reviewed against real upstream sparsity (most `/germplasm` and `/studies` fields are optional in the wild)

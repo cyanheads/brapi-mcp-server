@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.11](changelog/0.7.x/0.7.11.md) — 2026-08-22
+
+Adopts @cyanheads/mcp-ts-core ^0.12.3 (MCP SDK v2): every HTTP endpoint serves protocol revision 2026-07-28 alongside the 2025 era, undeclared tool arguments are rejected instead of stripped, and brapi_submit_observations' apply-mode confirmation becomes a multi-round-trip input_required result.
+
 ## [0.7.10](changelog/0.7.x/0.7.10.md) — 2026-07-16
 
 brapi_germplasm_performance and brapi_build_phenotype_matrix now pull per-study observations in bounded-concurrency batches sized by BRAPI_MAX_CONCURRENT_REQUESTS (default 4, previously inert) instead of serially; outcomes reassemble in input order, so matrix column/row order and each tool's failure behavior are unchanged.

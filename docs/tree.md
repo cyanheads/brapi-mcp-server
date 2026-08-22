@@ -1,11 +1,9 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-07-16 20:37:54
+Generated on: 2026-08-22 21:06:55
 
 ```text
 brapi-mcp-server/
-├── .agents/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/

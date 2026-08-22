@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
+[![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![Version](https://img.shields.io/badge/Version-0.7.11-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
 </div>
 
@@ -66,7 +66,7 @@
 
 | Tool | Description |
 |:-----|:------------|
-| `brapi_submit_observations` | Two-phase observation write — `mode: preview` validates; `mode: apply` elicits confirmation, then fans POST + PUT in parallel. Additive only — no destructive deletion. |
+| `brapi_submit_observations` | Two-phase observation write — `mode: preview` validates; `mode: apply` asks the caller to confirm, then fans POST + PUT in parallel. Additive only — no destructive deletion. |
 
 ### Escape hatches
 
@@ -117,6 +117,8 @@ The server has two stateful layers and two scoping axes:
 Within one (tenant, session), dataframes act as a self-cleaning shared notebook: hand the `df_<uuid>` name between parallel agents on the same MCP session, persist it across a multi-step workflow, query / project / aggregate / join from any position. Address-by-name, time-bounded, scoped to that session.
 
 **Default (isolated) shape.** Under `MCP_AUTH_MODE=none` + HTTP stateful (the default), each MCP session carves its own connection state and its own canvas. Two researchers connected to the same host don't see each other's `brapi_connect` aliases, exchanged SGN/OAuth tokens, or spilled `df_<uuid>` rows. Stdio always behaves as one session (single-process, no concurrency).
+
+**Clients on MCP revision 2026-07-28.** That revision is session-less on every transport — requests carry no `Mcp-Session-Id` — so `ctx.sessionId` is undefined and a client negotiating it falls back to the shared tenant workspace even under `MCP_SESSION_MODE=stateful`. Session isolation applies to 2025-era clients; deployments that need a hard boundary for 2026-era clients should carve tenants with `MCP_AUTH_MODE=jwt`/`oauth`.
 
 **Shared-workspace shape.** Set `BRAPI_SESSION_ISOLATION=false` for cross-session collaboration in one tenant — multiple MCP sessions then share connection state and one default canvas, the way pre-0.5.3 deployments behaved. Useful when planning, analysis, and writeup agents run as separate MCP clients but operate as one researcher on shared upstream credentials.
 
@@ -223,7 +225,7 @@ Every variable is optional.
 | `BRAPI_CANVAS_DROP_ENABLED` | Opt-in for `brapi_dataframe_drop` registration. Off by default; dataframes expire via TTL when left unmanaged. | `false` |
 | `BRAPI_EXPORT_DIR` | Directory for `brapi_dataframe_export` output files. Setting a path is the opt-in (no separate enable flag); unset leaves the tool out of `tools/list`. Stdio-only — the tool stays disabled under HTTP transport regardless of this value. Bridged to the framework's `CANVAS_EXPORT_PATH` automatically. | — |
 | `BRAPI_CANVAS_MAX_ROWS` / `BRAPI_CANVAS_QUERY_TIMEOUT_MS` | Per-query response row cap and wall-clock timeout for `brapi_dataframe_query`. | `10000` / `30000` |
-| `MCP_TRANSPORT_TYPE` / `MCP_HTTP_PORT` / `MCP_SESSION_MODE` | Transport (`stdio` \| `http`), HTTP port, session mode (`stateful` \| `stateless` \| `auto`). | `stdio` / `3010` / `auto` |
+| `MCP_TRANSPORT_TYPE` / `MCP_HTTP_PORT` / `MCP_SESSION_MODE` | Transport (`stdio` \| `http`), HTTP port, session mode (`stateful` \| `stateless` \| `auto`; `auto` resolves to stateful for HTTP). | `stdio` / `3010` / `stateful` |
 | `MCP_AUTH_MODE` / `MCP_LOG_LEVEL` / `STORAGE_PROVIDER_TYPE` / `OTEL_ENABLED` | Auth mode (`none` \| `jwt` \| `oauth`), log level, storage backend, OpenTelemetry. | `none` / `info` / `in-memory` / `false` |
 | `BRAPI_SESSION_ISOLATION` | When `true`, scope ServerRegistry connection state and the CanvasBridge default canvas to `ctx.sessionId` (HTTP stateful/auto). Concurrent callers under `MCP_AUTH_MODE=none` operate in isolated workspaces. Set `false` for the shared-workspace collaboration model. No effect on stdio. | `true` |
 
@@ -326,6 +328,7 @@ Defaults to HTTP transport, stateful session mode (engages the `mcp-session-id` 
 - **Multi-user with institutional SSO.** `MCP_AUTH_MODE=jwt` (HS256, `MCP_AUTH_SECRET_KEY`) or `oauth` (JWKS, `OAUTH_ISSUER_URL` + `OAUTH_AUDIENCE`). Each user's `tid` claim carves a tenant — the outer scope. `BRAPI_SESSION_ISOLATION=true` (default) then sub-scopes inside each tenant for users running parallel sessions, and JWT/OAuth identity binding gives real session-hijack protection on top.
 - **One researcher, parallel agents.** If multiple agents (planner, analyst, writeup) connect as separate MCP clients but should share one workspace, set `BRAPI_SESSION_ISOLATION=false` and rely on shared trust. This is the shared-workspace shape.
 - **Stdio.** Always one session; isolation is moot. The flag has no effect.
+- **Clients on MCP revision 2026-07-28.** Session-less by protocol, so they land in the shared tenant workspace whatever `BRAPI_SESSION_ISOLATION` says. Only the per-user-credentials shape isolates them.
 
 **Belt-and-braces under shared trust.** Even with `BRAPI_SESSION_ISOLATION=false`, `brapi_dataframe_describe` requires an explicit `dataframe` name on HTTP (no list-all enumeration), and `brapi_dataframe_query` rejects system-catalog reads (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*`). The dataframe name is the capability token; possession proves it.
 
