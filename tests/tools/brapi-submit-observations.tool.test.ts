@@ -1,14 +1,14 @@
 /**
  * @fileoverview End-to-end tests for `brapi_submit_observations` —
- * preview/apply mode, POST/PUT routing, elicit gate, force flag, capability
- * gating, per-row warnings.
+ * preview/apply mode, POST/PUT routing, the confirmation round trip, force
+ * flag, capability gating, per-row warnings.
  *
  * @module tests/tools/brapi-submit-observations.tool.test
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createMockContext, expectInputRequired } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiSubmitObservations } from '@/mcp-server/tools/definitions/brapi-submit-observations.tool.js';
 import {
@@ -102,6 +102,20 @@ function setupReadCalls(
   });
 }
 
+/** HTTP methods of every write the fetcher was asked to issue. */
+function writeMethods(fetcher: MockFetcher): string[] {
+  return fetcher.mock.calls
+    .map((c) => (c[3] as RequestInit | undefined)?.method)
+    .filter((m): m is string => m === 'POST' || m === 'PUT');
+}
+
+/** Concatenated text of the tool's `content[]` surface. */
+function renderText(result: Parameters<NonNullable<typeof brapiSubmitObservations.format>>[0]) {
+  return (brapiSubmitObservations.format?.(result) ?? [])
+    .map((block) => (block.type === 'text' ? block.text : ''))
+    .join('\n');
+}
+
 describe('brapi_submit_observations tool', () => {
   let fetcher: MockFetcher;
 
@@ -171,9 +185,34 @@ describe('brapi_submit_observations tool', () => {
     }
   });
 
-  it('apply with elicit confirmation POSTs new and PUTs existing rows in parallel', async () => {
-    const elicit = vi.fn(async () => ({ action: 'accept' as const, data: { confirm: true } }));
-    const ctx = await connect(fetcher, { ctxOptions: { tenantId: 't1', elicit } });
+  it('apply without a prior answer asks for confirmation and writes nothing', async () => {
+    const ctx = await connect(fetcher);
+    setupReadCalls(fetcher);
+
+    const asked = await expectInputRequired(() =>
+      brapiSubmitObservations.handler(
+        brapiSubmitObservations.input.parse({
+          studyDbId: 'study-1',
+          mode: 'apply',
+          observations: [
+            { observationUnitDbId: 'ou-1', observationVariableDbId: 'var-1', value: '1' },
+          ],
+        }),
+        ctx,
+      ),
+    );
+
+    expect(asked.inputRequests?.confirm).toMatchObject({ method: 'elicitation/create' });
+    expect(writeMethods(fetcher)).toEqual([]);
+  });
+
+  it('apply with an accepted confirmation POSTs new and PUTs existing rows in parallel', async () => {
+    const ctx = await connect(fetcher, {
+      ctxOptions: {
+        tenantId: 't1',
+        inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+      },
+    });
     setupReadCalls(fetcher, { studyName: 'Cassava 2022', studyObservationCount: 412 });
 
     const result = await brapiSubmitObservations.handler(
@@ -199,7 +238,6 @@ describe('brapi_submit_observations tool', () => {
       ctx,
     );
 
-    expect(elicit).toHaveBeenCalledTimes(1);
     expect(result.result.mode).toBe('apply');
     if (result.result.mode === 'apply') {
       expect(result.result.posted).toHaveLength(1);
@@ -209,11 +247,26 @@ describe('brapi_submit_observations tool', () => {
       expect(result.result.latestObservationTimestamp).toBe('2026-04-02T10:00:00Z');
       expect(result.result.studyName).toBe('Cassava 2022');
     }
+    expect(writeMethods(fetcher).sort()).toEqual(['POST', 'PUT']);
+
+    const text = renderText(result);
+    expect(text).toContain('Cassava 2022');
+    expect(text).toContain('- posted: 1');
+    expect(text).toContain('- updated: 1');
+    expect(text).toContain('obs-existing');
+    expect(text).toContain('- studyObservationCount: 412');
+    expect(text).toContain('- latestObservationTimestamp: 2026-04-02T10:00:00Z');
   });
 
-  it('apply throws Forbidden when the user rejects the elicit prompt', async () => {
-    const elicit = vi.fn(async () => ({ action: 'decline' as const }));
-    const ctx = await connect(fetcher, { ctxOptions: { tenantId: 't1', elicit } });
+  it.each([
+    ['confirm: false', { action: 'accept', content: { confirm: false } }],
+    ['a declined prompt', { action: 'decline' }],
+    ['a cancelled prompt', { action: 'cancel' }],
+    ['an unparseable answer', { action: 'accept', content: { confirm: 'yes' } }],
+  ])('apply fails with user_declined on %s and writes nothing', async (_label, response) => {
+    const ctx = await connect(fetcher, {
+      ctxOptions: { tenantId: 't1', inputResponses: { confirm: response } },
+    });
     setupReadCalls(fetcher);
 
     await expect(
@@ -227,29 +280,14 @@ describe('brapi_submit_observations tool', () => {
         }),
         ctx,
       ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.Forbidden });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Forbidden,
+      data: { reason: 'user_declined', studyDbId: 'study-1' },
+    });
+    expect(writeMethods(fetcher)).toEqual([]);
   });
 
-  it('apply without elicit support and without force flag throws Forbidden', async () => {
-    // ctx with no elicit callback at all
-    const ctx = await connect(fetcher);
-    setupReadCalls(fetcher);
-
-    await expect(
-      brapiSubmitObservations.handler(
-        brapiSubmitObservations.input.parse({
-          studyDbId: 'study-1',
-          mode: 'apply',
-          observations: [
-            { observationUnitDbId: 'ou-1', observationVariableDbId: 'var-1', value: '1' },
-          ],
-        }),
-        ctx,
-      ),
-    ).rejects.toMatchObject({ code: JsonRpcErrorCode.Forbidden });
-  });
-
-  it('apply with force=true writes when ctx.elicit is unavailable', async () => {
+  it('apply with force=true writes without a confirmation round', async () => {
     const ctx = await connect(fetcher);
     setupReadCalls(fetcher);
 
@@ -269,6 +307,8 @@ describe('brapi_submit_observations tool', () => {
     if (result.result.mode === 'apply') {
       expect(result.result.posted).toHaveLength(1);
     }
+    expect(writeMethods(fetcher)).toEqual(['POST']);
+    expect(renderText(result)).toContain('- posted: 1');
   });
 
   it('apply throws ValidationError when POST is needed but server lacks the method', async () => {

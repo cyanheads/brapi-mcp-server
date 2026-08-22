@@ -3,14 +3,15 @@
  * observations for a study. Two-phase write: `mode: 'preview'` validates rows
  * against the study's observation variables and returns a routing breakdown
  * (POST for new rows, PUT for rows carrying `observationDbId`); `mode: 'apply'`
- * elicits confirmation when supported, fans the rows out to POST + PUT in
- * parallel, then verifies the post-state with a cheap `pageSize=1` count.
- * Additive write — no observation is destroyed by this tool.
+ * asks the caller to confirm via a multi-round-trip `input_required` result,
+ * then fans the rows out to POST + PUT in parallel and verifies the post-state
+ * with a cheap `pageSize=1` count. Additive write — no observation is destroyed
+ * by this tool.
  *
  * @module mcp-server/tools/definitions/brapi-submit-observations.tool
  */
 
-import { type Context, type HandlerContext, tool, z } from '@cyanheads/mcp-ts-core';
+import { type Context, inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
@@ -237,25 +238,23 @@ const SUBMIT_ERRORS = [
       'Connect to a different server that supports PUT on /observations — dropping observationDbId would route as POST and create duplicates instead of updating the existing rows.',
   },
   {
-    reason: 'elicit_unavailable',
-    code: JsonRpcErrorCode.Forbidden,
-    when: 'Apply mode invoked but client does not expose ctx.elicit and force was false',
-    recovery:
-      'Set force=true only with explicit user authorization, or use a client that supports elicitation.',
-  },
-  {
     reason: 'user_declined',
     code: JsonRpcErrorCode.Forbidden,
-    when: 'User declined the elicitation prompt for the apply write',
-    recovery: 'Re-run the tool when the user is ready to confirm the write.',
+    when: 'The confirmation round came back declined, cancelled, or without a true `confirm` value',
+    recovery:
+      'Re-run brapi_submit_observations when the user is ready to confirm, or pass force=true with explicit out-of-band authorization.',
   },
 ] as const;
 
-type SubmitCtx = HandlerContext<(typeof SUBMIT_ERRORS)[number]['reason']>;
+const ConfirmSchema = z.object({
+  confirm: z
+    .boolean()
+    .describe('Set to true to commit the writes; false to abort with no side effects.'),
+});
 
 export const brapiSubmitObservations = tool('brapi_submit_observations', {
   description:
-    'Submit observations for a study. Default mode `preview` validates rows against the study variables and returns a routing breakdown without writing. Mode `apply` elicits confirmation when supported, then creates new rows or updates existing ones based on observationDbId presence. Additive only — no observation is destroyed.',
+    'Submit observations for a study. Default mode `preview` validates rows against the study variables and returns a routing breakdown without writing. Mode `apply` asks the caller to confirm the write, then creates new rows or updates existing ones based on observationDbId presence. Additive only — no observation is destroyed.',
   annotations: {
     readOnlyHint: false,
     destructiveHint: false,
@@ -274,14 +273,12 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
     mode: z
       .enum(['preview', 'apply'])
       .default('preview')
-      .describe(
-        '`preview` (default) validates only; `apply` writes after eliciting confirmation when supported.',
-      ),
+      .describe('`preview` (default) validates only; `apply` writes after the caller confirms.'),
     force: z
       .boolean()
       .default(false)
       .describe(
-        'Bypass elicitation in apply mode. Use only when the client lacks ctx.elicit support and explicit user authorization for the write has been recorded out-of-band.',
+        'Skip the confirmation round in apply mode. Use only when explicit user authorization for the write has been recorded out-of-band.',
       ),
   }),
   output: OutputSchema,
@@ -411,15 +408,32 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
       );
     }
 
-    await confirmApply(ctx, {
-      studyDbId: input.studyDbId,
-      studyName,
-      valid,
-      invalid,
-      postCount,
-      putCount,
-      force: input.force,
-    });
+    if (!input.force) {
+      const answered = ctx.inputs.view('confirm');
+      if (answered.kind === 'missing') {
+        return ctx.requestInput({
+          inputRequests: {
+            confirm: inputRequired.elicit({
+              message: [
+                `Apply ${valid} observation row(s) to study \`${input.studyDbId}\`${studyName ? ` (${studyName})` : ''}?`,
+                `POST ${postCount} new · PUT ${putCount} update · ${invalid} skipped (structural errors).`,
+              ].join('\n'),
+              requestedSchema: ConfirmSchema,
+            }),
+          },
+        });
+      }
+      // Declined, cancelled, another response kind, or a payload the schema
+      // rejects — all terminal. Re-asking would burn rounds without a new answer.
+      const answer = ctx.inputs.accepted('confirm', ConfirmSchema);
+      if (!answer?.confirm) {
+        throw ctx.fail('user_declined', 'User declined to apply observation writes.', {
+          studyDbId: input.studyDbId,
+          action: answered.kind === 'elicit' ? answered.action : answered.kind,
+          ...ctx.recoveryFor('user_declined'),
+        });
+      }
+    }
 
     const validRows = decisions.flatMap((d) => {
       if (d.warnings.some(isStructural)) return [];
@@ -564,55 +578,6 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
 
 function isStructural(warning: string): boolean {
   return warning.endsWith('is required.');
-}
-
-interface ConfirmInput {
-  force: boolean;
-  invalid: number;
-  postCount: number;
-  putCount: number;
-  studyDbId: string;
-  studyName: string | undefined;
-  valid: number;
-}
-
-async function confirmApply(ctx: SubmitCtx, input: ConfirmInput): Promise<void> {
-  if (input.force) return;
-  if (!ctx.elicit) {
-    throw ctx.fail(
-      'elicit_unavailable',
-      'Apply mode requires user confirmation. The MCP client does not expose elicitation, so set `force: true` to bypass — but only with explicit user authorization for this write.',
-      {
-        studyDbId: input.studyDbId,
-        valid: input.valid,
-        invalid: input.invalid,
-        ...ctx.recoveryFor('elicit_unavailable'),
-      },
-    );
-  }
-  const message = [
-    `Apply ${input.valid} observation row(s) to study \`${input.studyDbId}\`${input.studyName ? ` (${input.studyName})` : ''}?`,
-    `POST ${input.postCount} new · PUT ${input.putCount} update · ${input.invalid} skipped (structural errors).`,
-  ].join('\n');
-  const result = await ctx.elicit(
-    message,
-    z.object({
-      confirm: z
-        .boolean()
-        .describe('Set to true to commit the writes; false to abort with no side effects.'),
-    }),
-  );
-  const confirmed =
-    typeof result.data === 'object' &&
-    result.data !== null &&
-    (result.data as { confirm?: unknown }).confirm === true;
-  if (result.action !== 'accept' || !confirmed) {
-    throw ctx.fail('user_declined', 'User declined to apply observation writes.', {
-      studyDbId: input.studyDbId,
-      action: result.action,
-      ...ctx.recoveryFor('user_declined'),
-    });
-  }
 }
 
 async function fetchStudyVariables(

@@ -8,7 +8,7 @@
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { brapiDataframeQuery } from '@/mcp-server/tools/definitions/brapi-dataframe-query.tool.js';
 import { initCanvasBridge, resetCanvasBridge } from '@/services/canvas-bridge/index.js';
@@ -303,5 +303,54 @@ describe('brapi_dataframe_query format', () => {
     const text =
       (formatted ?? [])[0]?.type === 'text' ? (formatted![0] as { text: string }).text : '';
     expect(text).toContain('No rows');
+  });
+});
+
+describe('brapi_dataframe_query truncation disclosure', () => {
+  afterEach(() => {
+    resetCanvasBridge();
+  });
+
+  const threeRows = [{ n: 1 }, { n: 2 }, { n: 3 }];
+
+  it('names preview as the binding ceiling when it is the smaller of the two', async () => {
+    const fake = new FakeDataCanvas();
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.spyOn(bridge, 'query').mockResolvedValue({ rows: threeRows, columns: ['n'], rowCount: 10 });
+    const input = brapiDataframeQuery.input.parse({
+      sql: 'SELECT n FROM df_foo',
+      preview: 3,
+      rowLimit: 100,
+    });
+    const res = await runToolContract(brapiDataframeQuery, input);
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.truncated).toBe(true);
+    expect(sc.shown).toBe(3);
+    expect(sc.cap).toBe(3);
+    expect(sc.notice).toMatch(/`preview` bound the response at 3 of 10 rows/);
+    expect(JSON.stringify(res.content)).toMatch(/preview/);
+  });
+
+  it('names rowLimit as the binding ceiling when preview is absent or larger', async () => {
+    const fake = new FakeDataCanvas();
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.spyOn(bridge, 'query').mockResolvedValue({ rows: threeRows, columns: ['n'], rowCount: 10 });
+    const input = brapiDataframeQuery.input.parse({ sql: 'SELECT n FROM df_foo', rowLimit: 3 });
+    const res = await runToolContract(brapiDataframeQuery, input);
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.cap).toBe(3);
+    expect(sc.notice).toMatch(/`rowLimit` bound the response at 3 of 10 rows/);
+  });
+
+  it('emits no truncation fields when every row came back', async () => {
+    const fake = new FakeDataCanvas();
+    const bridge = initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
+    vi.spyOn(bridge, 'query').mockResolvedValue({ rows: threeRows, columns: ['n'], rowCount: 3 });
+    const input = brapiDataframeQuery.input.parse({ sql: 'SELECT n FROM df_foo' });
+    const res = await runToolContract(brapiDataframeQuery, input);
+    const sc = res.structuredContent as Record<string, unknown>;
+    expect(sc.truncated).toBeUndefined();
+    expect(sc.notice).toBeUndefined();
   });
 });

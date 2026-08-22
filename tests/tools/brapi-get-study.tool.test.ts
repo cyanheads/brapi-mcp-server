@@ -148,8 +148,8 @@ describe('brapi_get_study tool', () => {
     // attached.
     fetcher.mockRejectedValue(
       serviceUnavailable('Fetch failed. Status: 500', {
-        statusCode: 500,
-        responseBody: 'Internal Server Error',
+        status: 500,
+        body: 'Internal Server Error',
       }),
     );
     await expect(

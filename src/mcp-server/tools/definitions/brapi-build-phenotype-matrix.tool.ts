@@ -149,6 +149,28 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     extraFilters: ExtraFiltersInput,
   }),
   output: OutputSchema,
+  enrichment: {
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when at least one study saturated the per-study loadLimit.'),
+    shown: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Observations collected across all studies after filtering.'),
+    cap: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('Per-study observation cap that was applied.'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance for reaching the observations this call left out.'),
+  },
 
   async handler(input, ctx) {
     const client = getBrapiClient();
@@ -183,9 +205,13 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       failFast: true,
       ctx,
     });
+    const cappedStudies: string[] = [];
     for (const outcome of outcomes) {
       if (outcome.error !== undefined) throw outcome.error;
       warnings.push(...outcome.warnings);
+      // Each study's pull is bounded at loadLimit, so a saturated count means
+      // the upstream had more rows than this call collected.
+      if ((outcome.observations?.length ?? 0) >= loadLimit) cappedStudies.push(outcome.studyDbId);
       if (outcome.observations === null) {
         throw ctx.fail(
           'no_observation_path',
@@ -282,6 +308,14 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
         createdAt: dataframe.createdAt,
         expiresAt: dataframe.expiresAt,
       };
+    }
+
+    if (cappedStudies.length > 0) {
+      ctx.enrich.truncated({
+        shown: filteredObs.length,
+        cap: loadLimit,
+        guidance: `Per-study collection hit loadLimit (${loadLimit}) for ${cappedStudies.join(', ')} — the matrix covers a partial set. Raise loadLimit, or narrow with variables / germplasm / fewer studies.`,
+      });
     }
 
     return result;

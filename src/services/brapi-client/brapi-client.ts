@@ -21,7 +21,7 @@ import {
   unauthorized,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import type { FetchWithTimeoutOptions, RequestContext } from '@cyanheads/mcp-ts-core/utils';
+import type { FetchWithTimeoutOptions } from '@cyanheads/mcp-ts-core/utils';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type {
@@ -34,17 +34,8 @@ import type {
 import { DIALECT_ALL_DROPPED_REASON } from './types.js';
 
 /**
- * `fetchWithTimeout` and `withRetry` accept `RequestContext`, not the broader
- * `RequestContextLike` that canvas uses. `Context` is structurally compatible
- * at runtime but diverges under `exactOptionalPropertyTypes` — one cast here
- * covers all call sites.
- */
-const asRequestContext = (ctx: Context): RequestContext => ctx as unknown as RequestContext;
-
-/**
- * Signature of the underlying HTTP fetcher. Accepts the handler `Context`
- * directly so callers (and tests) don't have to cast; the default
- * implementation adapts to `fetchWithTimeout`.
+ * Signature of the underlying HTTP fetcher. `Context extends RequestContext`,
+ * so the handler context passes straight through to `fetchWithTimeout`.
  */
 export type Fetcher = (
   url: string | URL,
@@ -54,7 +45,7 @@ export type Fetcher = (
 ) => Promise<Response>;
 
 const defaultFetcher: Fetcher = (url, timeoutMs, context, options) =>
-  fetchWithTimeout(url, timeoutMs, asRequestContext(context), options);
+  fetchWithTimeout(url, timeoutMs, context, options);
 
 export class BrapiClient {
   constructor(
@@ -91,7 +82,7 @@ export class BrapiClient {
       },
       {
         operation: `brapi.get ${path}`,
-        context: asRequestContext(ctx),
+        context: ctx,
         maxRetries: options.retryMaxAttempts ?? this.serverConfig.retryMaxAttempts,
         baseDelayMs: this.serverConfig.retryBaseDelayMs,
         signal: ctx.signal,
@@ -126,7 +117,7 @@ export class BrapiClient {
       },
       {
         operation: `brapi.getBinary ${path}`,
-        context: asRequestContext(ctx),
+        context: ctx,
         maxRetries: this.serverConfig.retryMaxAttempts,
         baseDelayMs: this.serverConfig.retryBaseDelayMs,
         signal: ctx.signal,
@@ -189,7 +180,7 @@ export class BrapiClient {
       },
       {
         operation: `brapi.postSearch ${noun}`,
-        context: asRequestContext(ctx),
+        context: ctx,
         maxRetries: this.serverConfig.retryMaxAttempts,
         baseDelayMs: this.serverConfig.retryBaseDelayMs,
         signal: ctx.signal,
@@ -253,7 +244,7 @@ export class BrapiClient {
       },
       {
         operation: `brapi.${method.toLowerCase()} ${path}`,
-        context: asRequestContext(ctx),
+        context: ctx,
         maxRetries: this.serverConfig.retryMaxAttempts,
         baseDelayMs: this.serverConfig.retryBaseDelayMs,
         signal: ctx.signal,
@@ -323,6 +314,10 @@ export class BrapiClient {
         ...init,
         signal: ctx.signal,
         rejectPrivateIPs: !this.serverConfig.allowPrivateIps,
+        // Every singleton caller catches the not-found and reports it as an
+        // absent record, so a 404 here is an outcome, not an incident — log it
+        // at debug. The mapped McpError is thrown either way.
+        ...(singleton ? { expectedStatuses: [404] } : {}),
       });
     } catch (err) {
       reclassifyHttpError(err, singleton);
@@ -391,7 +386,7 @@ export class BrapiClient {
  * upstreams (notably Breedbase) serve HTTP 500 for unknown DbIds instead of
  * 404, and retrying through that just delays the inevitable "not found"
  * outcome. Network-level errors, which have no
- * `statusCode`, pass through untouched.
+ * `status`, pass through untouched.
  */
 function reclassifyHttpError(err: unknown, singleton: boolean = false): void {
   if (!(err instanceof McpError)) return;
@@ -421,7 +416,7 @@ function reclassifyHttpError(err: unknown, singleton: boolean = false): void {
 function extractHttpStatus(err: McpError): number | undefined {
   const data = asRecord(err.data);
   if (!data) return;
-  const status = data.statusCode;
+  const status = data.status;
   return typeof status === 'number' ? status : undefined;
 }
 

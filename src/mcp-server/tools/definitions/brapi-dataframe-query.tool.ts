@@ -160,6 +160,23 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
   ] as const,
   input: InputSchema,
   output: OutputSchema,
+  enrichment: {
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the response carries fewer rows than the query produced.'),
+    shown: z.number().int().nonnegative().optional().describe('Rows materialized into `rows`.'),
+    cap: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('Row ceiling that bound the response (the smaller of preview and rowLimit).'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance for reaching the rows this response left out.'),
+  },
 
   async handler(input, ctx) {
     const bridge = getCanvasBridge();
@@ -208,6 +225,23 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
       rows: result.rows,
     };
     if (userRegisterAs !== undefined) out.dataframe = userRegisterAs;
+
+    if (out.rows.length < out.rowCount) {
+      // Two ceilings can bind here — `preview` and the (config-clamped)
+      // `rowLimit` — and the rows that came back are exactly the one that did,
+      // so report that count as the cap and name the lever that produced it.
+      const shown = out.rows.length;
+      const lever = input.preview !== undefined && shown === input.preview ? 'preview' : 'rowLimit';
+      ctx.enrich.truncated({
+        shown,
+        cap: shown,
+        guidance: `\`${lever}\` bound the response at ${shown} of ${out.rowCount} rows. ${
+          userRegisterAs
+            ? `Query \`${userRegisterAs}\` with LIMIT/OFFSET to walk the remainder, or aggregate instead of materializing it.`
+            : 'Re-run with `registerAs` to keep the full result queryable, then page it with LIMIT/OFFSET.'
+        }`,
+      });
+    }
     return out;
   },
 

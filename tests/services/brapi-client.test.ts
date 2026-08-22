@@ -38,11 +38,14 @@ function jsonResponse(body: unknown, status = 200, init: ResponseInit = {}): Res
   });
 }
 
-function httpError(status: number, responseBody = 'error'): McpError {
+function httpError(status: number, body = 'error'): McpError {
+  // Mirrors the canonical `error.data` shape fetchWithTimeout emits. The
+  // legacy `statusCode` / `responseBody` aliases are deliberately omitted so
+  // the client stays pinned to the canonical names.
   return serviceUnavailable(`Fetch failed. Status: ${status}`, {
-    statusCode: status,
+    status,
     statusText: 'Error',
-    responseBody,
+    body,
   });
 }
 
@@ -164,7 +167,7 @@ describe('BrapiClient', () => {
       expect(result).toBeInstanceOf(McpError);
       expect((result as McpError).code).toBe(JsonRpcErrorCode.ValidationError);
       expect((result as McpError).data).toMatchObject({
-        responseBody: 'Unknown filter: bogusFilter',
+        body: 'Unknown filter: bogusFilter',
       });
     });
 

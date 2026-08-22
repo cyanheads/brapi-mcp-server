@@ -16,7 +16,6 @@ import {
   serviceUnavailable,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type { ResolvedAuth } from '@/services/brapi-client/index.js';
@@ -250,7 +249,7 @@ const defaultTokenFetcher: TokenFetcher = async (url, body, ctx, options) => {
   }
   let response: Response;
   try {
-    response = await fetchWithTimeout(url, options.timeoutMs, ctx as unknown as RequestContext, {
+    response = await fetchWithTimeout(url, options.timeoutMs, ctx, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
