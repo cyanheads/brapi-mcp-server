@@ -10,7 +10,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
 import {
   type BrapiClient,
@@ -122,6 +122,13 @@ export class CapabilityRegistry {
       );
       serverInfo = serverInfoEnv.result;
     } catch (err) {
+      // An auth failure means the whole connection is unusable, not a gap to
+      // degrade around — surface it as-is instead of building an empty
+      // profile that reports "0 services advertised" with no indication that
+      // credentials are the fix. See: aliases that flip to an auth wall after
+      // being registered as no-auth (e.g. #52).
+      if (isUpstreamAuthError(err)) throw err;
+
       const message = err instanceof Error ? err.message : String(err);
       ctx.log.warning('Failed to fetch /serverinfo; falling back to /calls-only profile', {
         baseUrl,
@@ -312,6 +319,22 @@ function extractDataArray<T>(envelope: BrapiEnvelope<T[] | { data: T[] }>): T[] 
 
 function sanitizeKey(value: string): string {
   return value.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/**
+ * True for the `upstream_unauthorized` / `upstream_forbidden` errors
+ * `BrapiClient` throws on a 401/403 (see `reclassifyHttpError` in
+ * `services/brapi-client/brapi-client.ts`). These are not transient or
+ * gap-shaped like a missing endpoint — no amount of retrying or falling back
+ * to `/calls` fixes an auth wall, so they should propagate rather than be
+ * folded into a degraded profile's warnings.
+ */
+function isUpstreamAuthError(err: unknown): boolean {
+  if (!(err instanceof McpError)) return false;
+  const data = err.data;
+  if (typeof data !== 'object' || data === null) return false;
+  const reason = (data as Record<string, unknown>).reason;
+  return reason === 'upstream_unauthorized' || reason === 'upstream_forbidden';
 }
 
 let _registry: CapabilityRegistry | undefined;

@@ -6,7 +6,12 @@
  * @module tests/services/capability-registry.test
  */
 
-import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  forbidden,
+  JsonRpcErrorCode,
+  serviceUnavailable,
+  unauthorized,
+} from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
@@ -136,6 +141,48 @@ describe('CapabilityRegistry', () => {
       expect(profile.supported.studies?.methods).toContain('GET');
       expect(profile.server.brapiVersion).toBe('2.1');
       expect(profile.warnings?.some((w) => w.includes('/serverinfo was unavailable'))).toBe(true);
+    });
+
+    it('propagates a 401 from /serverinfo instead of degrading to an empty profile', async () => {
+      client.get.mockImplementation(async (_base, path: string) => {
+        if (path === '/serverinfo') {
+          throw unauthorized(
+            'Fetch failed for https://example.org/brapi/v2/serverinfo. Status: 401',
+            {
+              status: 401,
+              reason: 'upstream_unauthorized',
+            },
+          );
+        }
+        throw new Error(`Unexpected path: ${path}`);
+      });
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+      await expect(registry.profile(BASE_URL, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Unauthorized,
+        data: expect.objectContaining({ reason: 'upstream_unauthorized' }),
+      });
+      // No fallback /calls hit — an auth wall on /serverinfo means the whole
+      // connection is unusable, not a gap to fall back around.
+      expect(client.get).toHaveBeenCalledTimes(1);
+    });
+
+    it('propagates a 403 from /serverinfo instead of degrading to an empty profile', async () => {
+      client.get.mockImplementation(async (_base, path: string) => {
+        if (path === '/serverinfo') {
+          throw forbidden('Fetch failed for https://example.org/brapi/v2/serverinfo. Status: 403', {
+            status: 403,
+            reason: 'upstream_forbidden',
+          });
+        }
+        throw new Error(`Unexpected path: ${path}`);
+      });
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+      await expect(registry.profile(BASE_URL, ctx)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Forbidden,
+        data: expect.objectContaining({ reason: 'upstream_forbidden' }),
+      });
     });
 
     it('degrades gracefully when /commoncropnames is unavailable', async () => {
