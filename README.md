@@ -334,6 +334,14 @@ Defaults to HTTP transport, stateful session mode (engages the `mcp-session-id` 
 
 ---
 
+## Examples
+
+| Path | Description |
+|:-----|:------------|
+| [`examples/python/`](./examples/python/) | Drive the server from Python with the official `mcp` client SDK — connect, find studies, and run SQL against the dataframe layer. |
+
+---
+
 ## Development
 
 See [`CLAUDE.md`](./CLAUDE.md) for full architectural rules. Short version:
