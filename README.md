@@ -194,7 +194,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 No env vars are required — the six built-in aliases (`bti-cassava`, `bti-sweetpotato`, `bti-breedbase-demo`, `t3-wheat`, `t3-oat`, `t3-barley`) resolve out-of-the-box, and agents can connect to any other BrAPI v2 URL at runtime via `brapi_connect`. **For credentialed servers, prefer env vars over agent input** so passwords / tokens / API keys stay out of the LLM context — see [Per-alias credentials](#per-alias-credentials).
 
-**Prerequisites:** [Bun v1.3.11+](https://bun.sh/) or Node.js v24+. [`@duckdb/node-api`](https://www.npmjs.com/package/@duckdb/node-api) is a required dependency — supported on Linux/macOS/Windows × x64 plus Linux/macOS arm64 (no Windows arm64; no Cloudflare Workers).
+**Prerequisites:** [Bun v1.4.0+](https://bun.sh/) or Node.js v24+. [`@duckdb/node-api`](https://www.npmjs.com/package/@duckdb/node-api) is a required dependency — supported on Linux/macOS/Windows × x64 plus Linux/macOS arm64 (no Windows arm64; no Cloudflare Workers).
 
 ---
 
@@ -225,7 +225,7 @@ Every variable is optional.
 | `BRAPI_CANVAS_DROP_ENABLED` | Opt-in for `brapi_dataframe_drop` registration. Off by default; dataframes expire via TTL when left unmanaged. | `false` |
 | `BRAPI_EXPORT_DIR` | Directory for `brapi_dataframe_export` output files. Setting a path is the opt-in (no separate enable flag); unset leaves the tool out of `tools/list`. Stdio-only — the tool stays disabled under HTTP transport regardless of this value. Bridged to the framework's `CANVAS_EXPORT_PATH` automatically. | — |
 | `BRAPI_CANVAS_MAX_ROWS` / `BRAPI_CANVAS_QUERY_TIMEOUT_MS` | Per-query response row cap and wall-clock timeout for `brapi_dataframe_query`. | `10000` / `30000` |
-| `MCP_TRANSPORT_TYPE` / `MCP_HTTP_PORT` / `MCP_SESSION_MODE` | Transport (`stdio` \| `http`), HTTP port, session mode (`stateful` \| `stateless` \| `auto`; `auto` resolves to stateful for HTTP). | `stdio` / `3010` / `stateful` |
+| `MCP_TRANSPORT_TYPE` / `MCP_HTTP_PORT` / `MCP_SESSION_MODE` | Transport (`stdio` \| `http`), HTTP port, session mode: `stateful` retains 2025 client sessions for observation-write confirmation; `stateless` cannot perform that confirmation round; `auto` (framework default) resolves to stateful for HTTP. Docker and the env example pin `stateful`. | `stdio` / `3010` / `stateful` |
 | `MCP_AUTH_MODE` / `MCP_LOG_LEVEL` / `STORAGE_PROVIDER_TYPE` / `OTEL_ENABLED` | Auth mode (`none` \| `jwt` \| `oauth`), log level, storage backend, OpenTelemetry. | `none` / `info` / `in-memory` / `false` |
 | `BRAPI_SESSION_ISOLATION` | When `true`, scope ServerRegistry connection state and the CanvasBridge default canvas to `ctx.sessionId` (HTTP stateful/auto). Concurrent callers under `MCP_AUTH_MODE=none` operate in isolated workspaces. Set `false` for the shared-workspace collaboration model. No effect on stdio. | `true` |
 
