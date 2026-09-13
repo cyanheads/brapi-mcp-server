@@ -29,7 +29,7 @@
 
 ## Overview
 
-An MCP server over BrAPI v2.1 (the Breeding API) — search studies, germplasm, observations, genotypes, images, locations, and variants across Breedbase, T3, Sweetpotatobase, and any BrAPI v2-compliant server. Result sets beyond the per-call cap spill into a DuckDB-backed dataframe workspace that agents on the same session can query with SQL or hand off by name, and connections to multiple upstream servers can be held open in parallel under named aliases. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+BrAPI v2.1 (the Breeding API) data from Breedbase, T3, Sweetpotatobase, and any BrAPI v2-compliant server. Search studies, germplasm, observations, genotypes, images, locations, and variants — result sets beyond the per-call cap spill into a DuckDB-backed dataframe workspace that agents on the same session can query with SQL or hand off by name, and connections to multiple upstream servers can be held open in parallel under named aliases. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
 ### Tools
 
