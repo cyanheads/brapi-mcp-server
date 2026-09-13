@@ -45,6 +45,15 @@ describe('aliasEnvPrefix', () => {
 });
 
 describe('readAliasCredentials', () => {
+  it('treats whole-value host placeholders as unset while preserving literal segments', () => {
+    expect(
+      readAliasCredentials('cassava', {
+        BRAPI_CASSAVA_BASE_URL: `\${user_config.BRAPI_CASSAVA_BASE_URL}`,
+        BRAPI_CASSAVA_API_KEY: `\${user_config.BRAPI_CASSAVA_API_KEY}`,
+        BRAPI_CASSAVA_PASSWORD: `prefix-\${secret}-suffix`,
+      }),
+    ).toEqual({ password: `prefix-\${secret}-suffix` });
+  });
   it('reads all known fields from env', () => {
     const env = {
       BRAPI_CASSAVA_BASE_URL: 'https://cassavabase.org/brapi/v2',
@@ -339,6 +348,25 @@ describe('resolveConnectInput with builtin registry', () => {
 });
 
 describe('discoverConfiguredAliases', () => {
+  it('does not advertise placeholders as configured aliases or shadow a builtin', () => {
+    const env = {
+      BRAPI_UNKNOWN_BASE_URL: `\${user_config.BRAPI_UNKNOWN_BASE_URL}`,
+      BRAPI_BTI_CASSAVA_BASE_URL: `\${user_config.BRAPI_BTI_CASSAVA_BASE_URL}`,
+      BRAPI_BTI_CASSAVA_API_KEY: `\${user_config.BRAPI_BTI_CASSAVA_API_KEY}`,
+    };
+    const aliases = discoverConfiguredAliases(env);
+    expect(aliases.some((a) => a.alias === 'unknown')).toBe(false);
+    expect(aliases.find((a) => a.alias === 'bti-cassava')).toEqual({
+      alias: 'bti-cassava',
+      authMode: 'none',
+      origin: 'builtin',
+      baseUrl: 'https://cassavabase.org/brapi/v2',
+    });
+    expect(resolveConnectInput('bti-cassava', {}, env)).toEqual({
+      baseUrl: 'https://cassavabase.org/brapi/v2',
+      auth: { mode: 'none' },
+    });
+  });
   it('returns empty when no BRAPI_*_BASE_URL keys are set and builtins are disabled', () => {
     expect(discoverConfiguredAliases({ ...NO_BUILTINS, BRAPI_LOAD_LIMIT: '500' })).toEqual([]);
   });

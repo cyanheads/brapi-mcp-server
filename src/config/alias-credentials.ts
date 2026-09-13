@@ -9,6 +9,8 @@
  * @module config/alias-credentials
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
+import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import { findBuiltinAlias, listBuiltinAliases } from '@/config/builtin-aliases.js';
 import type { AuthMode, ConnectAuth } from '@/services/server-registry/index.js';
@@ -41,6 +43,18 @@ const FIELD_SUFFIXES: ReadonlyArray<readonly [keyof AliasCredentials, string]> =
   ['oauthTokenUrl', 'OAUTH_TOKEN_URL'],
 ];
 
+const AliasCredentialsSchema = z.object({
+  baseUrl: z.string().optional(),
+  username: z.string().optional(),
+  password: z.string().optional(),
+  apiKey: z.string().optional(),
+  apiKeyHeader: z.string().optional(),
+  bearerToken: z.string().optional(),
+  oauthClientId: z.string().optional(),
+  oauthClientSecret: z.string().optional(),
+  oauthTokenUrl: z.string().optional(),
+});
+
 const DEFAULT_ALIAS = 'default';
 const NONE_AUTH: ConnectAuth = { mode: 'none' };
 
@@ -49,16 +63,21 @@ export function aliasEnvPrefix(alias: string): string {
   return `BRAPI_${alias.replace(/-/g, '_').toUpperCase()}_`;
 }
 
-/** Read all `BRAPI_<ALIAS>_*` vars for an alias. Empty strings treated as unset. */
+/** Read alias env vars; empty strings and whole-value host placeholders are unset. */
 export function readAliasCredentials(
   alias: string,
   env: NodeJS.ProcessEnv = process.env,
 ): AliasCredentials {
   const prefix = aliasEnvPrefix(alias);
+  const parsed = parseEnvConfig(
+    AliasCredentialsSchema,
+    Object.fromEntries(FIELD_SUFFIXES.map(([field, suffix]) => [field, `${prefix}${suffix}`])),
+    env,
+  );
   const result: AliasCredentials = {};
-  for (const [field, suffix] of FIELD_SUFFIXES) {
-    const value = env[`${prefix}${suffix}`];
-    if (value !== undefined && value !== '') result[field] = value;
+  for (const [field] of FIELD_SUFFIXES) {
+    const value = parsed[field];
+    if (value !== undefined) result[field] = value;
   }
   return result;
 }
@@ -201,17 +220,18 @@ export function discoverConfiguredAliases(env: NodeJS.ProcessEnv = process.env):
   // hyphenated builtin would be reported as a separate `bti_cassava` alias.
   const builtinByUnderscoredName = new Map(builtins.map((b) => [b.alias.replace(/-/g, '_'), b]));
 
-  for (const [key, value] of Object.entries(env)) {
+  for (const key of Object.keys(env)) {
     const match = key.match(ALIAS_BASE_URL_PATTERN);
     const captured = match?.[1];
-    if (!captured || !value) continue;
+    if (!captured) continue;
     const lowerCaptured = captured.toLowerCase();
     const alias = builtinByUnderscoredName.get(lowerCaptured)?.alias ?? lowerCaptured;
     const creds = readAliasCredentials(alias, env);
+    if (!creds.baseUrl) continue;
     result.push({
       alias,
       authMode: deriveModeForDiscovery(creds, alias),
-      baseUrl: value,
+      baseUrl: creds.baseUrl,
       origin: 'env',
     });
     seen.add(alias);

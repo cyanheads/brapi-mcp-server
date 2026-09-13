@@ -8,7 +8,7 @@
 
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { BrapiClient, type Fetcher, type ResolvedAuth } from '@/services/brapi-client/index.js';
 
@@ -60,6 +60,66 @@ describe('BrapiClient', () => {
   beforeEach(() => {
     fetcher = vi.fn() as unknown as Fetcher & ReturnType<typeof vi.fn>;
     client = new BrapiClient(baseConfig, fetcher);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  describe('production fetch classification and retries', () => {
+    it('maps an HTTP 500 singleton to NotFound without retrying', async () => {
+      const network = vi.fn().mockResolvedValue(new Response('unknown study', { status: 500 }));
+      vi.stubGlobal('fetch', network);
+      const realClient = new BrapiClient({
+        ...baseConfig,
+        allowPrivateIps: true,
+        retryMaxAttempts: 2,
+      });
+      await expect(
+        realClient.get(BASE_URL, '/studies/missing', createMockContext(), { singleton: true }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'upstream_not_found', upstreamStatus: 500 },
+      });
+      expect(network).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries an ordinary HTTP 500 and returns the successful response', async () => {
+      const network = vi
+        .fn()
+        .mockResolvedValueOnce(new Response('temporarily unavailable', { status: 500 }))
+        .mockResolvedValueOnce(jsonResponse(envelope({ data: [{ studyDbId: 's1' }] })));
+      vi.stubGlobal('fetch', network);
+      const realClient = new BrapiClient({
+        ...baseConfig,
+        allowPrivateIps: true,
+        retryMaxAttempts: 2,
+      });
+      await expect(
+        realClient.get(BASE_URL, '/studies', createMockContext()),
+      ).resolves.toMatchObject({
+        result: { data: [{ studyDbId: 's1' }] },
+      });
+      expect(network).toHaveBeenCalledTimes(2);
+    });
+
+    it('preserves HTTP 501 retryable=false instead of retrying the unsupported method', async () => {
+      const network = vi.fn().mockResolvedValue(new Response('not implemented', { status: 501 }));
+      vi.stubGlobal('fetch', network);
+      const realClient = new BrapiClient({
+        ...baseConfig,
+        allowPrivateIps: true,
+        retryMaxAttempts: 2,
+      });
+      await expect(realClient.get(BASE_URL, '/studies', createMockContext())).rejects.toMatchObject(
+        {
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          data: { status: 501, retryable: false },
+        },
+      );
+      expect(network).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('get', () => {
@@ -298,6 +358,44 @@ describe('BrapiClient', () => {
   });
 
   describe('getSearchResults', () => {
+    it('classifies an already cancelled poll without fetching', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const ctx = createMockContext({ signal: controller.signal });
+      await expect(
+        client.getSearchResults(BASE_URL, 'observations', 'abc', ctx),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RequestCancelled,
+        data: { noun: 'observations', searchResultsDbId: 'abc' },
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+    });
+
+    it('cancels the wait between polls without another request', async () => {
+      const controller = new AbortController();
+      const listener = vi.spyOn(controller.signal, 'addEventListener');
+      fetcher.mockResolvedValue(new Response('', { status: 202 }));
+      const waitingClient = new BrapiClient(
+        { ...baseConfig, searchPollIntervalMs: 10_000 },
+        fetcher,
+      );
+      const pending = waitingClient.getSearchResults(
+        BASE_URL,
+        'observations',
+        'abc',
+        createMockContext({ signal: controller.signal }),
+      );
+      const assertion = expect(pending).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RequestCancelled,
+      });
+      await vi.waitFor(() =>
+        expect(listener).toHaveBeenCalledWith('abort', expect.any(Function), { once: true }),
+      );
+      controller.abort();
+      await assertion;
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+
     it('returns the envelope on a 200 response', async () => {
       fetcher.mockResolvedValue(jsonResponse(envelope({ data: [{ observationDbId: 'o1' }] })));
       const ctx = createMockContext();
@@ -356,7 +454,7 @@ describe('BrapiClient', () => {
 
       await expect(
         shortTimeout.getSearchResults(BASE_URL, 'observations', 'abc', ctx),
-      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+      ).rejects.toMatchObject({ code: JsonRpcErrorCode.Timeout });
     });
   });
 

@@ -6,7 +6,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiRawSearch } from '@/mcp-server/tools/definitions/brapi-raw-search.tool.js';
@@ -83,6 +83,44 @@ describe('brapi_raw_search tool', () => {
     expect(result.kind).toBe('async');
     expect(result.searchResultsDbId).toBe('abc-123');
     expect(result.suggestion).toContain('brapi_find_observations');
+  });
+
+  it('renders async cancellation consistently on both error surfaces without polling again', async () => {
+    const ctx = await connect(fetcher);
+    const controller = new AbortController();
+    fetcher.mockImplementationOnce(async () => {
+      controller.abort();
+      return jsonResponse(envelope({ searchResultsDbId: 'cancelled-search' }));
+    });
+    const definition = {
+      ...brapiRawSearch,
+      handler(input, contractCtx) {
+        return brapiRawSearch.handler(input, { ...contractCtx, state: ctx.state });
+      },
+    } satisfies typeof brapiRawSearch;
+    const result = await runToolContract(
+      definition,
+      { noun: 'observations', body: {} },
+      {
+        context: { tenantId: 't1', signal: controller.signal },
+      },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.RequestCancelled,
+        message: 'Async search polling aborted by caller',
+      },
+    });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'text',
+          text: expect.stringContaining('Async search polling aborted by caller'),
+        }),
+      ]),
+    );
+    expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
   it('rejects nouns containing path separators at parse time', () => {

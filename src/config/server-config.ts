@@ -33,10 +33,9 @@ export const GENOTYPE_MATRIX_MAX_COLUMNS_CEILING = 500_000;
 
 export const ServerConfigSchema = z.object({
   defaultBaseUrl: z
-    .preprocess(
-      (v) => (typeof v === 'string' && /^\$\{/.test(v) ? undefined : v),
-      z.string().url().optional(),
-    )
+    .string()
+    .url()
+    .optional()
     .describe('Default BrAPI v2 base URL if no connection is opened via brapi_connect.'),
   defaultUsername: z
     .string()

@@ -8,8 +8,8 @@
  * @module tests/config/server-config.test
  */
 
-import { describe, expect, it } from 'vitest';
-import { ServerConfigSchema } from '@/config/server-config.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { getServerConfig, resetServerConfig, ServerConfigSchema } from '@/config/server-config.js';
 
 describe('ServerConfigSchema defaults', () => {
   it('parses an empty input by populating every default', () => {
@@ -67,5 +67,34 @@ describe('ServerConfigSchema defaults', () => {
     const config = ServerConfigSchema.parse({ datasetTtlSeconds: '3600', loadLimit: '50' });
     expect(config.datasetTtlSeconds).toBe(3_600);
     expect(config.loadLimit).toBe(50);
+  });
+});
+
+describe('server environment configuration', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetServerConfig();
+  });
+
+  it.each(['', `\${user_config.BRAPI_DEFAULT_BASE_URL}`])('treats %j as unset', (value) => {
+    vi.stubEnv('BRAPI_DEFAULT_BASE_URL', value);
+    vi.stubEnv('BRAPI_LOAD_LIMIT', value);
+    vi.stubEnv('BRAPI_ENABLE_WRITES', value);
+    expect(getServerConfig()).toMatchObject({
+      defaultBaseUrl: undefined,
+      loadLimit: 1_000,
+      enableWrites: false,
+    });
+  });
+
+  it('rejects a malformed URL that starts with a placeholder', () => {
+    vi.stubEnv('BRAPI_DEFAULT_BASE_URL', `\${user_config.BRAPI_DEFAULT_BASE_URL}/brapi/v2`);
+    expect(() => getServerConfig()).toThrow(/BRAPI_DEFAULT_BASE_URL/);
+  });
+
+  it('preserves a valid URL containing a literal placeholder segment', () => {
+    const url = `https://example.org/\${instance}/brapi/v2`;
+    vi.stubEnv('BRAPI_DEFAULT_BASE_URL', url);
+    expect(getServerConfig().defaultBaseUrl).toBe(url);
   });
 });

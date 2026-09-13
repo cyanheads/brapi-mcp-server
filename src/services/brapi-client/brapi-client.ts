@@ -12,12 +12,13 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import {
   forbidden,
-  internalError,
   JsonRpcErrorCode,
   McpError,
   notFound,
   rateLimited,
+  requestCancelled,
   serviceUnavailable,
+  timeout,
   unauthorized,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
@@ -275,13 +276,13 @@ export class BrapiClient {
 
     for (;;) {
       if (ctx.signal.aborted) {
-        throw internalError('Async search polling aborted by caller', {
+        throw requestCancelled('Async search polling aborted by caller', {
           noun,
           searchResultsDbId,
         });
       }
       if (Date.now() - startedAt > pollTimeoutMs) {
-        throw serviceUnavailable(
+        throw timeout(
           `Async search ${noun}/${searchResultsDbId} timed out after ${pollTimeoutMs}ms`,
           { noun, searchResultsDbId, pollTimeoutMs },
         );
@@ -507,7 +508,7 @@ function extractAsyncId(envelope: BrapiEnvelope<unknown>): string | undefined {
 function sleep(ms: number, ctx: Context): Promise<void> {
   return new Promise((resolve, reject) => {
     if (ctx.signal.aborted) {
-      reject(internalError('Sleep aborted by caller'));
+      reject(requestCancelled('Sleep aborted by caller'));
       return;
     }
     const timer = setTimeout(() => {
@@ -516,7 +517,7 @@ function sleep(ms: number, ctx: Context): Promise<void> {
     }, ms);
     const onAbort = () => {
       clearTimeout(timer);
-      reject(internalError('Sleep aborted by caller'));
+      reject(requestCancelled('Sleep aborted by caller'));
     };
     ctx.signal.addEventListener('abort', onAbort, { once: true });
   });
