@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.12](changelog/0.7.x/0.7.12.md) — 2026-09-13
+
+Adopts @cyanheads/mcp-ts-core ^0.13.0: empty and unsubstituted ${…} env values read as unset across every BRAPI_* path, async-search cancellation and poll deadlines classify as RequestCancelled and Timeout, and the framework skill tree moves out of the plugin-loaded skills/ directory.
+
 ## [0.7.11](changelog/0.7.x/0.7.11.md) — 2026-08-22
 
 Adopts @cyanheads/mcp-ts-core ^0.12.3 (MCP SDK v2): every HTTP endpoint serves protocol revision 2026-07-28 alongside the 2025 era, undeclared tool arguments are rejected instead of stripped, and brapi_submit_observations' apply-mode confirmation becomes a multi-round-trip input_required result.
