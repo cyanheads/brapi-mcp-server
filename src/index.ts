@@ -116,6 +116,13 @@ const tools = [
 await createApp({
   name: 'brapi-mcp-server',
   title: 'brapi-mcp-server',
+  // `brapi_submit_observations` gates apply-mode writes on a `ctx.requestInput`
+  // confirmation round trip, which a 2025-era HTTP client can only answer on a
+  // durable session — and per-session isolation keys off `ctx.sessionId`. Declare
+  // the posture here rather than leaving it to the env: `require` fails startup
+  // with a ConfigurationError if MCP_SESSION_MODE resolves HTTP to `stateless`,
+  // instead of silently degrading the write path. Never refuses a stdio start.
+  sessionMode: { default: 'stateful', require: 'stateful' },
   tools,
   resources: [
     brapiServerInfoResource,
