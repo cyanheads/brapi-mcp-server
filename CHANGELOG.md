@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.13](changelog/0.7.x/0.7.13.md) — 2026-09-19 · 🛡️ Security
+
+Declares stateful session mode in src/index.ts so an HTTP start under MCP_SESSION_MODE=stateless fails at startup instead of serving a mode the observation-write confirmation round trip cannot use, fixes a ReDoS and a prototype-pollution gap in mcp-ts-core 0.13.1-0.13.6, and lists the hosted endpoint in server.json.
+
 ## [0.7.12](changelog/0.7.x/0.7.12.md) — 2026-09-13
 
 Adopts @cyanheads/mcp-ts-core ^0.13.0: empty and unsubstituted ${…} env values read as unset across every BRAPI_* path, async-search cancellation and poll deadlines classify as RequestCancelled and Timeout, and the framework skill tree moves out of the plugin-loaded skills/ directory.

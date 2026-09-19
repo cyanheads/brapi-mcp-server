@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-09-13 17:54:03
+Generated on: 2026-09-19 16:00:10
 
 ```text
 brapi-mcp-server/
@@ -14,6 +14,9 @@ brapi-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
+│   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
