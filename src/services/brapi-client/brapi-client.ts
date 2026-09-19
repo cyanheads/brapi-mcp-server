@@ -71,11 +71,11 @@ export class BrapiClient {
   ): Promise<BrapiEnvelope<T>> {
     const params = applyDialectToParams(path, options);
     return await withRetry(
-      async () => {
+      async ({ signal }) => {
         const response = await this.doFetch(
           this.buildUrl(baseUrl, path, params),
           ctx,
-          { method: 'GET', headers: this.buildHeaders(options.auth) },
+          { method: 'GET', headers: this.buildHeaders(options.auth), signal },
           options.timeoutMs,
           options.singleton === true,
         );
@@ -103,13 +103,13 @@ export class BrapiClient {
     options: BrapiRequestOptions & { accept?: string } = {},
   ): Promise<BinaryResponse> {
     return withRetry(
-      async () => {
+      async ({ signal }) => {
         const headers = this.buildHeaders(options.auth);
         headers.Accept = options.accept ?? 'image/*';
         const response = await this.doFetch(
           this.buildUrl(baseUrl, path, options.params),
           ctx,
-          { method: 'GET', headers },
+          { method: 'GET', headers, signal },
           options.timeoutMs,
         );
         const buffer = await response.arrayBuffer();
@@ -158,7 +158,7 @@ export class BrapiClient {
     options: BrapiRequestOptions = {},
   ): Promise<SearchResponse<T>> {
     return withRetry(
-      async () => {
+      async ({ signal }) => {
         const response = await this.doFetch(
           this.buildUrl(baseUrl, `/search/${noun}`),
           ctx,
@@ -169,6 +169,7 @@ export class BrapiClient {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify(body),
+            signal,
           },
           options.timeoutMs,
         );
@@ -227,7 +228,7 @@ export class BrapiClient {
     options: BrapiRequestOptions = {},
   ): Promise<BrapiEnvelope<T>> {
     return withRetry(
-      async () => {
+      async ({ signal }) => {
         const response = await this.doFetch(
           this.buildUrl(baseUrl, path, options.params),
           ctx,
@@ -238,6 +239,7 @@ export class BrapiClient {
               'Content-Type': 'application/json',
             },
             body: JSON.stringify(body),
+            signal,
           },
           options.timeoutMs,
         );
@@ -303,17 +305,24 @@ export class BrapiClient {
     }
   }
 
+  /**
+   * `init.signal` lets a `withRetry` caller pass the per-attempt
+   * `RetryAttempt.signal` — `AbortSignal.any` over the caller abort and the
+   * retry deadline clock — so an expiry firing mid-attempt aborts the request
+   * already in flight instead of overshooting it. Callers outside a retry
+   * ladder omit it and fall back to the caller signal.
+   */
   private async doFetch(
     url: string,
     ctx: Context,
-    init: Omit<FetchWithTimeoutOptions, 'signal' | 'rejectPrivateIPs'>,
+    init: Omit<FetchWithTimeoutOptions, 'rejectPrivateIPs'>,
     timeoutMs?: number,
     singleton: boolean = false,
   ): Promise<Response> {
     try {
       return await this.fetcher(url, timeoutMs ?? this.serverConfig.requestTimeoutMs, ctx, {
         ...init,
-        signal: ctx.signal,
+        signal: init.signal ?? ctx.signal,
         rejectPrivateIPs: !this.serverConfig.allowPrivateIps,
         // Every singleton caller catches the not-found and reports it as an
         // absent record, so a 404 here is an outcome, not an incident — log it
