@@ -208,6 +208,7 @@ const SUBMIT_ERRORS = [
     when: 'No connection has been registered under the requested alias',
     recovery:
       'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_submit_observations.',
+    thrownBy: 'service',
   },
   {
     reason: 'observations_unsupported',

@@ -127,6 +127,7 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
       when: 'No connection has been registered under the requested alias',
       recovery:
         'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_get_germplasm.',
+      thrownBy: 'service',
     },
     {
       reason: 'germplasm_not_found',

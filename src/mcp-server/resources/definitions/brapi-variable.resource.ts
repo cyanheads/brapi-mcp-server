@@ -35,6 +35,7 @@ export const brapiVariableResource = resource('brapi://variable/{observationVari
       when: 'No default BrAPI connection has been registered',
       recovery:
         'Call brapi_connect (without an alias, or with alias `default`) before reading this resource.',
+      thrownBy: 'service',
     },
     {
       reason: 'variable_not_found',

@@ -23,6 +23,7 @@ export const brapiGermplasmResource = resource('brapi://germplasm/{germplasmDbId
       when: 'No default BrAPI connection has been registered',
       recovery:
         'Call brapi_connect (without an alias, or with alias `default`) before reading this resource.',
+      thrownBy: 'service',
     },
     {
       reason: 'germplasm_not_found',

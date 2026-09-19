@@ -150,6 +150,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       when: 'No connection has been registered under the requested alias',
       recovery:
         'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_germplasm.',
+      thrownBy: 'service',
     },
     {
       reason: 'all_filters_dropped',
@@ -157,6 +158,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       when: 'The active dialect dropped every filter the agent supplied — the upstream server does not honor any of the requested scope filters on this endpoint, so the call would silently widen to the unfiltered baseline.',
       recovery:
         'Drop the unsupported filters and rescope by names, germplasmDbIds, germplasmPUIs, accessionNumbers, crops, synonyms, genus, or species — these filter paths are honored on the active dialect.',
+      thrownBy: 'service',
     },
   ] as const,
   input: z.object({

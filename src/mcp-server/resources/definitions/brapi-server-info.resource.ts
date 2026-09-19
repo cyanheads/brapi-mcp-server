@@ -23,6 +23,7 @@ export const brapiServerInfoResource = resource('brapi://server/info', {
       when: 'No default BrAPI connection has been registered',
       recovery:
         'Call brapi_connect (without an alias, or with alias `default`) before reading this resource.',
+      thrownBy: 'service',
     },
   ] as const,
   async handler(_params, ctx) {

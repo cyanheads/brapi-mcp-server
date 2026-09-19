@@ -23,6 +23,7 @@ export const brapiStudyResource = resource('brapi://study/{studyDbId}', {
       when: 'No default BrAPI connection has been registered',
       recovery:
         'Call brapi_connect (without an alias, or with alias `default`) before reading this resource.',
+      thrownBy: 'service',
     },
     {
       reason: 'study_not_found',

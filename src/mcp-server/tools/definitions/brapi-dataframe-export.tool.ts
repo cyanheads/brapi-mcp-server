@@ -113,6 +113,7 @@ export const brapiDataframeExport = tool('brapi_dataframe_export', {
       when: 'filename contains path separators or traversal segments',
       recovery:
         'Provide a filename without "/", "\\", or ".." — leave it unset to use the default.',
+      thrownBy: 'service',
     },
     {
       reason: 'mutually_exclusive_projection',

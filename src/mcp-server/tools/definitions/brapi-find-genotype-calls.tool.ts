@@ -136,6 +136,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       when: 'No connection has been registered under the requested alias',
       recovery:
         'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_genotype_calls.',
+      thrownBy: 'service',
     },
     {
       reason: 'no_filters',

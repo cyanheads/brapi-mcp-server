@@ -79,6 +79,7 @@ export const brapiRawGet = tool('brapi_raw_get', {
       when: 'No connection has been registered under the requested alias',
       recovery:
         'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_raw_get.',
+      thrownBy: 'service',
     },
     {
       reason: 'cross_origin_path',

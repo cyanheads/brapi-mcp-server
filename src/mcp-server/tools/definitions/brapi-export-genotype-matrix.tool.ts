@@ -154,6 +154,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       when: 'No connection has been registered under the requested alias',
       recovery:
         'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_export_genotype_matrix.',
+      thrownBy: 'service',
     },
     {
       reason: 'no_filters',

@@ -97,6 +97,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       when: 'No connection has been registered under the requested alias',
       recovery:
         'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_build_phenotype_matrix.',
+      thrownBy: 'service',
     },
     {
       reason: 'all_filters_dropped',
@@ -104,6 +105,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       when: 'The active dialect dropped every filter supplied — the call would silently widen to the unfiltered baseline',
       recovery:
         'Drop unsupported filters or use studies / germplasm / variables to scope the query to supported filter paths on the active dialect.',
+      thrownBy: 'service',
     },
     {
       reason: 'no_observation_path',

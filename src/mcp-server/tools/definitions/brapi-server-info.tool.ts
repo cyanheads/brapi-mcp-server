@@ -29,6 +29,7 @@ export const brapiServerInfo = tool('brapi_server_info', {
       when: 'No connection has been registered under the requested alias',
       recovery:
         'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_server_info.',
+      thrownBy: 'service',
     },
   ] as const,
   input: z.object({
