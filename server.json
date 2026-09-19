@@ -123,5 +123,11 @@
         "url": "http://localhost:3010/mcp"
       }
     }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://brapi.caseyjhand.com/mcp"
+    }
   ]
 }
