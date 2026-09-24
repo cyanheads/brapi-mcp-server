@@ -90,11 +90,12 @@ export const brapiDescribeFilters = tool('brapi_describe_filters', {
     lines.push('|:-----|:-----|:------------|:--------|');
     for (const filter of result.filters) {
       // Backslashes first, so the `\` added before each pipe is not doubled.
-      // Code-span cells stay raw: a backslash is already literal inside one.
       const description = filter.description.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
-      lines.push(
-        `| \`${filter.name}\` | \`${filter.type}\` | ${description} | \`${filter.example}\` |`,
-      );
+      // A backslash is already literal inside a code span, but a bare `|` still
+      // splits the row there: code-span cells escape pipes only.
+      const name = filter.name.replace(/\|/g, '\\|');
+      const example = filter.example.replace(/\|/g, '\\|');
+      lines.push(`| \`${name}\` | \`${filter.type}\` | ${description} | \`${example}\` |`);
     }
     lines.push('');
     lines.push(

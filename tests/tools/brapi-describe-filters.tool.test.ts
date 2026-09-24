@@ -80,7 +80,7 @@ describe('brapi_describe_filters tool', () => {
           '| Name | Type | Description | Example |',
           '|:-----|:-----|:------------|:--------|',
           '| `studyDbIds` | `string` | Study identifiers. | `abc` |',
-          '| `mode` | `string` | One of a \\| b. | `x|y` |',
+          '| `mode` | `string` | One of a \\| b. | `x\\|y` |',
           '',
           '_Available endpoints: `studies`._',
         ].join('\n'),
@@ -103,6 +103,13 @@ describe('brapi_describe_filters tool', () => {
     it('leaves backslashes in code-span cells untouched', () => {
       const text = render([{ name: 'n\\m', description: 'plain', example: 'C:\\path' }]);
       expect(text).toContain('| `n\\m` | `string` | plain | `C:\\path` |');
+    });
+
+    it('escapes pipes in code-span cells, which would otherwise split the row', () => {
+      // GFM splits a row on every unescaped `|`, code spans included; `\|`
+      // renders as `|` inside the span.
+      const text = render([{ name: 'a|b', description: 'plain', example: 'x|y' }]);
+      expect(text).toContain('| `a\\|b` | `string` | plain | `x\\|y` |');
     });
   });
 });
