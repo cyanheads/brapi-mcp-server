@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.0](changelog/0.8.x/0.8.0.md) — 2026-09-23 · ⚠️ Breaking · 🛡️ Security
+
+Server-configured credentials are only sent to the base URL configured with them, and caller-supplied credentials are refused on session-less shared HTTP. The T3 built-ins are gone, auth walls fail brapi_connect with typed errors, and the orientation envelope names the finders the server supports.
+
 ## [0.7.13](changelog/0.7.x/0.7.13.md) — 2026-09-19 · 🛡️ Security
 
 Declares stateful session mode in src/index.ts so an HTTP start under MCP_SESSION_MODE=stateless fails at startup instead of serving a mode the observation-write confirmation round trip cannot use, fixes a ReDoS and a prototype-pollution gap in mcp-ts-core 0.13.1-0.13.6, and lists the hosted endpoint in server.json.
