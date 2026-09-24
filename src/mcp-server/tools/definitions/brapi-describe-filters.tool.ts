@@ -89,7 +89,9 @@ export const brapiDescribeFilters = tool('brapi_describe_filters', {
     lines.push('| Name | Type | Description | Example |');
     lines.push('|:-----|:-----|:------------|:--------|');
     for (const filter of result.filters) {
-      const description = filter.description.replace(/\|/g, '\\|');
+      // Backslashes first, so the `\` added before each pipe is not doubled.
+      // Code-span cells stay raw: a backslash is already literal inside one.
+      const description = filter.description.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
       lines.push(
         `| \`${filter.name}\` | \`${filter.type}\` | ${description} | \`${filter.example}\` |`,
       );

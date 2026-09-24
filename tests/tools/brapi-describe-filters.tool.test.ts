@@ -56,4 +56,53 @@ describe('brapi_describe_filters tool', () => {
     }
     expect(text).toContain('| Name | Type | Description | Example |');
   });
+
+  describe('format() table cells', () => {
+    function render(filters: Array<{ name: string; description: string; example: string }>) {
+      const blocks = brapiDescribeFilters.format!({
+        endpoint: 'studies',
+        filterCount: filters.length,
+        filters: filters.map((f) => ({ ...f, type: 'string' as const })),
+        availableEndpoints: ['studies'],
+      });
+      return (blocks[0] as { text: string }).text;
+    }
+
+    it('renders the full table shape with code-span Name/Type/Example cells', () => {
+      const text = render([
+        { name: 'studyDbIds', description: 'Study identifiers.', example: 'abc' },
+        { name: 'mode', description: 'One of a | b.', example: 'x|y' },
+      ]);
+      expect(text).toBe(
+        [
+          '# Filters for `studies` (2 total)',
+          '',
+          '| Name | Type | Description | Example |',
+          '|:-----|:-----|:------------|:--------|',
+          '| `studyDbIds` | `string` | Study identifiers. | `abc` |',
+          '| `mode` | `string` | One of a \\| b. | `x|y` |',
+          '',
+          '_Available endpoints: `studies`._',
+        ].join('\n'),
+      );
+    });
+
+    it('escapes backslashes before pipes in the Description cell so they survive rendering', () => {
+      const text = render([
+        { name: 'a', description: 'x\\|y', example: 'e' },
+        { name: 'b', description: 'a\\*b', example: 'e' },
+        { name: 'c', description: 'trailing \\', example: 'e' },
+      ]);
+      // `x\|y` → `x\\\|y`: the doubled backslash renders one literal `\`, the
+      // escaped pipe renders a literal `|` without splitting the cell.
+      expect(text).toContain('| `a` | `string` | x\\\\\\|y | `e` |');
+      expect(text).toContain('| `b` | `string` | a\\\\*b | `e` |');
+      expect(text).toContain('| `c` | `string` | trailing \\\\ | `e` |');
+    });
+
+    it('leaves backslashes in code-span cells untouched', () => {
+      const text = render([{ name: 'n\\m', description: 'plain', example: 'C:\\path' }]);
+      expect(text).toContain('| `n\\m` | `string` | plain | `C:\\path` |');
+    });
+  });
 });
