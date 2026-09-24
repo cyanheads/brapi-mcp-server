@@ -333,10 +333,20 @@ describe('resolveConnectInput credential/baseUrl pairing', () => {
       ['port', 'https://cassavabase.org:8443/brapi/v2'],
       ['subdomain', 'https://evil.cassavabase.org/brapi/v2'],
       ['query', 'https://cassavabase.org/brapi/v2?x=1'],
-      ['userinfo', 'https://someone@cassavabase.org/brapi/v2'],
     ])('refuses when only the %s differs', (_label, baseUrl) => {
       expect(refusal(() => resolveConnectInput('cassava', { baseUrl }, ENV)).data).toMatchObject({
         reason: 'auth_base_url_mismatch',
+      });
+    });
+
+    it.each([
+      ['the configured host', 'https://someone:pw@cassavabase.org/brapi/v2'],
+      ['another host', 'https://someone:pw@evil.example/brapi/v2'],
+    ])('attaches no credentials to a caller baseUrl carrying userinfo (%s)', (_label, baseUrl) => {
+      // baseUrl validation refuses it downstream without echoing the URL.
+      expect(resolveConnectInput('cassava', { baseUrl }, ENV)).toEqual({
+        baseUrl,
+        auth: { mode: 'none' },
       });
     });
 
@@ -436,6 +446,23 @@ describe('resolveConnectInput credential/baseUrl pairing', () => {
             recovery: { hint: expect.stringContaining('BRAPI_FOO_BASE_URL') },
           });
           expect(JSON.stringify({ m: err.message, d: err.data })).not.toContain('orphan-tok');
+        },
+      );
+
+      it.each([
+        ['omitted', undefined],
+        ['another server', 'https://a.example/brapi/v2'],
+      ])(
+        'refuse BRAPI_DEFAULT_* credentials when BRAPI_DEFAULT_BASE_URL is unset (caller baseUrl %s)',
+        (_label, baseUrl) => {
+          const env = { ...NO_BUILTINS, BRAPI_DEFAULT_BEARER_TOKEN: 'orphan-tok' };
+          const err = refusal(() => resolveConnectInput('default', { baseUrl }, env));
+          expect(err.code).toBe(JsonRpcErrorCode.ConfigurationError);
+          expect(err.data).toMatchObject({
+            reason: 'alias_base_url_unset',
+            alias: 'default',
+            recovery: { hint: expect.stringContaining('BRAPI_DEFAULT_BASE_URL') },
+          });
         },
       );
 

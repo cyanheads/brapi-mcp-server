@@ -176,13 +176,9 @@ export function resolveConnectInput(
   const defaultCreds =
     alias === DEFAULT_ALIAS ? aliasCreds : readAliasCredentials(DEFAULT_ALIAS, env);
 
-  const builtin = aliasCreds.baseUrl ? undefined : findBuiltinAlias(alias, env);
-  const ownBaseUrl =
-    aliasCreds.baseUrl ??
-    builtin?.baseUrl ??
-    (alias === DEFAULT_ALIAS ? defaultCreds.baseUrl : undefined);
+  const ownBaseUrl = aliasCreds.baseUrl ?? findBuiltinAlias(alias, env)?.baseUrl;
   const aliasAuth = agent.auth ? undefined : deriveAuthFromCredentials(aliasCreds, alias);
-  if (aliasAuth && ownBaseUrl === undefined && alias !== DEFAULT_ALIAS) {
+  if (aliasAuth && ownBaseUrl === undefined) {
     const envVar = `${aliasEnvPrefix(alias)}BASE_URL`;
     throw configurationError(
       `Alias '${alias}' has server-configured credentials but no base URL of its own, so they are not sent anywhere. Set ${envVar} on the server, or remove the alias's credential variables. No request was made.`,
@@ -211,7 +207,8 @@ export function resolveConnectInput(
     if (agent.baseUrl === undefined || sameBaseUrl(agent.baseUrl, ownBaseUrl)) {
       return { baseUrl, auth: aliasAuth };
     }
-    // An unparsable caller URL fails baseUrl validation downstream; it just gets no credentials.
+    // An unparsable or userinfo-bearing caller URL fails baseUrl validation
+    // downstream, which does not echo it; it just gets no credentials.
     if (comparableBaseUrl(agent.baseUrl) === undefined) return { baseUrl, auth: NONE_AUTH };
     throw forbidden(
       `Alias '${alias}' has server-configured credentials that are only sent to the server configured for it, and the supplied baseUrl points elsewhere. No request was made.`,
@@ -233,9 +230,10 @@ export function resolveConnectInput(
 }
 
 /**
- * True when both URLs parse and name the same BrAPI base: scheme, userinfo,
- * host (case-insensitive), port (default port elided), path with trailing
- * slashes dropped, query, and fragment.
+ * True when both URLs parse, carry no userinfo, and name the same BrAPI base:
+ * scheme, host (case-insensitive), port (default port elided), path with
+ * trailing slashes dropped, query, and fragment. A URL with userinfo never
+ * matches — `brapi_connect` refuses it as a baseUrl.
  */
 export function sameBaseUrl(a: string, b: string | undefined): boolean {
   if (b === undefined) return false;
@@ -246,13 +244,13 @@ export function sameBaseUrl(a: string, b: string | undefined): boolean {
 function comparableBaseUrl(value: string): string | undefined {
   if (!URL.canParse(value)) return;
   const url = new URL(value);
+  if (url.username || url.password) return;
   // Read `pathname` once: the getter re-serializes on every access.
   const { pathname } = url;
   let end = pathname.length;
   while (end > 0 && pathname[end - 1] === '/') end--;
   const path = pathname.slice(0, end);
-  const userinfo = url.username || url.password ? `${url.username}:${url.password}@` : '';
-  return `${url.protocol}//${userinfo}${url.host}${path}${url.search}${url.hash}`;
+  return `${url.protocol}//${url.host}${path}${url.search}${url.hash}`;
 }
 
 /**

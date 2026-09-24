@@ -697,6 +697,29 @@ describe('brapi_connect env credential pairing', () => {
     expect(await ctx.state.get('brapi/conn/cassava')).toBeNull();
   });
 
+  it('refuses a caller baseUrl carrying userinfo without echoing it, even for a credentialed alias', async () => {
+    vi.stubEnv('BRAPI_CASSAVA_BASE_URL', BASE_URL);
+    vi.stubEnv('BRAPI_CASSAVA_USERNAME', 'envuser');
+    vi.stubEnv('BRAPI_CASSAVA_PASSWORD', 'envpass');
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiConnect.errors });
+
+    const error = await brapiConnect
+      .handler(
+        brapiConnect.input.parse({
+          alias: 'cassava',
+          baseUrl: 'https://someone:url-secret@other.example/brapi/v2',
+        }),
+        ctx,
+      )
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+    const { message, data } = error as { message: string; data?: unknown };
+    expect(JSON.stringify({ message, data })).not.toContain('url-secret');
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(globalFetch).not.toHaveBeenCalled();
+    expect(await ctx.state.get('brapi/conn/cassava')).toBeNull();
+  });
+
   it('keeps the previous registration for the alias after a mismatch refusal', async () => {
     vi.stubEnv('BRAPI_CGIAR_BASE_URL', BASE_URL);
     vi.stubEnv('BRAPI_CGIAR_BEARER_TOKEN', 'env-tok');
