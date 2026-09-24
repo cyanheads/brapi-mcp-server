@@ -388,39 +388,49 @@ export class BrapiClient {
 }
 
 /**
- * Map the `ServiceUnavailable` thrown by `fetchWithTimeout` to the correct
- * non-transient code when the underlying HTTP status is a 4xx. 429 is promoted
- * to `RateLimited` so the default retry policy still kicks in; 5xx normally
- * stays as `ServiceUnavailable` (also retryable). When `singleton` is true the
- * call is fetching `/{noun}/{id}` and a 5xx is treated as `NotFound` — some
- * upstreams (notably Breedbase) serve HTTP 500 for unknown DbIds instead of
- * 404, and retrying through that just delays the inevitable "not found"
- * outcome. Network-level errors, which have no
- * `status`, pass through untouched.
+ * Stamp the documented `upstream_*` reason onto an HTTP error thrown by
+ * `fetchWithTimeout`, keyed on the HTTP status in `data.status` rather than on
+ * the code the framework picked: 401 → `Unauthorized`, 403 → `Forbidden`,
+ * 404 → `NotFound`, 429 → `RateLimited` (still retried by the default policy),
+ * every other 4xx → `ValidationError` + `upstream_bad_request`, except the 4xx
+ * the framework classes as `Timeout` (408, 425): those pass through untouched
+ * so the retry loop keeps retrying them. A 5xx keeps the framework's
+ * classification, except that a `singleton` fetch (`/{noun}/{id}`)
+ * turns a `ServiceUnavailable` 5xx into `NotFound` — some upstreams (notably
+ * Breedbase) serve HTTP 500 for unknown DbIds instead of 404, and retrying
+ * through that just delays the inevitable "not found" outcome. Network-level
+ * errors, which have no `status`, pass through untouched.
  */
 function reclassifyHttpError(err: unknown, singleton: boolean = false): void {
   if (!(err instanceof McpError)) return;
-  if (err.code !== JsonRpcErrorCode.ServiceUnavailable) return;
   const status = extractHttpStatus(err);
-  if (status === undefined) return;
+  if (status === undefined || status < 400) return;
   const data = asRecord(err.data) ?? {};
   if (status >= 500) {
-    if (singleton) {
-      throw notFound(err.message, {
-        ...data,
-        reason: 'upstream_not_found',
-        upstreamStatus: status,
-      });
+    if (singleton && err.code === JsonRpcErrorCode.ServiceUnavailable) {
+      throw notFound(
+        err.message,
+        { ...data, reason: 'upstream_not_found', upstreamStatus: status },
+        { cause: err },
+      );
     }
     return;
   }
+  if (err.code === JsonRpcErrorCode.Timeout) return;
+  const options = { cause: err };
   if (status === 429) {
-    throw rateLimited(err.message, { ...data, reason: 'upstream_rate_limited' });
+    throw rateLimited(err.message, { ...data, reason: 'upstream_rate_limited' }, options);
   }
-  if (status === 401) throw unauthorized(err.message, { ...data, reason: 'upstream_unauthorized' });
-  if (status === 403) throw forbidden(err.message, { ...data, reason: 'upstream_forbidden' });
-  if (status === 404) throw notFound(err.message, { ...data, reason: 'upstream_not_found' });
-  throw validationError(err.message, { ...data, reason: 'upstream_bad_request' });
+  if (status === 401) {
+    throw unauthorized(err.message, { ...data, reason: 'upstream_unauthorized' }, options);
+  }
+  if (status === 403) {
+    throw forbidden(err.message, { ...data, reason: 'upstream_forbidden' }, options);
+  }
+  if (status === 404) {
+    throw notFound(err.message, { ...data, reason: 'upstream_not_found' }, options);
+  }
+  throw validationError(err.message, { ...data, reason: 'upstream_bad_request' }, options);
 }
 
 function extractHttpStatus(err: McpError): number | undefined {

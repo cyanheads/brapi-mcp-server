@@ -6,6 +6,8 @@
  * @module tests/services/brapi-client.test
  */
 
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +15,9 @@ import type { ServerConfig } from '@/config/server-config.js';
 import { BrapiClient, type Fetcher, type ResolvedAuth } from '@/services/brapi-client/index.js';
 
 const BASE_URL = 'https://brapi.example.org/brapi/v2';
+
+/** Captured before any test stubs `globalThis.fetch`; used only to reach the local stub server. */
+const realFetch = globalThis.fetch;
 
 const baseConfig: ServerConfig = {
   defaultApiKeyHeader: 'Authorization',
@@ -58,8 +63,16 @@ describe('BrapiClient', () => {
   let client: BrapiClient;
 
   beforeEach(() => {
-    fetcher = vi.fn() as unknown as Fetcher & ReturnType<typeof vi.fn>;
+    fetcher = vi.fn(async (url: string | URL) => {
+      throw new Error(`Unmocked fetcher call: ${String(url)}`);
+    }) as unknown as Fetcher & ReturnType<typeof vi.fn>;
     client = new BrapiClient(baseConfig, fetcher);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        throw new Error(`Unmocked global fetch: ${String(input)}`);
+      }),
+    );
   });
 
   afterEach(() => {
@@ -119,6 +132,189 @@ describe('BrapiClient', () => {
         },
       );
       expect(network).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('HTTP 4xx classification over a real socket', () => {
+    let server: Server;
+    let origin: string;
+    let hits: Array<{ method: string; path: string }>;
+    let respond: (req: IncomingMessage, res: ServerResponse) => void;
+
+    beforeEach(async () => {
+      hits = [];
+      respond = (_req, res) => {
+        res.writeHead(500).end('respond() not set by the test');
+      };
+      server = createServer((req, res) => {
+        hits.push({ method: req.method ?? '', path: req.url ?? '' });
+        respond(req, res);
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      // Only the local stub is reachable; anything else still rejects.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+          String(input instanceof Request ? input.url : input).startsWith(origin)
+            ? realFetch(input, init)
+            : Promise.reject(new Error(`Unmocked global fetch: ${String(input)}`)),
+        ),
+      );
+    });
+
+    afterEach(async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+
+    function productionClient(retryMaxAttempts = 2) {
+      return new BrapiClient({ ...baseConfig, allowPrivateIps: true, retryMaxAttempts });
+    }
+
+    const cases: Array<{ status: number; code: JsonRpcErrorCode; reason: string }> = [
+      { status: 400, code: JsonRpcErrorCode.ValidationError, reason: 'upstream_bad_request' },
+      { status: 401, code: JsonRpcErrorCode.Unauthorized, reason: 'upstream_unauthorized' },
+      { status: 402, code: JsonRpcErrorCode.ValidationError, reason: 'upstream_bad_request' },
+      { status: 403, code: JsonRpcErrorCode.Forbidden, reason: 'upstream_forbidden' },
+      { status: 404, code: JsonRpcErrorCode.NotFound, reason: 'upstream_not_found' },
+      { status: 405, code: JsonRpcErrorCode.ValidationError, reason: 'upstream_bad_request' },
+      { status: 409, code: JsonRpcErrorCode.ValidationError, reason: 'upstream_bad_request' },
+      { status: 422, code: JsonRpcErrorCode.ValidationError, reason: 'upstream_bad_request' },
+    ];
+
+    for (const { status, code, reason } of cases) {
+      it(`maps a GET HTTP ${status} to ${reason} without retrying`, async () => {
+        respond = (_req, res) => {
+          res.writeHead(status, { 'Content-Type': 'text/plain' }).end(`upstream said ${status}`);
+        };
+        const error = await productionClient()
+          .get(origin, '/brapi/v2/studies', createMockContext())
+          .catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(McpError);
+        expect(error).toMatchObject({
+          code,
+          data: { reason, status, body: `upstream said ${status}` },
+        });
+        expect(hits).toHaveLength(1);
+      });
+    }
+
+    it('maps HTTP 429 to upstream_rate_limited and still retries it', async () => {
+      respond = (_req, res) => {
+        res.writeHead(429).end('slow down');
+      };
+      await expect(
+        productionClient(1).get(origin, '/brapi/v2/studies', createMockContext()),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.RateLimited,
+        data: { reason: 'upstream_rate_limited', status: 429 },
+      });
+      expect(hits).toHaveLength(2);
+    });
+
+    /** Answer `first` for the first `failures` hits, then a real envelope. */
+    function failThenSucceed(first: number, failures: number) {
+      respond = (_req, res) => {
+        if (hits.length <= failures) {
+          res.writeHead(first).end(`HTTP ${first}`);
+          return;
+        }
+        res
+          .writeHead(200, { 'Content-Type': 'application/json' })
+          .end(JSON.stringify(envelope({ data: [{ studyDbId: 'recovered' }] })));
+      };
+    }
+
+    for (const status of [408, 425, 429]) {
+      it(`retries HTTP ${status} through the retry loop and returns the recovered response`, async () => {
+        failThenSucceed(status, 2);
+        await expect(
+          productionClient(2).get(origin, '/brapi/v2/studies', createMockContext()),
+        ).resolves.toMatchObject({ result: { data: [{ studyDbId: 'recovered' }] } });
+        expect(hits).toHaveLength(3);
+      });
+    }
+
+    it('keeps HTTP 408 and 425 as the framework classifies them (Timeout) once retries run out', async () => {
+      for (const status of [408, 425]) {
+        hits = [];
+        respond = (_req, res) => {
+          res.writeHead(status).end(`HTTP ${status}`);
+        };
+        const error = await productionClient(2)
+          .get(origin, '/brapi/v2/studies', createMockContext())
+          .catch((e: unknown) => e);
+        expect(error).toMatchObject({ code: JsonRpcErrorCode.Timeout, data: { status } });
+        expect((error as McpError).data).not.toHaveProperty('reason');
+        expect(hits).toHaveLength(3);
+      }
+    });
+
+    it('exhausts the retry budget on a persistent 429', async () => {
+      respond = (_req, res) => {
+        res.writeHead(429).end('slow down');
+      };
+      await expect(
+        productionClient(2).get(origin, '/brapi/v2/studies', createMockContext()),
+      ).rejects.toMatchObject({ data: { reason: 'upstream_rate_limited' } });
+      expect(hits).toHaveLength(3);
+    });
+
+    for (const status of [400, 401, 403, 404, 422]) {
+      it(`does not retry HTTP ${status} even when the next attempt would succeed`, async () => {
+        failThenSucceed(status, 1);
+        await expect(
+          productionClient(2).get(origin, '/brapi/v2/studies', createMockContext()),
+        ).rejects.toMatchObject({ data: { status } });
+        expect(hits).toHaveLength(1);
+      });
+    }
+
+    it('maps a POST /search HTTP 401 to upstream_unauthorized', async () => {
+      respond = (_req, res) => {
+        res.writeHead(401).end('login required');
+      };
+      await expect(
+        productionClient().postSearch(
+          origin,
+          'studies',
+          { studyDbIds: ['s1'] },
+          createMockContext(),
+        ),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Unauthorized,
+        data: { reason: 'upstream_unauthorized', status: 401 },
+      });
+      expect(hits).toEqual([{ method: 'POST', path: '/search/studies' }]);
+    });
+
+    it('maps a 403 on a singleton GET to upstream_forbidden, not NotFound', async () => {
+      respond = (_req, res) => {
+        res.writeHead(403).end('forbidden');
+      };
+      await expect(
+        productionClient().get(origin, '/brapi/v2/studies/s1', createMockContext(), {
+          singleton: true,
+        }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Forbidden,
+        data: { reason: 'upstream_forbidden', status: 403 },
+      });
+    });
+
+    it('maps a singleton HTTP 500 to NotFound over a real socket', async () => {
+      respond = (_req, res) => {
+        res.writeHead(500).end('unknown study');
+      };
+      await expect(
+        productionClient().get(origin, '/brapi/v2/studies/missing', createMockContext(), {
+          singleton: true,
+        }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'upstream_not_found', upstreamStatus: 500 },
+      });
+      expect(hits).toHaveLength(1);
     });
   });
 

@@ -37,8 +37,45 @@ describe('ServerRegistry', () => {
   let registry: ServerRegistry;
 
   beforeEach(() => {
-    tokenFetcher = vi.fn();
+    tokenFetcher = vi.fn(async (url: string) => {
+      throw new Error(`Unmocked token fetch: ${url}`);
+    });
     registry = new ServerRegistry(baseConfig, tokenFetcher as unknown as TokenFetcher);
+  });
+
+  describe('resolve / save', () => {
+    it('resolve exchanges the token but persists nothing; save persists it', async () => {
+      tokenFetcher.mockResolvedValue({ access_token: 'tok' });
+      const ctx = createMockContext({ tenantId: 't1' });
+      const resolved = await registry.resolve(ctx, {
+        alias: 'x',
+        baseUrl: `${BASE_URL}/`,
+        auth: { mode: 'sgn', username: 'u', password: 'p' },
+      });
+      expect(resolved).toMatchObject({
+        alias: 'x',
+        baseUrl: BASE_URL,
+        authMode: 'sgn',
+        resolvedAuth: { headerValue: 'Bearer tok' },
+      });
+      expect(await registry.getOptional(ctx, 'x')).toBeNull();
+
+      await registry.save(ctx, resolved);
+      expect(await registry.getOptional(ctx, 'x')).toEqual(resolved);
+    });
+
+    it('a failed resolve leaves the existing registration in place', async () => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      const existing = await registry.register(ctx, { alias: 'x', baseUrl: BASE_URL });
+      await expect(
+        registry.resolve(ctx, {
+          alias: 'x',
+          baseUrl: BASE_URL,
+          auth: { mode: 'sgn', username: 'u', password: 'p' },
+        }),
+      ).rejects.toThrow();
+      expect(await registry.getOptional(ctx, 'x')).toEqual(existing);
+    });
   });
 
   describe('register', () => {
@@ -185,6 +222,16 @@ describe('ServerRegistry', () => {
       await expect(registry.register(ctx, { baseUrl: 'ftp://example.com' })).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
       });
+    });
+
+    it('rejects base URLs carrying userinfo without echoing it', async () => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      const err = await registry
+        .register(ctx, { baseUrl: 'https://alice:hunter2@brapi.example.org/brapi/v2' })
+        .catch((e: unknown) => e as { code: number; message: string; data?: unknown });
+      expect(err).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+      expect(JSON.stringify({ m: err.message, d: err.data })).not.toContain('hunter2');
+      expect(await registry.getOptional(ctx, 'default')).toBeNull();
     });
 
     it('rejects malformed base URLs', async () => {

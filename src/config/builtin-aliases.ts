@@ -7,13 +7,16 @@
  *
  * Override behavior: env-set `BRAPI_<ALIAS>_BASE_URL` always wins over the
  * builtin URL — the builtin is a fallback, not a lock. Per-alias credentials
- * (`BRAPI_<ALIAS>_USERNAME` / `_PASSWORD` / etc.) layer on top of any selected
- * baseUrl, so write workflows still need a separate registration on each
- * upstream instance.
+ * (`BRAPI_<ALIAS>_USERNAME` / `_PASSWORD` / etc.) layer on top of the alias's
+ * configured URL (env base URL, else the builtin one) and are never sent to a
+ * caller-supplied baseUrl that points elsewhere, so write workflows still need
+ * a separate registration on each upstream instance.
  *
  * Opt-out: comma-separated alias names in `BRAPI_BUILTIN_ALIASES_DISABLED`
  * remove specific builtins from resolution and discovery (matched
- * case-insensitively).
+ * case-insensitively). Credentials left set for a disabled builtin have no URL
+ * to pair with, so `brapi_connect` refuses that alias until
+ * `BRAPI_<ALIAS>_BASE_URL` is set.
  *
  * @module config/builtin-aliases
  */
@@ -37,7 +40,8 @@ export interface BuiltinAlias {
  * against the live upstream surface — anonymous reads return real data and
  * the standard `/studies`, `/germplasm`, `/variables` endpoints respond with
  * non-trivial totals. Servers that flipped to an auth wall (musabase,
- * solgenomics) are intentionally absent.
+ * solgenomics, the Triticeae Toolbox hosts) are intentionally absent; they
+ * stay reachable through `BRAPI_<ALIAS>_BASE_URL` plus credentials.
  */
 export const BUILTIN_ALIASES: ReadonlyArray<BuiltinAlias> = Object.freeze([
   Object.freeze({
@@ -59,33 +63,6 @@ export const BUILTIN_ALIASES: ReadonlyArray<BuiltinAlias> = Object.freeze([
     citation: BREEDBASE_CITATION,
   }),
   Object.freeze({
-    alias: 't3-wheat',
-    baseUrl: 'https://wheat.triticeaetoolbox.org/brapi/v2',
-    homepage: 'https://wheat.triticeaetoolbox.org/',
-    organizationName: 'Triticeae Toolbox (T3)',
-    cropFocus: 'Wheat',
-    license: 'CC-BY',
-    citation: BREEDBASE_CITATION,
-  }),
-  Object.freeze({
-    alias: 't3-oat',
-    baseUrl: 'https://oat.triticeaetoolbox.org/brapi/v2',
-    homepage: 'https://oat.triticeaetoolbox.org/',
-    organizationName: 'Triticeae Toolbox (T3)',
-    cropFocus: 'Oat',
-    license: 'CC-BY',
-    citation: BREEDBASE_CITATION,
-  }),
-  Object.freeze({
-    alias: 't3-barley',
-    baseUrl: 'https://barley.triticeaetoolbox.org/brapi/v2',
-    homepage: 'https://barley.triticeaetoolbox.org/',
-    organizationName: 'Triticeae Toolbox (T3)',
-    cropFocus: 'Barley',
-    license: 'CC-BY',
-    citation: BREEDBASE_CITATION,
-  }),
-  Object.freeze({
     alias: 'bti-breedbase-demo',
     baseUrl: 'https://breedbase.org/brapi/v2',
     homepage: 'https://breedbase.org/',
@@ -100,22 +77,32 @@ export const BUILTIN_ALIASES: ReadonlyArray<BuiltinAlias> = Object.freeze([
 const DISABLED_ENV_VAR = 'BRAPI_BUILTIN_ALIASES_DISABLED';
 
 /**
+ * Canonical builtin key for an alias spelling. Spellings that share a
+ * `BRAPI_<ALIAS>_*` env prefix (case, `-` vs `_`) read the same credentials,
+ * so they must resolve to the same builtin — and so the same paired URL.
+ */
+function builtinKey(alias: string): string {
+  return alias.toLowerCase().replace(/_/g, '-');
+}
+
+/**
  * Parse the comma-separated disabled list from env. Whitespace tolerant,
- * case-insensitive — entries are lowercased to match alias keys.
+ * case-insensitive — entries are canonicalized to match alias keys.
  */
 function readDisabledSet(env: NodeJS.ProcessEnv): Set<string> {
   const raw = env[DISABLED_ENV_VAR];
   if (!raw) return new Set();
   const out = new Set<string>();
   for (const part of raw.split(',')) {
-    const trimmed = part.trim().toLowerCase();
-    if (trimmed) out.add(trimmed);
+    const trimmed = part.trim();
+    if (trimmed) out.add(builtinKey(trimmed));
   }
   return out;
 }
 
 /**
- * Resolve a builtin entry by alias. Case-insensitive lookup; respects the
+ * Resolve a builtin entry by alias. Matches every spelling that shares the
+ * builtin's env prefix (case-insensitive, `_` for `-`); respects the
  * `BRAPI_BUILTIN_ALIASES_DISABLED` opt-out list. Returns `undefined` when the
  * alias is unknown or disabled — callers fall through to the next baseUrl
  * source (default env, then a thrown ValidationError).
@@ -124,7 +111,7 @@ export function findBuiltinAlias(
   alias: string,
   env: NodeJS.ProcessEnv = process.env,
 ): BuiltinAlias | undefined {
-  const key = alias.toLowerCase();
+  const key = builtinKey(alias);
   const disabled = readDisabledSet(env);
   if (disabled.has(key)) return;
   return BUILTIN_ALIASES.find((entry) => entry.alias === key);

@@ -57,8 +57,17 @@ describe('brapi_server_info tool', () => {
   let fetcher: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    fetcher = vi.fn(async () =>
-      jsonResponse(envelope({ calls: [{ service: 'studies', methods: ['GET'] }] })),
+    fetcher = vi.fn(async (url: string) => {
+      if (String(url).includes('/serverinfo')) {
+        return jsonResponse(envelope({ calls: [{ service: 'studies', methods: ['GET'] }] }));
+      }
+      throw new Error(`Unmocked fetcher call: ${url}`);
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        throw new Error(`Unmocked global fetch: ${String(input)}`);
+      }),
     );
     initBrapiClient(baseConfig, fetcher as unknown as Fetcher);
     initCapabilityRegistry(baseConfig);
@@ -71,6 +80,7 @@ describe('brapi_server_info tool', () => {
     resetCapabilityRegistry();
     resetBrapiDialectRegistry();
     resetServerRegistry();
+    vi.unstubAllGlobals();
   });
 
   it('returns the orientation envelope for the default connection', async () => {
@@ -116,5 +126,42 @@ describe('brapi_server_info tool', () => {
       .slice(callsAfterCached)
       .filter((c) => String(c[0]).endsWith('/serverinfo'));
     expect(refreshedServerInfoHits.length).toBeGreaterThan(0);
+  });
+
+  it('carries the same nextToolSuggestions as brapi_connect on both surfaces', async () => {
+    fetcher.mockImplementation(async (url: string) => {
+      if (String(url).includes('/serverinfo')) {
+        return jsonResponse(
+          envelope({
+            calls: [
+              { service: 'search/studies' },
+              { service: 'variables', methods: ['GET'] },
+              { service: 'locations', methods: ['GET'] },
+            ],
+          }),
+        );
+      }
+      return jsonResponse(envelope({ data: [] }));
+    });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiServerInfo.errors });
+    const connected = await brapiConnect.handler(
+      brapiConnect.input.parse({ baseUrl: BASE_URL, alias: 'mine' }),
+      ctx,
+    );
+    const info = await brapiServerInfo.handler(brapiServerInfo.input.parse({ alias: 'mine' }), ctx);
+
+    expect(connected.nextToolSuggestions.map((s) => s.toolName)).toEqual([
+      'brapi_find_studies',
+      'brapi_find_variables',
+      'brapi_find_locations',
+    ]);
+    expect(info.nextToolSuggestions).toEqual(connected.nextToolSuggestions);
+    expect(info.nextToolSuggestions.every((s) => s.args.alias === 'mine')).toBe(true);
+
+    const section = (text: string) => text.slice(text.indexOf('## Suggested next tools'));
+    const connectText = (brapiConnect.format!(connected)[0] as { text: string }).text;
+    const infoText = (brapiServerInfo.format!(info)[0] as { text: string }).text;
+    expect(section(infoText).split('\n## ')[0]).toBe(section(connectText).split('\n## ')[0]);
+    expect(infoText).toContain('`brapi_find_variables` `{"alias":"mine"}`');
   });
 });

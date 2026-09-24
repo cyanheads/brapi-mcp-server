@@ -8,6 +8,7 @@
  * @module services/reference-data-cache/reference-data-cache
  */
 
+import { createHash } from 'node:crypto';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { ServerConfig } from '@/config/server-config.js';
 import {
@@ -97,7 +98,7 @@ export class ReferenceDataCache {
 
   /** Drop every cached entry for a base URL across all reference nouns. */
   async invalidate(baseUrl: string, ctx: Context): Promise<void> {
-    const serverSlug = sanitizeKey(baseUrl);
+    const serverSlug = serverKey(baseUrl);
     await Promise.all([
       this.deletePrefix(ctx, `brapi/ref/${PROGRAM_CFG.cachePrefix}/${serverSlug}/`),
       this.deletePrefix(ctx, `brapi/ref/${TRIAL_CFG.cachePrefix}/${serverSlug}/`),
@@ -115,7 +116,7 @@ export class ReferenceDataCache {
     if (ids.length === 0) return new Map();
 
     const uniqueIds = Array.from(new Set(ids));
-    const serverSlug = sanitizeKey(baseUrl);
+    const serverSlug = serverKey(baseUrl);
     const keyFor = (id: string) => `brapi/ref/${cfg.cachePrefix}/${serverSlug}/${id}`;
 
     const cached = await ctx.state.getMany<T>(uniqueIds.map(keyFor));
@@ -204,8 +205,12 @@ function extractDataArray<T>(envelope: BrapiEnvelope<T[] | { data: T[] }>): T[] 
   return [];
 }
 
-function sanitizeKey(value: string): string {
-  return value.replace(/[^a-zA-Z0-9]/g, '-');
+/**
+ * State keys admit only `[A-Za-z0-9._/-]`, so the base URL is hashed rather
+ * than character-mapped: a lossy mapping lets distinct servers share entries.
+ */
+function serverKey(baseUrl: string): string {
+  return createHash('sha256').update(baseUrl).digest('hex');
 }
 
 let _cache: ReferenceDataCache | undefined;

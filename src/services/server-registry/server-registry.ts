@@ -39,11 +39,22 @@ export class ServerRegistry {
   ) {}
 
   /**
-   * Register a connection under an alias. Resolves the auth mode to a
-   * ready-to-use header (performing token exchange for `sgn` / `oauth2`) and
-   * persists the result in `ctx.state`.
+   * Register a connection under an alias: {@link resolve} then {@link save}.
    */
   async register(ctx: Context, input: RegisterInput): Promise<RegisteredServer> {
+    const registered = await this.resolve(ctx, input);
+    await this.save(ctx, registered);
+    return registered;
+  }
+
+  /**
+   * Validate the alias and base URL and resolve the auth mode to a
+   * ready-to-use header (performing token exchange for `sgn` / `oauth2`),
+   * without persisting anything — callers that must verify the connection
+   * first save it only once it works, so a failure leaves any previous
+   * registration under the alias intact.
+   */
+  async resolve(ctx: Context, input: RegisterInput): Promise<RegisteredServer> {
     const alias = input.alias?.trim() || DEFAULT_ALIAS;
     validateAlias(alias);
     validateBaseUrl(input.baseUrl);
@@ -57,9 +68,12 @@ export class ServerRegistry {
     };
     const resolvedAuth = await this.resolveAuth(auth, registered.baseUrl, ctx);
     if (resolvedAuth) registered.resolvedAuth = resolvedAuth;
-
-    await ctx.state.set(this.connKey(ctx, alias), registered);
     return registered;
+  }
+
+  /** Persist a resolved connection under its alias, replacing any previous one. */
+  async save(ctx: Context, registered: RegisteredServer): Promise<void> {
+    await ctx.state.set(this.connKey(ctx, registered.alias), registered);
   }
 
   /** Fetch a registered connection or throw `NotFound`. */
@@ -97,6 +111,15 @@ export class ServerRegistry {
 
   async unregister(ctx: Context, alias: string = DEFAULT_ALIAS): Promise<void> {
     await ctx.state.delete(this.connKey(ctx, alias));
+  }
+
+  /**
+   * True when session isolation is on but this request carries no session ID
+   * to scope on, so its connections land in the tenant-wide namespace that
+   * every other session-less caller in the tenant reads and overwrites.
+   */
+  isolationFallsBackToShared(ctx: Context): boolean {
+    return this.serverConfig.sessionIsolation === true && !ctx.sessionId;
   }
 
   /**
@@ -305,6 +328,13 @@ function validateBaseUrl(baseUrl: string): void {
     throw validationError(`Invalid baseUrl protocol '${parsed.protocol}'. Use http or https.`, {
       baseUrl,
     });
+  }
+  // Userinfo is never sent upstream as auth, but a stored baseUrl is echoed and
+  // logged, so it is refused rather than kept. The URL is not echoed back.
+  if (parsed.username || parsed.password) {
+    throw validationError(
+      'Invalid baseUrl: credentials in the URL (user:password@host) are not supported. Pass them in `auth`, or configure them server-side for the alias.',
+    );
   }
 }
 

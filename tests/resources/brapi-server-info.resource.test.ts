@@ -7,7 +7,7 @@
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiServerInfoResource } from '@/mcp-server/resources/definitions/brapi-server-info.resource.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import {
@@ -35,9 +35,19 @@ async function connect(fetcher: MockFetcher) {
     return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
   });
   const ctx = createMockContext({ tenantId: 't1' });
-  await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
+  const connected = await brapiConnect.handler(
+    brapiConnect.input.parse({ baseUrl: BASE_URL }),
+    ctx,
+  );
+  rejectUnmocked(fetcher);
+  return { ctx, connected };
+}
+
+function rejectUnmocked(fetcher: MockFetcher) {
   fetcher.mockReset();
-  return ctx;
+  fetcher.mockImplementation(async (url: string) => {
+    throw new Error(`Unmocked fetcher call: ${url}`);
+  });
 }
 
 describe('brapi://server/info resource', () => {
@@ -45,14 +55,39 @@ describe('brapi://server/info resource', () => {
 
   beforeEach(() => {
     fetcher = initTestServices();
+    rejectUnmocked(fetcher);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        throw new Error(`Unmocked global fetch: ${String(input)}`);
+      }),
+    );
   });
 
   afterEach(() => {
     resetTestServices();
+    vi.unstubAllGlobals();
+  });
+
+  it('carries the same nextToolSuggestions as brapi_connect', async () => {
+    const { ctx, connected } = await connect(fetcher);
+    const result = (await brapiServerInfoResource.handler({}, ctx)) as {
+      nextToolSuggestions: unknown;
+    };
+    expect(connected.nextToolSuggestions).toEqual([
+      {
+        toolName: 'brapi_find_studies',
+        reason: 'The server exposes studies; start here to find study DbIds.',
+        args: { alias: 'default' },
+      },
+    ]);
+    expect(result.nextToolSuggestions).toEqual(connected.nextToolSuggestions);
+    // The resource's content is the JSON serialization of this same object.
+    expect(JSON.stringify(result)).toContain('"toolName":"brapi_find_studies"');
   });
 
   it('returns the orientation envelope for the default connection', async () => {
-    const ctx = await connect(fetcher);
+    const { ctx } = await connect(fetcher);
     const result = (await brapiServerInfoResource.handler({}, ctx)) as {
       alias: string;
       baseUrl: string;

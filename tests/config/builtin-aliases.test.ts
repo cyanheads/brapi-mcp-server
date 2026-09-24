@@ -10,18 +10,22 @@ import { describe, expect, it } from 'vitest';
 import { BUILTIN_ALIASES, findBuiltinAlias, listBuiltinAliases } from '@/config/builtin-aliases.js';
 
 describe('BUILTIN_ALIASES registry', () => {
-  it('ships the BTI Breedbase family and the T3 small-grains servers', () => {
-    const aliases = BUILTIN_ALIASES.map((b) => b.alias);
-    expect(aliases).toEqual(
-      expect.arrayContaining([
-        'bti-cassava',
-        'bti-sweetpotato',
-        'bti-breedbase-demo',
-        't3-wheat',
-        't3-oat',
-        't3-barley',
-      ]),
-    );
+  it('ships exactly the anonymous-read BTI Breedbase family', () => {
+    expect(BUILTIN_ALIASES.map((b) => b.alias)).toEqual([
+      'bti-cassava',
+      'bti-sweetpotato',
+      'bti-breedbase-demo',
+    ]);
+  });
+
+  it('carries no Triticeae Toolbox (T3) entry — those hosts require login', () => {
+    for (const entry of BUILTIN_ALIASES) {
+      expect(entry.alias).not.toMatch(/^t3-/);
+      expect(entry.baseUrl).not.toContain('triticeaetoolbox.org');
+    }
+    expect(findBuiltinAlias('t3-wheat', {})).toBeUndefined();
+    expect(findBuiltinAlias('t3-oat', {})).toBeUndefined();
+    expect(findBuiltinAlias('t3-barley', {})).toBeUndefined();
   });
 
   it('every entry is frozen', () => {
@@ -62,7 +66,15 @@ describe('findBuiltinAlias', () => {
 
   it('is case-insensitive', () => {
     expect(findBuiltinAlias('BTI-CASSAVA', {})?.alias).toBe('bti-cassava');
-    expect(findBuiltinAlias('T3-Wheat', {})?.alias).toBe('t3-wheat');
+    expect(findBuiltinAlias('Bti-SweetPotato', {})?.alias).toBe('bti-sweetpotato');
+  });
+
+  it('matches every spelling that shares the builtin env prefix', () => {
+    expect(findBuiltinAlias('bti_cassava', {})?.alias).toBe('bti-cassava');
+    expect(findBuiltinAlias('BTI_Breedbase-Demo', {})?.alias).toBe('bti-breedbase-demo');
+    const env = { BRAPI_BUILTIN_ALIASES_DISABLED: 'bti_sweetpotato' };
+    expect(findBuiltinAlias('bti-sweetpotato', env)).toBeUndefined();
+    expect(listBuiltinAliases(env).map((b) => b.alias)).not.toContain('bti-sweetpotato');
   });
 
   it('returns undefined for unknown aliases', () => {
@@ -73,13 +85,13 @@ describe('findBuiltinAlias', () => {
     const env = { BRAPI_BUILTIN_ALIASES_DISABLED: 'bti-cassava' };
     expect(findBuiltinAlias('bti-cassava', env)).toBeUndefined();
     // Other entries unaffected.
-    expect(findBuiltinAlias('t3-wheat', env)?.alias).toBe('t3-wheat');
+    expect(findBuiltinAlias('bti-sweetpotato', env)?.alias).toBe('bti-sweetpotato');
   });
 
   it('disabled list ignores casing and surrounding whitespace', () => {
-    const env = { BRAPI_BUILTIN_ALIASES_DISABLED: ' BTI-Cassava , T3-Wheat ' };
+    const env = { BRAPI_BUILTIN_ALIASES_DISABLED: ' BTI-Cassava , BTI-Breedbase-Demo ' };
     expect(findBuiltinAlias('bti-cassava', env)).toBeUndefined();
-    expect(findBuiltinAlias('t3-wheat', env)).toBeUndefined();
+    expect(findBuiltinAlias('bti-breedbase-demo', env)).toBeUndefined();
     expect(findBuiltinAlias('bti-sweetpotato', env)?.alias).toBe('bti-sweetpotato');
   });
 });
@@ -91,15 +103,9 @@ describe('listBuiltinAliases', () => {
 
   it('filters out aliases on the disabled list', () => {
     const result = listBuiltinAliases({
-      BRAPI_BUILTIN_ALIASES_DISABLED: 'bti-cassava,t3-wheat',
+      BRAPI_BUILTIN_ALIASES_DISABLED: 'bti-cassava,bti-breedbase-demo',
     });
-    const aliases = result.map((b) => b.alias);
-    expect(aliases).not.toContain('bti-cassava');
-    expect(aliases).not.toContain('t3-wheat');
-    expect(aliases).toContain('bti-sweetpotato');
-    expect(aliases).toContain('bti-breedbase-demo');
-    expect(aliases).toContain('t3-oat');
-    expect(aliases).toContain('t3-barley');
+    expect(result.map((b) => b.alias)).toEqual(['bti-sweetpotato']);
   });
 
   it('returns the same registry instance when nothing is disabled', () => {

@@ -26,6 +26,28 @@ import {
   resetTestServices,
 } from './_tool-test-helpers.js';
 
+/** Reset the fetcher so any call a test did not script rejects instead of returning undefined. */
+function rejectUnmocked(fetcher: MockFetcher): MockFetcher {
+  fetcher.mockReset();
+  fetcher.mockImplementation(async (url: string) => {
+    throw new Error(`Unmocked fetcher call: ${url}`);
+  });
+  return fetcher;
+}
+
+beforeEach(() => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      throw new Error(`Unmocked global fetch: ${String(input)}`);
+    }),
+  );
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 // Secret values that must never appear in tool output.
 const FAKE_API_KEY = 'sk-super-secret-api-key-12345';
 const FAKE_BEARER_TOKEN = 'bearer-token-do-not-leak-xyz987';
@@ -51,11 +73,13 @@ async function connectWithAuth(fetcher: MockFetcher) {
   });
 
   // Use a single auth family (bearer) so resolveConnectInput doesn't reject the ambiguous combo.
+  // Env credentials only travel to the base URL configured alongside them.
+  vi.stubEnv('BRAPI_DEFAULT_BASE_URL', BASE_URL);
   vi.stubEnv('BRAPI_DEFAULT_BEARER_TOKEN', FAKE_BEARER_TOKEN);
 
   const ctx = createMockContext({ tenantId: 't1' });
   await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
-  fetcher.mockReset();
+  rejectUnmocked(fetcher);
   return ctx;
 }
 
@@ -78,7 +102,7 @@ async function connectBasic(fetcher: MockFetcher) {
   });
   const ctx = createMockContext({ tenantId: 't1' });
   await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
-  fetcher.mockReset();
+  rejectUnmocked(fetcher);
   return ctx;
 }
 
@@ -102,7 +126,7 @@ async function connectForRawGet(fetcher: MockFetcher) {
   });
   const ctx = createMockContext({ tenantId: 't1', errors: brapiRawGet.errors });
   await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
-  fetcher.mockReset();
+  rejectUnmocked(fetcher);
   return ctx;
 }
 
@@ -110,7 +134,7 @@ describe('credential non-disclosure', () => {
   let fetcher: MockFetcher;
 
   beforeEach(() => {
-    fetcher = initTestServices();
+    fetcher = rejectUnmocked(initTestServices());
   });
 
   afterEach(() => {
@@ -260,7 +284,7 @@ describe('path traversal and injection guards', () => {
   let fetcher: MockFetcher;
 
   beforeEach(() => {
-    fetcher = initTestServices();
+    fetcher = rejectUnmocked(initTestServices());
   });
 
   afterEach(() => {
@@ -341,7 +365,7 @@ describe('oversized input handling', () => {
   let fetcher: MockFetcher;
 
   beforeEach(() => {
-    fetcher = initTestServices();
+    fetcher = rejectUnmocked(initTestServices());
   });
 
   afterEach(() => {
@@ -388,7 +412,7 @@ describe('unicode and encoding edge cases', () => {
   let fetcher: MockFetcher;
 
   beforeEach(() => {
-    fetcher = initTestServices();
+    fetcher = rejectUnmocked(initTestServices());
   });
 
   afterEach(() => {
@@ -452,7 +476,7 @@ describe('empty result-set edge cases', () => {
   let fetcher: MockFetcher;
 
   beforeEach(() => {
-    fetcher = initTestServices();
+    fetcher = rejectUnmocked(initTestServices());
   });
 
   afterEach(() => {
@@ -489,7 +513,7 @@ describe('empty result-set edge cases', () => {
     });
     const ctx = createMockContext({ tenantId: 't1' });
     await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
-    fetcher.mockReset();
+    rejectUnmocked(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
     const result = await brapiFindStudies.handler(brapiFindStudies.input.parse({}), ctx);

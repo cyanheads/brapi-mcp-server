@@ -88,8 +88,9 @@ URI-addressable mirrors of the curated tool surface for clients that prefer reso
 - `baseUrl` and `auth` are optional — when omitted, resolved from `BRAPI_<ALIAS>_*` env vars, then the built-in registry, then `BRAPI_DEFAULT_*`, so credentials never enter the LLM context
 - `alias` (default `default`, pattern `^[a-zA-Z0-9_-]+$`) registers multiple concurrent connections in one session
 - Auth is a tagged union: `none` / `bearer` / `api_key` / `sgn` (Breedbase `/token` exchange) / `oauth2` (client-credentials)
-- Typed errors: `auth_token_exchange_failed`, `auth_no_access_token`
-- Returns the full orientation envelope (identity, capabilities, content counts, attribution) — one call fully orients the agent; re-fetch on demand via `brapi_server_info`
+- Typed errors: `auth_session_required`, `auth_base_url_mismatch`, `alias_base_url_unset`, `auth_token_exchange_failed`, `auth_no_access_token`, `upstream_unauthorized`, `upstream_forbidden` — a server that answers 401/403 on `/serverinfo` or `/calls` fails the connect with a credentials hint instead of registering an empty profile. A failed connect registers nothing and leaves any previous connection under the alias intact
+- Returns the full orientation envelope (identity, capabilities, content counts, attribution, `nextToolSuggestions`) — one call fully orients the agent; re-fetch on demand via `brapi_server_info`
+- `nextToolSuggestions` names the entry-point finders the server can serve (`brapi_find_studies`, `brapi_find_germplasm`, `brapi_find_variables`, `brapi_find_locations`, in that order), each with `args: { alias }` — a finder counts when its GET route or a POST `/search` route the active dialect doesn't disable is advertised
 
 ---
 
@@ -375,7 +376,7 @@ BrAPI-specific:
 
 - Dataframe spillover — `find_*` tools cap in-context rows at `loadLimit` and materialize larger unions (up to 50,000 rows) as DuckDB-backed `df_<uuid>` canvas dataframes, queryable via `brapi_dataframe_query`
 - Dialect adaptation — five per-server-family adapters (`spec` / `brapi-test` / `breedbase` / `cassavabase` / `bms`) translate v2.1 plural filter keys to the singular form each family honors, drop known-broken filters, and escalate to `POST /search/{noun}` when `GET` would silently downcast
-- Multi-server session with a built-in known-server registry — `ServerRegistry` holds live connections under named aliases; six public Breedbase/T3 endpoints resolve out-of-the-box with no env vars
+- Multi-server session with a built-in known-server registry — `ServerRegistry` holds live connections under named aliases; three public Breedbase endpoints resolve out-of-the-box with no env vars
 - Capability-aware, rate-limited calls — `CapabilityRegistry` caches `/serverinfo` and guards every call against unsupported endpoints; a per-connection concurrency cap and exponential-backoff retry cover 429/5xx
 - Tagged-union auth (`none` / `bearer` / `api_key` / `sgn` session-token exchange / `oauth2` client-credentials), resolved per alias from env vars so credentials never enter the LLM context
 
@@ -477,7 +478,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 # Server listens at http://localhost:3010/mcp
 ```
 
-No env vars are required — the six built-in aliases (`bti-cassava`, `bti-sweetpotato`, `bti-breedbase-demo`, `t3-wheat`, `t3-oat`, `t3-barley`) resolve out-of-the-box, and agents can connect to any other BrAPI v2 URL at runtime via `brapi_connect`. For credentialed servers, prefer env vars over agent input so passwords, tokens, and API keys stay out of the LLM context — see [Per-alias credentials](#per-alias-credentials).
+No env vars are required — the three built-in aliases (`bti-cassava`, `bti-sweetpotato`, `bti-breedbase-demo`) resolve out-of-the-box, and agents can connect to any other BrAPI v2 URL at runtime via `brapi_connect`. For credentialed servers, prefer env vars over agent input so passwords, tokens, and API keys stay out of the LLM context — see [Per-alias credentials](#per-alias-credentials).
 
 ### Prerequisites
 
@@ -553,10 +554,17 @@ Per-alias overrides follow the `BRAPI_<ALIAS>_*` pattern. See [`.env.example`](.
 
 `brapi_connect` resolves `baseUrl` and `auth` from env vars when the agent omits them — credentials never enter the LLM context. Four layers of precedence:
 
-1. **Explicit agent input** — always wins.
+1. **Explicit agent input** — wins, within the credential pairing below.
 2. **Per-alias env vars** — `BRAPI_<ALIAS>_*` (uppercased, hyphens → underscores: `my-server` → `BRAPI_MY_SERVER_*`).
 3. **Built-in known-server registry** — see [Built-in aliases](#built-in-aliases).
-4. **Default env vars** — `BRAPI_DEFAULT_*`, only when the alias differs from `default`. Not layered on top of a built-in URL — defaults belong to the default server.
+4. **Default env vars** — `BRAPI_DEFAULT_BASE_URL` fills in the URL for an alias with no URL and no credentials of its own; `BRAPI_DEFAULT_*` credentials follow only that URL (see below).
+
+Env credentials only travel to the server configured alongside them:
+
+- **Per-alias credentials** pair with the alias's own URL: `BRAPI_<ALIAS>_BASE_URL`, else its built-in URL when that built-in is enabled. A caller `baseUrl` that differs is refused with `auth_base_url_mismatch` before any request — omit `baseUrl`, or register the other server under a different alias. Credentials with no URL of their own (including those left behind for a built-in disabled via `BRAPI_BUILTIN_ALIASES_DISABLED`) pair with nothing: they are never sent to `BRAPI_DEFAULT_BASE_URL`, and `brapi_connect` refuses the alias with `alias_base_url_unset` until `BRAPI_<ALIAS>_BASE_URL` is set.
+- **`BRAPI_DEFAULT_*` credentials** belong to the `default` alias and `BRAPI_DEFAULT_BASE_URL`. Another alias gets them only when its resolved URL is `BRAPI_DEFAULT_BASE_URL`; anywhere else it connects with no auth. An alias whose `BRAPI_<ALIAS>_BASE_URL`, built-in URL, or caller `baseUrl` points at another server does not inherit them, even when it has no credentials of its own — give such an alias its own `BRAPI_<ALIAS>_*` credentials.
+
+URLs compare after normalizing host case, default ports, and trailing slashes. Caller-supplied `auth` is never mixed with env credentials.
 
 Each alias carries **one** credential family — auth mode is derived from which fields are set:
 
@@ -593,13 +601,12 @@ The server ships with a curated registry of public BrAPI v2 endpoints. Each reso
 | `bti-cassava` | [cassavabase.org](https://cassavabase.org/) | Boyce Thompson Institute | Cassava | NextGen Cassava |
 | `bti-sweetpotato` | [sweetpotatobase.org](https://sweetpotatobase.org/) | Boyce Thompson Institute | Sweet potato | |
 | `bti-breedbase-demo` | [breedbase.org](https://breedbase.org/) | Boyce Thompson Institute | _Demo_ | Sample data only — onboarding + tests. |
-| `t3-wheat` | [wheat.triticeaetoolbox.org](https://wheat.triticeaetoolbox.org/) | Triticeae Toolbox (T3) | Wheat | Wheat CAP / IWYP. |
-| `t3-oat` | [oat.triticeaetoolbox.org](https://oat.triticeaetoolbox.org/) | Triticeae Toolbox (T3) | Oat | Global Oat Genetics Database. |
-| `t3-barley` | [barley.triticeaetoolbox.org](https://barley.triticeaetoolbox.org/) | Triticeae Toolbox (T3) | Barley | T-CAP / US Wheat & Barley Scab Initiative. |
 
-Set `BRAPI_<ALIAS>_BASE_URL` to repoint at a staging mirror or fork (env wins over the built-in URL — hyphens in the alias become underscores in the env var, so `t3-wheat` → `BRAPI_T3_WHEAT_BASE_URL`). Set `BRAPI_<ALIAS>_USERNAME` etc. to attach credentials on top of the built-in URL — each Breedbase instance has its own user table, so write access requires separate registration on each upstream. Use `BRAPI_BUILTIN_ALIASES_DISABLED=bti-cassava,t3-wheat` to strip specific entries.
+The registry holds only servers verified for anonymous reads. Servers that require login — the Triticeae Toolbox (T3) wheat, oat, and barley hosts among them — connect through `BRAPI_<ALIAS>_BASE_URL` plus credentials (see [`.env.example`](./.env.example)).
 
-**Citation:** all six built-ins reference Morales et al. 2022, _"Breedbase: a digital ecosystem for modern plant breeding."_ G3 12(7): jkac078. [doi:10.1093/g3journal/jkac078](https://doi.org/10.1093/g3journal/jkac078).
+Set `BRAPI_<ALIAS>_BASE_URL` to repoint at a staging mirror or fork (env wins over the built-in URL — hyphens in the alias become underscores in the env var, so `bti-sweetpotato` → `BRAPI_BTI_SWEETPOTATO_BASE_URL`). Set `BRAPI_<ALIAS>_USERNAME` etc. to attach credentials on top of the built-in URL — each Breedbase instance has its own user table, so write access requires separate registration on each upstream. Use `BRAPI_BUILTIN_ALIASES_DISABLED=bti-cassava,bti-breedbase-demo` to strip specific entries.
+
+**Citation:** all three built-ins reference Morales et al. 2022, _"Breedbase: a digital ecosystem for modern plant breeding."_ G3 12(7): jkac078. [doi:10.1093/g3journal/jkac078](https://doi.org/10.1093/g3journal/jkac078).
 
 ## Running the server
 
@@ -634,11 +641,11 @@ Two stateful layers scope by tenant and, by default, by MCP session: **connectio
 
 | Shape | Settings | Isolation | Best for |
 |:------|:---------|:----------|:---------|
-| **Per-session (default)** | `MCP_AUTH_MODE=none` + HTTP stateful + `BRAPI_SESSION_ISOLATION=true` | Each MCP session carves its own connection state and canvas. Concurrent HTTP callers don't see each other's aliases, exchanged tokens, or `df_<uuid>` rows. | Multi-user host without SSO. Default for institutional / public deployment under shared-trust auth. |
+| **Per-session (default)** | `MCP_AUTH_MODE=none` + HTTP stateful + `BRAPI_SESSION_ISOLATION=true` | Each MCP session carves its own connection state and canvas. Concurrent HTTP callers don't see each other's aliases, exchanged tokens, or `df_<uuid>` rows. Requests with no session (2026-07-28 protocol clients) share one tenant-wide namespace, so `brapi_connect` refuses their caller-supplied `auth` (`auth_session_required`); keyless connections and operator env credentials still work. | Multi-user host without SSO. Default for institutional / public deployment under shared-trust auth. |
 | **Per-user credentials** | `MCP_AUTH_MODE=jwt` or `oauth` (+ HTTP stateful) | Each user's JWT `tid` claim carves a tenant; sessions sub-scope inside each tenant when isolation is on. Cross-user spillover impossible at the framework level. | Multi-user host with institutional SSO — strongest separation. |
 | **Shared workspace** | `MCP_AUTH_MODE=none` + `BRAPI_SESSION_ISOLATION=false` | All callers in one tenant share connection state and one canvas. | Solo, lab, or hosting where every caller is one researcher running parallel agents on shared upstream credentials. |
 
-Stdio is always one session, so isolation is moot there. Clients on MCP protocol revision 2026-07-28 are session-less by every transport (no `ctx.sessionId`), so they always land in the shared tenant workspace regardless of `BRAPI_SESSION_ISOLATION` — only the per-user-credentials shape isolates them.
+Stdio is always one session, so isolation is moot there. Clients on MCP protocol revision 2026-07-28 are session-less by every transport (no `ctx.sessionId`), so they always land in the shared tenant workspace regardless of `BRAPI_SESSION_ISOLATION` — only the per-user-credentials shape isolates them. There, re-registering an alias re-points every such caller's later calls to it. Under the per-session default, HTTP `brapi_connect` refuses their caller-supplied credentials rather than sharing them; the shared-workspace shape accepts and shares them by design.
 
 Belt-and-braces under shared trust: `brapi_dataframe_describe` requires an explicit `dataframe` name (no list-all enumeration) and `brapi_dataframe_query` rejects system-catalog reads, so a caller without a known `df_<uuid>` name can't fish through either surface even in the shared-workspace shape.
 

@@ -5,20 +5,58 @@
  * active ServerRegistry entry, then layers in cheap opportunistic counts via
  * `pageSize=1` probes. Counts degrade silently — a server that doesn't
  * honor the probe just omits the field rather than failing the whole call.
+ * Also names the entry-point `brapi_find_*` tools the server can serve, by
+ * the same route rule those tools resolve with.
  *
  * @module mcp-server/tools/shared/orientation-envelope
  */
 
 import { type Context, z } from '@cyanheads/mcp-ts-core';
+import { sameBaseUrl } from '@/config/alias-credentials.js';
 import { findBuiltinAlias } from '@/config/builtin-aliases.js';
 import type { BrapiClient, BrapiRequestOptions } from '@/services/brapi-client/index.js';
-import { detectDialectId, dialectEnvVar, getDialectById } from '@/services/brapi-dialect/index.js';
+import {
+  type BrapiDialect,
+  detectDialectId,
+  dialectEnvVar,
+  getDialectById,
+} from '@/services/brapi-dialect/index.js';
 import type {
   CapabilityLookupOptions,
   CapabilityRegistry,
 } from '@/services/capability-registry/index.js';
 import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
+import { hasFindRoute } from './find-helpers.js';
+
+/**
+ * Finders an agent can open with from nothing but an alias, in suggestion
+ * order. Anchored finders (observations, images, variants, genotype calls)
+ * need a DbId the envelope does not have, so they are never suggested.
+ */
+const ENTRY_POINT_FINDERS = [
+  {
+    toolName: 'brapi_find_studies',
+    noun: 'studies',
+    reason: 'The server exposes studies; start here to find study DbIds.',
+  },
+  {
+    toolName: 'brapi_find_germplasm',
+    noun: 'germplasm',
+    reason: 'The server exposes germplasm; start here to find germplasm DbIds.',
+  },
+  {
+    toolName: 'brapi_find_variables',
+    noun: 'variables',
+    reason:
+      'The server exposes observation variables; start here to find observationVariable DbIds for traits.',
+  },
+  {
+    toolName: 'brapi_find_locations',
+    noun: 'locations',
+    reason: 'The server exposes locations; start here to find location DbIds.',
+  },
+] as const;
 
 /**
  * BrAPI endpoints we treat as the "common floor" — their absence is worth
@@ -172,6 +210,22 @@ export const OrientationAttributionSchema = z
     'Attribution metadata for connections served from the built-in known-server registry. Surfaces license + citation alongside the data so reuse terms (e.g. CC-BY attribution) can be satisfied. Absent when the connection uses a custom baseUrl — those carry no curated attribution.',
   );
 
+export const NextToolSuggestionSchema = z
+  .object({
+    toolName: z
+      .enum(ENTRY_POINT_FINDERS.map((f) => f.toolName))
+      .describe('Entry-point finder tool this server can serve.'),
+    reason: z.string().describe('Why this tool applies to the connected server.'),
+    args: z
+      .object({
+        alias: z.string().describe('Connection alias to pass to the suggested tool.'),
+      })
+      .describe(
+        'Arguments to call the tool with. Alias only — narrow further with the tool filters.',
+      ),
+  })
+  .describe('A finder the connected server supports, with the arguments to start it.');
+
 export const OrientationEnvelopeSchema = z.object({
   alias: z.string().describe('Connection alias.'),
   baseUrl: z.string().describe('BrAPI v2 base URL for this connection.'),
@@ -187,6 +241,11 @@ export const OrientationEnvelopeSchema = z.object({
   attribution: OrientationAttributionSchema.optional().describe(
     'Attribution metadata for built-in known-server connections. Absent for custom (env-only) connections.',
   ),
+  nextToolSuggestions: z
+    .array(NextToolSuggestionSchema)
+    .describe(
+      'Entry-point finders (studies, germplasm, variables, locations — in that order) whose GET or POST /search route this server exposes under the active dialect. Empty when none apply.',
+    ),
   notes: z
     .array(z.string().describe('Server-specific quirk or degradation note.'))
     .describe('Server-specific quirks or degradation notes.'),
@@ -257,8 +316,15 @@ export async function buildOrientationEnvelope(
   if (connection.resolvedAuth?.headerName) auth.headerName = connection.resolvedAuth.headerName;
   if (connection.resolvedAuth?.expiresAt) auth.expiresAt = connection.resolvedAuth.expiresAt;
 
-  const dialect = buildDialectSummary(connection, profile);
-  const builtin = findBuiltinAlias(connection.alias);
+  const detection = detectDialectId(connection.alias, profile);
+  const activeDialect = getDialectById(detection.id);
+  const dialect = buildDialectSummary(connection, detection, activeDialect);
+  // Curated attribution describes the built-in server, not whatever URL the alias now points at.
+  const aliasBuiltin = findBuiltinAlias(connection.alias);
+  const builtin =
+    aliasBuiltin && sameBaseUrl(connection.baseUrl, aliasBuiltin.baseUrl)
+      ? aliasBuiltin
+      : undefined;
   if (builtin?.isDemo) {
     notes.push(
       `Alias '${connection.alias}' points at a demo Breedbase instance (${builtin.homepage}) — sample data only, not production records.`,
@@ -277,6 +343,7 @@ export async function buildOrientationEnvelope(
     },
     dialect,
     content,
+    nextToolSuggestions: suggestEntryPointFinders(connection.alias, profile, activeDialect),
     notes,
     fetchedAt: new Date().toISOString(),
   };
@@ -292,12 +359,27 @@ export async function buildOrientationEnvelope(
   return envelope;
 }
 
+/**
+ * Entry-point finders the server can serve, decided by the rule each finder's
+ * own route resolution applies. `args` carries the alias only: servers report
+ * crop names on `/commoncropnames` that often do not match the values on their
+ * records, so pre-filling a crop would narrow to nothing.
+ */
+function suggestEntryPointFinders(
+  alias: string,
+  profile: CapabilityProfile,
+  dialect: BrapiDialect,
+): OrientationEnvelope['nextToolSuggestions'] {
+  return ENTRY_POINT_FINDERS.filter((finder) => hasFindRoute(profile, dialect, finder.noun)).map(
+    ({ toolName, reason }) => ({ toolName, reason, args: { alias } }),
+  );
+}
+
 function buildDialectSummary(
   connection: RegisteredServer,
-  profile: CapabilityProfile,
+  detection: ReturnType<typeof detectDialectId>,
+  dialect: BrapiDialect,
 ): OrientationEnvelope['dialect'] {
-  const detection = detectDialectId(connection.alias, profile);
-  const dialect = getDialectById(detection.id);
   const summary: OrientationEnvelope['dialect'] = {
     id: detection.id,
     source: detection.source,
@@ -454,6 +536,19 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
     lines.push(`- **Citation:** ${envelope.attribution.citation}`);
     if (envelope.attribution.isDemo)
       lines.push('- **Demo dataset** — sample data, not production.');
+  }
+
+  lines.push('');
+  lines.push('## Suggested next tools');
+  if (envelope.nextToolSuggestions.length === 0) {
+    lines.push(
+      '- None — this server exposes none of studies, germplasm, variables, or locations, so no entry-point finder applies.',
+    );
+  }
+  for (const suggestion of envelope.nextToolSuggestions) {
+    lines.push(
+      `- \`${suggestion.toolName}\` \`${JSON.stringify(suggestion.args)}\` — ${suggestion.reason}`,
+    );
   }
 
   if (envelope.notes.length > 0) {

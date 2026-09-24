@@ -14,7 +14,7 @@ export const brapiServerInfoResource = resource('brapi://server/info', {
   name: 'brapi-server-info',
   title: 'BrAPI server orientation envelope',
   description:
-    'Orientation envelope for the default BrAPI connection — identity, capabilities, content counts, notes. Same payload as the brapi_server_info tool.',
+    'Orientation envelope for the default BrAPI connection — identity, capabilities, content counts, suggested finders, notes. Same payload as the brapi_server_info tool.',
   mimeType: 'application/json',
   errors: [
     {

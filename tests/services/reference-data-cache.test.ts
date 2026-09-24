@@ -100,6 +100,17 @@ describe('ReferenceDataCache', () => {
       expect(client.get).toHaveBeenCalledTimes(1);
     });
 
+    it('keeps servers whose URLs differ only in punctuation apart', async () => {
+      client.get.mockImplementation(async (base: string) =>
+        envelope<{ data: Program[] }>({ data: [{ programDbId: 'p1', programName: base }] }),
+      );
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+      const a = 'https://a.b/brapi/v2';
+      const b = 'https://a-b/brapi/v2';
+      expect((await cache.getPrograms(a, ['p1'], ctx)).get('p1')?.programName).toBe(a);
+      expect((await cache.getPrograms(b, ['p1'], ctx)).get('p1')?.programName).toBe(b);
+    });
+
     it('partitions cache hits from misses and only fetches the missing subset', async () => {
       const ctx = createMockContext({ tenantId: 'test-tenant' });
 

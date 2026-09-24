@@ -208,11 +208,12 @@ export function resolveFindRoute(input: ResolveFindRouteInput): FindRoute {
   const path = `/${input.endpoint}`;
   const searchNoun = input.searchNoun ?? input.endpoint;
   const searchService = `search/${searchNoun}`;
-  const getDescriptor = input.profile.supported[service];
-  const searchDescriptor = input.profile.supported[searchService];
-  const getSupported = supportsMethod(getDescriptor, 'GET');
-  const searchSupported = supportsMethod(searchDescriptor, 'POST');
-  const searchDisabled = Boolean(input.dialect.disabledSearchEndpoints?.has(searchNoun));
+  const { getSupported, searchSupported, searchDisabled } = findRouteSupport(
+    input.profile,
+    input.dialect,
+    service,
+    searchNoun,
+  );
   const escalate = input.requiresEscalation === true && searchSupported && !searchDisabled;
 
   if (getSupported && !escalate) {
@@ -258,6 +259,38 @@ export function resolveFindRoute(input: ResolveFindRouteInput): FindRoute {
       reason: 'missing_find_route',
     },
   );
+}
+
+/**
+ * True when {@link resolveFindRoute} picks a route for `noun` on this server
+ * instead of throwing: GET `/{noun}` is advertised, or POST `/search/{noun}`
+ * is advertised and the active dialect does not mark it known-dead.
+ */
+export function hasFindRoute(
+  profile: CapabilityProfile,
+  dialect: Pick<BrapiDialect, 'disabledSearchEndpoints'>,
+  noun: string,
+): boolean {
+  const { getSupported, searchSupported, searchDisabled } = findRouteSupport(
+    profile,
+    dialect,
+    noun,
+    noun,
+  );
+  return getSupported || (searchSupported && !searchDisabled);
+}
+
+function findRouteSupport(
+  profile: CapabilityProfile,
+  dialect: Pick<BrapiDialect, 'disabledSearchEndpoints'>,
+  service: string,
+  searchNoun: string,
+): { getSupported: boolean; searchDisabled: boolean; searchSupported: boolean } {
+  return {
+    getSupported: supportsMethod(profile.supported[service], 'GET'),
+    searchSupported: supportsMethod(profile.supported[`search/${searchNoun}`], 'POST'),
+    searchDisabled: Boolean(dialect.disabledSearchEndpoints?.has(searchNoun)),
+  };
 }
 
 function supportsMethod(

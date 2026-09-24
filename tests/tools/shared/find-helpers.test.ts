@@ -13,10 +13,103 @@ import {
   appendPassthroughLines,
   collectPassthroughParts,
   type DataframeHandle,
+  hasFindRoute,
   renderDataframeHandle,
   renderDistributions,
+  resolveFindRoute,
   toDataframeHandle,
 } from '@/mcp-server/tools/shared/find-helpers.js';
+import type { BrapiDialect } from '@/services/brapi-dialect/index.js';
+import type { CallDescriptor, CapabilityProfile } from '@/services/capability-registry/types.js';
+
+function profileOf(calls: CallDescriptor[]): CapabilityProfile {
+  return {
+    baseUrl: 'https://brapi.example.org/brapi/v2',
+    server: {},
+    supported: Object.fromEntries(calls.map((c) => [c.service, c])),
+    crops: [],
+    fetchedAt: '2026-06-01T00:00:00.000Z',
+  };
+}
+
+function dialectOf(disabled: string[] = []): BrapiDialect {
+  return { id: 'test', disabledSearchEndpoints: new Set(disabled) } as unknown as BrapiDialect;
+}
+
+/** resolveFindRoute outcome as a short label: the route kind, or the thrown reason. */
+function routeOutcome(profile: CapabilityProfile, dialect: BrapiDialect, escalate = false): string {
+  try {
+    return resolveFindRoute({
+      profile,
+      dialect,
+      endpoint: 'studies',
+      filters: {},
+      searchBody: {},
+      warnings: [],
+      ...(escalate ? { requiresEscalation: true } : {}),
+    }).kind;
+  } catch (err) {
+    return String((err as { data?: { reason?: string } }).data?.reason);
+  }
+}
+
+const ROUTE_CASES: Array<[string, CallDescriptor[], string[], boolean, string]> = [
+  ['GET advertised', [{ service: 'studies', methods: ['GET'] }], [], false, 'get'],
+  ['GET without methods', [{ service: 'studies' }], [], false, 'get'],
+  [
+    'GET listed for POST only',
+    [{ service: 'studies', methods: ['POST'] }],
+    [],
+    false,
+    'missing_find_route',
+  ],
+  ['search only', [{ service: 'search/studies', methods: ['POST'] }], [], false, 'search'],
+  ['search only, no methods', [{ service: 'search/studies' }], [], false, 'search'],
+  [
+    'search only, dialect-disabled',
+    [{ service: 'search/studies' }],
+    ['studies'],
+    false,
+    'search_endpoint_disabled',
+  ],
+  [
+    'search listed for GET only',
+    [{ service: 'search/studies', methods: ['GET'] }],
+    [],
+    false,
+    'missing_find_route',
+  ],
+  ['nothing', [], [], false, 'missing_find_route'],
+  [
+    'escalation with both',
+    [{ service: 'studies' }, { service: 'search/studies', methods: ['POST'] }],
+    [],
+    true,
+    'search',
+  ],
+  [
+    'escalation blocked by dialect',
+    [{ service: 'studies' }, { service: 'search/studies', methods: ['POST'] }],
+    ['studies'],
+    true,
+    'get',
+  ],
+];
+
+describe('resolveFindRoute', () => {
+  it.each(ROUTE_CASES)('%s', (_label, calls, disabled, escalate, expected) => {
+    expect(routeOutcome(profileOf(calls), dialectOf(disabled), escalate)).toBe(expected);
+  });
+});
+
+describe('hasFindRoute', () => {
+  it.each(ROUTE_CASES)('agrees with resolveFindRoute: %s', (_label, calls, disabled, escalate) => {
+    const profile = profileOf(calls);
+    const dialect = dialectOf(disabled);
+    const routed = ['get', 'search'].includes(routeOutcome(profile, dialect, escalate));
+    expect(hasFindRoute(profile, dialect, 'studies')).toBe(routed);
+  });
+});
 
 /** A spilled-result dataframe handle, as a `find_*` format() would receive it. */
 function handle(overrides: Partial<DataframeHandle> = {}): DataframeHandle {

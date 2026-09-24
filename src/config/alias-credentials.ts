@@ -11,7 +11,7 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { configurationError, forbidden, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { findBuiltinAlias, listBuiltinAliases } from '@/config/builtin-aliases.js';
 import type { AuthMode, ConnectAuth } from '@/services/server-registry/index.js';
 
@@ -137,6 +137,10 @@ export interface ResolvedConnectInput {
   baseUrl: string;
 }
 
+/** Recovery hint for the `auth_base_url_mismatch` refusal; shared with the `brapi_connect` contract. */
+export const AUTH_BASE_URL_MISMATCH_RECOVERY =
+  'Omit `baseUrl` to connect to the server configured for this alias, or register the other server under a different alias.';
+
 /**
  * Layer agent input over alias env over the builtin registry over default env.
  * Returns the resolved baseUrl + auth. Throws when no baseUrl is resolvable
@@ -149,10 +153,19 @@ export interface ResolvedConnectInput {
  *   4. Default env vars (`BRAPI_DEFAULT_*`) — only when alias differs.
  *   5. `auth` falls through to `{ mode: 'none' }`; `baseUrl` has no fallback.
  *
- * When the baseUrl is satisfied by a builtin, default-env auth is NOT used —
- * default credentials belong to the default server, not whatever upstream the
- * builtin happens to point at. Per-alias creds still apply, since those were
- * explicitly set for this alias.
+ * Env credentials only travel to the server configured alongside them:
+ * - Per-alias credentials pair with the alias's own URL: its env base URL,
+ *   else its enabled builtin URL (for `default`, `BRAPI_DEFAULT_BASE_URL`).
+ *   A caller `baseUrl` that differs from it is refused with
+ *   `auth_base_url_mismatch`. Credentials with no URL of their own pair with
+ *   nothing and are refused with `alias_base_url_unset` — they never fall
+ *   back to `BRAPI_DEFAULT_BASE_URL`. Both refusals precede any request.
+ * - Default credentials pair with `BRAPI_DEFAULT_BASE_URL` only. For another
+ *   alias they attach when the resolved URL is that one and are otherwise
+ *   left off, so auth falls through to `none`.
+ *
+ * URLs compare after normalization (host case, default port, trailing
+ * slashes). Caller-supplied `auth` bypasses env credentials entirely.
  */
 export function resolveConnectInput(
   alias: string,
@@ -163,25 +176,83 @@ export function resolveConnectInput(
   const defaultCreds =
     alias === DEFAULT_ALIAS ? aliasCreds : readAliasCredentials(DEFAULT_ALIAS, env);
 
-  const builtin = !agent.baseUrl && !aliasCreds.baseUrl ? findBuiltinAlias(alias, env) : undefined;
-  const baseUrl = agent.baseUrl ?? aliasCreds.baseUrl ?? builtin?.baseUrl ?? defaultCreds.baseUrl;
+  const builtin = aliasCreds.baseUrl ? undefined : findBuiltinAlias(alias, env);
+  const ownBaseUrl =
+    aliasCreds.baseUrl ??
+    builtin?.baseUrl ??
+    (alias === DEFAULT_ALIAS ? defaultCreds.baseUrl : undefined);
+  const aliasAuth = agent.auth ? undefined : deriveAuthFromCredentials(aliasCreds, alias);
+  if (aliasAuth && ownBaseUrl === undefined && alias !== DEFAULT_ALIAS) {
+    const envVar = `${aliasEnvPrefix(alias)}BASE_URL`;
+    throw configurationError(
+      `Alias '${alias}' has server-configured credentials but no base URL of its own, so they are not sent anywhere. Set ${envVar} on the server, or remove the alias's credential variables. No request was made.`,
+      {
+        reason: 'alias_base_url_unset',
+        alias,
+        envVar,
+        retryable: false,
+        recovery: {
+          hint: `Set ${envVar} on the server for alias '${alias}', or remove its credential variables, before retrying.`,
+        },
+      },
+    );
+  }
+
+  const baseUrl = agent.baseUrl ?? ownBaseUrl ?? defaultCreds.baseUrl;
   if (!baseUrl) {
     throw validationError(
       `No baseUrl provided. Pass \`baseUrl\` explicitly, or set ${aliasEnvPrefix(alias)}BASE_URL${alias === DEFAULT_ALIAS ? '' : ` or ${aliasEnvPrefix(DEFAULT_ALIAS)}BASE_URL`}.`,
       { alias },
     );
   }
+  if (agent.auth) return { baseUrl, auth: agent.auth };
 
-  const allowDefaultAuthFallback = !builtin && alias !== DEFAULT_ALIAS;
-  const auth =
-    agent.auth ??
-    deriveAuthFromCredentials(aliasCreds, alias) ??
-    (allowDefaultAuthFallback
-      ? deriveAuthFromCredentials(defaultCreds, DEFAULT_ALIAS)
-      : undefined) ??
-    NONE_AUTH;
+  if (aliasAuth) {
+    if (agent.baseUrl === undefined || sameBaseUrl(agent.baseUrl, ownBaseUrl)) {
+      return { baseUrl, auth: aliasAuth };
+    }
+    // An unparsable caller URL fails baseUrl validation downstream; it just gets no credentials.
+    if (comparableBaseUrl(agent.baseUrl) === undefined) return { baseUrl, auth: NONE_AUTH };
+    throw forbidden(
+      `Alias '${alias}' has server-configured credentials that are only sent to the server configured for it, and the supplied baseUrl points elsewhere. No request was made.`,
+      {
+        reason: 'auth_base_url_mismatch',
+        alias,
+        baseUrl: agent.baseUrl,
+        retryable: false,
+        recovery: { hint: AUTH_BASE_URL_MISMATCH_RECOVERY },
+      },
+    );
+  }
 
-  return { baseUrl, auth };
+  if (alias !== DEFAULT_ALIAS && sameBaseUrl(baseUrl, defaultCreds.baseUrl)) {
+    const defaultAuth = deriveAuthFromCredentials(defaultCreds, DEFAULT_ALIAS);
+    if (defaultAuth) return { baseUrl, auth: defaultAuth };
+  }
+  return { baseUrl, auth: NONE_AUTH };
+}
+
+/**
+ * True when both URLs parse and name the same BrAPI base: scheme, userinfo,
+ * host (case-insensitive), port (default port elided), path with trailing
+ * slashes dropped, query, and fragment.
+ */
+export function sameBaseUrl(a: string, b: string | undefined): boolean {
+  if (b === undefined) return false;
+  const left = comparableBaseUrl(a);
+  return left !== undefined && left === comparableBaseUrl(b);
+}
+
+function comparableBaseUrl(value: string): string | undefined {
+  if (!URL.canParse(value)) return;
+  const url = new URL(value);
+  // Read `pathname` once: the getter re-serializes on every access.
+  const { pathname } = url;
+  let end = pathname.length;
+  while (end > 0 && pathname[end - 1] === '/') end--;
+  const path = pathname.slice(0, end);
+  const userinfo = url.username || url.password ? `${url.username}:${url.password}@` : '';
+  return `${url.protocol}//${userinfo}${url.host}${path}${url.search}${url.hash}`;
 }
 
 /**
@@ -204,9 +275,12 @@ const ALIAS_BASE_URL_PATTERN = /^BRAPI_([A-Z0-9_]+)_BASE_URL$/;
  * Inventory of aliases the agent can call without specifying a baseUrl. Merges
  * env-driven entries (operator-set `BRAPI_<X>_BASE_URL`) with the built-in
  * known-server registry. Env-set aliases win when both are present, since the
- * resolver gives env precedence; their `origin` reflects that. Per-alias
- * credentials still derive auth in either case, so a builtin alias with
- * `BRAPI_<ALIAS>_USERNAME` set surfaces with the right `authMode`.
+ * resolver gives env precedence; their `origin` reflects that. `authMode` is
+ * what an argument-free `brapi_connect` for the alias resolves to, so the
+ * pairing rules apply: a builtin with `BRAPI_<ALIAS>_USERNAME` set reports
+ * `sgn`, and default credentials count only on `BRAPI_DEFAULT_BASE_URL`.
+ * Credentials with no URL of their own have nothing to connect to, so they
+ * never surface an alias.
  *
  * Default-alias entries land first; the rest are alphabetical.
  */
@@ -230,7 +304,7 @@ export function discoverConfiguredAliases(env: NodeJS.ProcessEnv = process.env):
     if (!creds.baseUrl) continue;
     result.push({
       alias,
-      authMode: deriveModeForDiscovery(creds, alias),
+      authMode: deriveModeForDiscovery(alias, env),
       baseUrl: creds.baseUrl,
       origin: 'env',
     });
@@ -239,10 +313,9 @@ export function discoverConfiguredAliases(env: NodeJS.ProcessEnv = process.env):
 
   for (const builtin of builtins) {
     if (seen.has(builtin.alias)) continue;
-    const creds = readAliasCredentials(builtin.alias, env);
     result.push({
       alias: builtin.alias,
-      authMode: deriveModeForDiscovery(creds, builtin.alias),
+      authMode: deriveModeForDiscovery(builtin.alias, env),
       baseUrl: builtin.baseUrl,
       origin: 'builtin',
     });
@@ -256,10 +329,9 @@ export function discoverConfiguredAliases(env: NodeJS.ProcessEnv = process.env):
   return result;
 }
 
-function deriveModeForDiscovery(creds: AliasCredentials, alias: string): AuthMode {
+function deriveModeForDiscovery(alias: string, env: NodeJS.ProcessEnv): AuthMode {
   try {
-    const auth = deriveAuthFromCredentials(creds, alias);
-    return auth?.mode ?? 'none';
+    return resolveConnectInput(alias, {}, env).auth.mode;
   } catch {
     // Ambiguous credential family — surface the alias as `none` so the agent
     // still sees it; the connect call will raise the same ValidationError.

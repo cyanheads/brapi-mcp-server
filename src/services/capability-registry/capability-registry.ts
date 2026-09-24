@@ -4,13 +4,17 @@
  * normalizes the shape, and stores the result in tenant-scoped state. Tools
  * consult this before routing requests — if a required endpoint isn't in the
  * server's capability set, the service surfaces a clear `ValidationError`
- * instead of letting the call fail downstream.
+ * instead of letting the call fail downstream. Discovery degrades softly on
+ * missing or broken endpoints, but an HTTP 401/403 on `/serverinfo` or
+ * `/calls` propagates uncached — an auth wall needs credentials, not an
+ * empty profile.
  *
  * @module services/capability-registry/capability-registry
  */
 
+import { createHash } from 'node:crypto';
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
 import {
   type BrapiClient,
@@ -122,6 +126,7 @@ export class CapabilityRegistry {
       );
       serverInfo = serverInfoEnv.result;
     } catch (err) {
+      throwIfAuthRejected(err, baseUrl, '/serverinfo', ctx, options.auth !== undefined);
       const message = err instanceof Error ? err.message : String(err);
       ctx.log.warning('Failed to fetch /serverinfo; falling back to /calls-only profile', {
         baseUrl,
@@ -174,6 +179,7 @@ export class CapabilityRegistry {
       );
       return extractDataArray<CallDescriptor>(env) ?? [];
     } catch (err) {
+      throwIfAuthRejected(err, baseUrl, '/calls', ctx, auth !== undefined);
       const message = err instanceof Error ? err.message : String(err);
       ctx.log.warning('Failed to fetch /calls fallback', {
         baseUrl,
@@ -213,9 +219,49 @@ export class CapabilityRegistry {
     }
   }
 
+  /**
+   * State keys admit only `[A-Za-z0-9._/-]`, so the URL is hashed rather than
+   * character-mapped: a lossy mapping lets distinct servers share a profile.
+   */
   private cacheKey(baseUrl: string): string {
-    return `${STATE_KEY_PREFIX}${sanitizeKey(baseUrl)}`;
+    return `${STATE_KEY_PREFIX}${createHash('sha256').update(baseUrl).digest('hex')}`;
   }
+}
+
+const AUTH_REJECTION_REASONS = new Set(['upstream_unauthorized', 'upstream_forbidden']);
+
+/**
+ * Let an HTTP 401/403 from a capability-discovery endpoint escape the soft
+ * degradation path. An auth wall is not a sparse server: folding it into an
+ * empty profile would cache a "connected, zero services" result and hide the
+ * fix (credentials) from the caller. The calling tool's contract recovery
+ * hint for the reason rides along when it declares one.
+ */
+function throwIfAuthRejected(
+  err: unknown,
+  baseUrl: string,
+  endpoint: string,
+  ctx: Context,
+  authSent: boolean,
+): void {
+  if (!(err instanceof McpError)) return;
+  const data: Record<string, unknown> = err.data ?? {};
+  const reason = data.reason;
+  if (typeof reason !== 'string' || !AUTH_REJECTION_REASONS.has(reason)) return;
+  const verdict =
+    reason === 'upstream_unauthorized'
+      ? authSent
+        ? 'rejected the supplied credentials'
+        : 'requires authentication'
+      : authSent
+        ? 'refused access with the supplied credentials'
+        : 'refused anonymous access';
+  throw new McpError(
+    err.code,
+    `BrAPI server at ${baseUrl} ${verdict} (HTTP ${String(data.status)} on ${endpoint}), so its capabilities cannot be discovered.`,
+    { ...data, baseUrl, endpoint, ...ctx.recoveryFor(reason) },
+    { cause: err },
+  );
 }
 
 function buildRequestOptions(
@@ -308,10 +354,6 @@ function extractDataArray<T>(envelope: BrapiEnvelope<T[] | { data: T[] }>): T[] 
     return result.data;
   }
   return;
-}
-
-function sanitizeKey(value: string): string {
-  return value.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 let _registry: CapabilityRegistry | undefined;

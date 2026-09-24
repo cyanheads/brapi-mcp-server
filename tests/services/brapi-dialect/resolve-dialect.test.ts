@@ -8,6 +8,7 @@
  * @module tests/services/brapi-dialect/resolve-dialect.test
  */
 
+import { createHash } from 'node:crypto';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
@@ -25,7 +26,7 @@ import type { CapabilityProfile } from '@/services/capability-registry/types.js'
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 
 const BASE_URL = 'https://brapi.example.org/brapi/v2';
-const CACHE_KEY = `brapi/capability/${BASE_URL.replace(/[^a-zA-Z0-9]/g, '-')}`;
+const CACHE_KEY = `brapi/capability/${createHash('sha256').update(BASE_URL).digest('hex')}`;
 
 const TEST_CONFIG: ServerConfig = {
   defaultApiKeyHeader: 'Authorization',
