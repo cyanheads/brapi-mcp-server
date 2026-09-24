@@ -239,6 +239,7 @@ src/
     brapi-filters/                        # Static v2.1 filter catalog
     canvas-bridge/                        # Default-canvas resolver (per-session when BRAPI_SESSION_ISOLATION=true; per-tenant otherwise), df_<uuid> table generator, provenance store
     capability-registry/                  # Per-connection /serverinfo cache + call guard
+    iso-country/                          # ISO 3166-1 resolver — free-form country names → alpha-3 for /locations filters
     ontology-resolver/                    # Free-text → ontology-term matcher for variables
     reference-data-cache/                 # Programs / trials / locations / crops lookup cache
     server-registry/                      # Alias → live connection map with auth resolution; session-scoped under BRAPI_SESSION_ISOLATION=true
