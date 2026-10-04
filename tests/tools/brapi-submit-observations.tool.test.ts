@@ -109,6 +109,34 @@ function writeMethods(fetcher: MockFetcher): string[] {
     .filter((m): m is string => m === 'POST' || m === 'PUT');
 }
 
+/** `ctx.state` key of a consent record minted by the confirmation round. */
+const consentKey = (id: string) => `brapi/consent/${id}`;
+
+const ACCEPT = { confirm: { action: 'accept', content: { confirm: true } } };
+
+/** Apply-mode input: one new row and one update row against `study-1`. */
+function applyInput(overrides: { value?: string } = {}) {
+  return brapiSubmitObservations.input.parse({
+    studyDbId: 'study-1',
+    mode: 'apply',
+    observations: [
+      {
+        observationUnitDbId: 'ou-1',
+        observationVariableDbId: 'var-1',
+        value: overrides.value ?? '12.3',
+        observationTimeStamp: '2026-04-01T10:00:00Z',
+      },
+      {
+        observationDbId: 'obs-existing',
+        observationUnitDbId: 'ou-1',
+        observationVariableDbId: 'var-2',
+        value: '14.1',
+        observationTimeStamp: '2026-04-02T10:00:00Z',
+      },
+    ],
+  });
+}
+
 /** Concatenated text of the tool's `content[]` surface. */
 function renderText(result: Parameters<NonNullable<typeof brapiSubmitObservations.format>>[0]) {
   return (brapiSubmitObservations.format?.(result) ?? [])
@@ -206,37 +234,52 @@ describe('brapi_submit_observations tool', () => {
     expect(writeMethods(fetcher)).toEqual([]);
   });
 
-  it('apply with an accepted confirmation POSTs new and PUTs existing rows in parallel', async () => {
+  /**
+   * Round one of the confirmation flow: asks, and returns the `requestState`
+   * plus the consent record round one stored under it.
+   */
+  async function askForConsent(input: ReturnType<typeof applyInput>) {
+    const first = await connect(fetcher);
+    setupReadCalls(fetcher);
+    const asked = await expectInputRequired(() => brapiSubmitObservations.handler(input, first));
+    expect(writeMethods(fetcher)).toEqual([]);
+    const requestState = asked.requestState as string;
+    expect(typeof requestState).toBe('string');
+    const record = await first.state.get<Record<string, unknown>>(consentKey(requestState));
+    expect(record).not.toBeNull();
+    return { requestState, record: record as Record<string, unknown> };
+  }
+
+  /**
+   * Round-two context: each mock context has its own storage, so the record
+   * round one stored is copied in (or omitted, to model an unasked answer).
+   */
+  async function answeringContext(
+    requestState: string | undefined,
+    record: Record<string, unknown> | undefined,
+    inputResponses: Record<string, unknown> = ACCEPT,
+    readOptions: Parameters<typeof setupReadCalls>[1] = {},
+  ) {
     const ctx = await connect(fetcher, {
       ctxOptions: {
         tenantId: 't1',
-        inputResponses: { confirm: { action: 'accept', content: { confirm: true } } },
+        inputResponses,
+        ...(requestState !== undefined ? { requestState } : {}),
       },
     });
-    setupReadCalls(fetcher, { studyName: 'Cassava 2022', studyObservationCount: 412 });
+    if (requestState !== undefined && record) await ctx.state.set(consentKey(requestState), record);
+    setupReadCalls(fetcher, readOptions);
+    return ctx;
+  }
 
-    const result = await brapiSubmitObservations.handler(
-      brapiSubmitObservations.input.parse({
-        studyDbId: 'study-1',
-        mode: 'apply',
-        observations: [
-          {
-            observationUnitDbId: 'ou-1',
-            observationVariableDbId: 'var-1',
-            value: '12.3',
-            observationTimeStamp: '2026-04-01T10:00:00Z',
-          },
-          {
-            observationDbId: 'obs-existing',
-            observationUnitDbId: 'ou-1',
-            observationVariableDbId: 'var-2',
-            value: '14.1',
-            observationTimeStamp: '2026-04-02T10:00:00Z',
-          },
-        ],
-      }),
-      ctx,
-    );
+  it('apply with a confirmed consent record POSTs new and PUTs existing rows in parallel', async () => {
+    const { requestState, record } = await askForConsent(applyInput());
+    const ctx = await answeringContext(requestState, record, ACCEPT, {
+      studyName: 'Cassava 2022',
+      studyObservationCount: 412,
+    });
+
+    const result = await brapiSubmitObservations.handler(applyInput(), ctx);
 
     expect(result.result.mode).toBe('apply');
     if (result.result.mode === 'apply') {
@@ -264,27 +307,83 @@ describe('brapi_submit_observations tool', () => {
     ['a cancelled prompt', { action: 'cancel' }],
     ['an unparseable answer', { action: 'accept', content: { confirm: 'yes' } }],
   ])('apply fails with user_declined on %s and writes nothing', async (_label, response) => {
-    const ctx = await connect(fetcher, {
-      ctxOptions: { tenantId: 't1', inputResponses: { confirm: response } },
-    });
-    setupReadCalls(fetcher);
+    const { requestState, record } = await askForConsent(applyInput());
+    const ctx = await answeringContext(requestState, record, { confirm: response });
 
-    await expect(
-      brapiSubmitObservations.handler(
-        brapiSubmitObservations.input.parse({
-          studyDbId: 'study-1',
-          mode: 'apply',
-          observations: [
-            { observationUnitDbId: 'ou-1', observationVariableDbId: 'var-1', value: '1' },
-          ],
-        }),
-        ctx,
-      ),
-    ).rejects.toMatchObject({
+    await expect(brapiSubmitObservations.handler(applyInput(), ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.Forbidden,
       data: { reason: 'user_declined', studyDbId: 'study-1' },
     });
     expect(writeMethods(fetcher)).toEqual([]);
+  });
+
+  describe('consent gate', () => {
+    it('re-asks when a pre-answered confirm has no redeemable record', async () => {
+      const ctx = await answeringContext(undefined, undefined);
+
+      const asked = await expectInputRequired(() =>
+        brapiSubmitObservations.handler(applyInput(), ctx),
+      );
+
+      expect(asked.inputRequests?.confirm).toMatchObject({ method: 'elicitation/create' });
+      expect(writeMethods(fetcher)).toEqual([]);
+    });
+
+    it('re-asks when the requestState names no stored record', async () => {
+      const ctx = await answeringContext('00000000-0000-4000-8000-000000000000', undefined);
+
+      await expectInputRequired(() => brapiSubmitObservations.handler(applyInput(), ctx));
+      expect(writeMethods(fetcher)).toEqual([]);
+    });
+
+    it('re-asks when the rows differ from the ones the user confirmed', async () => {
+      const { requestState, record } = await askForConsent(applyInput());
+      const ctx = await answeringContext(requestState, record);
+
+      await expectInputRequired(() =>
+        brapiSubmitObservations.handler(applyInput({ value: '99.9' }), ctx),
+      );
+      expect(writeMethods(fetcher)).toEqual([]);
+    });
+
+    it.each([
+      ['target', { target: 'https://other.example/brapi/v2#study-1' }],
+      ['contentHash', { contentHash: 'not-the-confirmed-rows' }],
+      ['operation', { operation: 'some_other_tool' }],
+      ['clientId', { clientId: 'another-client' }],
+      ['subject', { subject: 'another-user' }],
+    ])('re-asks when the record names a different %s', async (_field, mutation) => {
+      const { requestState, record } = await askForConsent(applyInput());
+      const ctx = await answeringContext(requestState, { ...record, ...mutation });
+
+      await expectInputRequired(() => brapiSubmitObservations.handler(applyInput(), ctx));
+      expect(writeMethods(fetcher)).toEqual([]);
+    });
+
+    it('spends the record: replaying the same requestState asks again', async () => {
+      const { requestState, record } = await askForConsent(applyInput());
+      const ctx = await answeringContext(requestState, record);
+
+      await brapiSubmitObservations.handler(applyInput(), ctx);
+      expect(writeMethods(fetcher).sort()).toEqual(['POST', 'PUT']);
+      expect(await ctx.state.get(consentKey(requestState))).toBeNull();
+
+      fetcher.mockClear();
+      await expectInputRequired(() => brapiSubmitObservations.handler(applyInput(), ctx));
+      expect(writeMethods(fetcher)).toEqual([]);
+    });
+
+    it('preview mode ignores a pre-answered confirm and writes nothing', async () => {
+      const ctx = await answeringContext(undefined, undefined);
+
+      const result = await brapiSubmitObservations.handler(
+        brapiSubmitObservations.input.parse({ ...applyInput(), mode: 'preview' }),
+        ctx,
+      );
+
+      expect(result.result.mode).toBe('preview');
+      expect(writeMethods(fetcher)).toEqual([]);
+    });
   });
 
   it('apply with force=true writes without a confirmation round', async () => {

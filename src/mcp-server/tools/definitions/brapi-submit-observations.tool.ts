@@ -8,9 +8,16 @@
  * with a cheap `pageSize=1` count. Additive write — no observation is destroyed
  * by this tool.
  *
+ * The confirmation is a consent gate: asking stores a `ctx.state` record of
+ * what the prompt confirmed (operation, caller, target, hash of the rows) under
+ * a random id sent as `requestState`, and a write proceeds only on the round
+ * that redeems a matching record.
+ *
  * @module mcp-server/tools/definitions/brapi-submit-observations.tool
  */
 
+import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { type Context, inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
@@ -253,6 +260,21 @@ const ConfirmSchema = z.object({
     .describe('Set to true to commit the writes; false to abort with no side effects.'),
 });
 
+const OPERATION = 'brapi_submit_observations';
+const CONSENT_KEY_PREFIX = 'brapi/consent/';
+const CONSENT_TTL_SECONDS = 600;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+const ConsentRecordSchema = z.object({
+  operation: z.string().describe('Tool the record was minted for.'),
+  clientId: z.string().describe('Authenticated client that was asked; empty without auth.'),
+  subject: z.string().describe('Authenticated subject that was asked; empty without auth.'),
+  target: z.string().describe('BrAPI base URL and studyDbId the write targets.'),
+  contentHash: z.string().describe('SHA-256 of the observation rows the user confirmed.'),
+});
+
+type ConsentRecord = z.infer<typeof ConsentRecordSchema>;
+
 export const brapiSubmitObservations = tool('brapi_submit_observations', {
   description:
     'Submit observations for a study. Default mode `preview` validates rows against the study variables and returns a routing breakdown without writing. Mode `apply` asks the caller to confirm the write, then creates new rows or updates existing ones based on observationDbId presence. Additive only — no observation is destroyed.',
@@ -286,6 +308,7 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
   auth: ['brapi:write:observations'],
 
   async handler(input, ctx) {
+    const consent = await redeemConsent(ctx);
     const capabilities = getCapabilityRegistry();
     const client = getBrapiClient();
     const config = getServerConfig();
@@ -305,7 +328,7 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
       throw ctx.fail(
         'observations_unsupported',
         `BrAPI server at ${connection.baseUrl} does not advertise '/observations' in /calls. Cannot submit observations.`,
-        { baseUrl: connection.baseUrl, ...ctx.recoveryFor('observations_unsupported') },
+        { baseUrl: connection.baseUrl },
       );
     }
 
@@ -314,11 +337,7 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
       throw ctx.fail(
         'study_not_found',
         `Study '${input.studyDbId}' not found on ${connection.baseUrl}.`,
-        {
-          studyDbId: input.studyDbId,
-          baseUrl: connection.baseUrl,
-          ...ctx.recoveryFor('study_not_found'),
-        },
+        { studyDbId: input.studyDbId, baseUrl: connection.baseUrl },
       );
     }
     const studyName = studyLookup.studyName;
@@ -398,20 +417,31 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
       throw ctx.fail(
         'post_unsupported',
         `Server does not advertise POST on /observations. ${postCount} new row(s) cannot be created.`,
-        { baseUrl: connection.baseUrl, postCount, ...ctx.recoveryFor('post_unsupported') },
+        { baseUrl: connection.baseUrl, postCount },
       );
     }
     if (putCount > 0 && !supportsPut) {
       throw ctx.fail(
         'put_unsupported',
         `Server does not advertise PUT on /observations. ${putCount} update row(s) cannot be applied.`,
-        { baseUrl: connection.baseUrl, putCount, ...ctx.recoveryFor('put_unsupported') },
+        { baseUrl: connection.baseUrl, putCount },
       );
     }
 
     if (!input.force) {
+      const expected: ConsentRecord = {
+        operation: OPERATION,
+        clientId: ctx.auth?.clientId ?? '',
+        subject: ctx.auth?.sub ?? '',
+        target: `${connection.baseUrl}#${input.studyDbId}`,
+        contentHash: hashRows(input.observations),
+      };
       const answered = ctx.inputs.view('confirm');
-      if (answered.kind === 'missing') {
+      // An answer counts only on the round that redeemed a record matching this
+      // exact write; anything else (no record, a mismatch, no answer) asks afresh.
+      if (!isDeepStrictEqual(consent, expected) || answered.kind === 'missing') {
+        const id = randomUUID();
+        await ctx.state.set(`${CONSENT_KEY_PREFIX}${id}`, expected, { ttl: CONSENT_TTL_SECONDS });
         return ctx.requestInput({
           inputRequests: {
             confirm: inputRequired.elicit({
@@ -422,6 +452,7 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
               requestedSchema: ConfirmSchema,
             }),
           },
+          requestState: id,
         });
       }
       // Declined, cancelled, another response kind, or a payload the schema
@@ -431,7 +462,6 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
         throw ctx.fail('user_declined', 'User declined to apply observation writes.', {
           studyDbId: input.studyDbId,
           action: answered.kind === 'elicit' ? answered.action : answered.kind,
-          ...ctx.recoveryFor('user_declined'),
         });
       }
     }
@@ -576,6 +606,25 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/**
+ * Reads and deletes the consent record named by this round's `requestState`,
+ * so a record confirms at most one call. `ctx.state` has no atomic take, so
+ * concurrent retries carrying the same id can each read it before the delete
+ * lands — the guarantee covers a sequential replay only.
+ */
+async function redeemConsent(ctx: Context): Promise<ConsentRecord | null> {
+  const id = ctx.inputs.state<unknown>();
+  if (typeof id !== 'string' || !UUID_PATTERN.test(id)) return null;
+  const key = `${CONSENT_KEY_PREFIX}${id}`;
+  const record = await ctx.state.get(key, ConsentRecordSchema);
+  if (record) await ctx.state.delete(key);
+  return record;
+}
+
+function hashRows(rows: z.infer<typeof ObservationRowSchema>[]): string {
+  return createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+}
 
 function isStructural(warning: string): boolean {
   return warning.endsWith('is required.');
