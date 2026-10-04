@@ -12,12 +12,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/brapi-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.8.0",
-      "packageArguments": [
-        { "type": "positional", "value": "run" },
-        { "type": "positional", "value": "start:stdio" }
-      ],
       "environmentVariables": [
         {
           "name": "BRAPI_DEFAULT_BASE_URL",
@@ -55,13 +51,15 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/brapi-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.8.0",
-      "packageArguments": [
-        { "type": "positional", "value": "run" },
-        { "type": "positional", "value": "start:http" }
-      ],
       "environmentVariables": [
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
+        },
         {
           "name": "BRAPI_DEFAULT_BASE_URL",
           "description": "Default BrAPI v2 base URL. Optional — connections can be opened at runtime via the brapi_connect tool instead.",
