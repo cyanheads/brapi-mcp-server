@@ -2,9 +2,10 @@
 
 **Server:** brapi-mcp-server
 **Version:** 0.8.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.6`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.11`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.0.0 (protocol revisions 2026-07-28 and 2025-*)
+**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0 (protocol revisions 2026-07-28 and 2025-*)
+**Zod:** ^4.6.5
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -36,6 +37,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
 - **Need input the caller didn't supply?** `return ctx.requestInput(...)` and read `ctx.inputs` when the handler is re-entered. Never `await` for user input mid-handler.
 - **Secrets in env vars only** — never hardcoded.
+- **Cut noise.** Add only what earns its place: no speculative generality, no guards for states the framework already prevents (Zod-validated params, classified errors), no abstraction until a third caller proves it, no option nothing sets.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
 ---
@@ -175,10 +177,10 @@ Handlers receive a unified `ctx` object. Currently used surface:
 | `ctx.signal` | `AbortSignal` — threaded into every BrAPI HTTP call so client-side cancellation aborts the upstream request. |
 | `ctx.requestId` | Unique request ID — auto-attached to every `ctx.log` entry. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio / HTTP+`auth=none` — outer scope on all `ctx.state` reads/writes. |
-| `ctx.requestInput` / `ctx.inputs` | Multi-round-trip input. `brapi_submit_observations` gates apply-mode writes on a `confirm` elicitation: it reads `ctx.inputs.view('confirm')`, returns `ctx.requestInput({ inputRequests: … })` when the answer is missing, and treats a declined, cancelled, or unparseable answer as terminal (`user_declined`). `force: true` skips the round. |
+| `ctx.requestInput` / `ctx.inputs` | Multi-round-trip input. `brapi_submit_observations` gates apply-mode writes on a `confirm` elicitation behind a consent record (`api-context` § Consent gates): asking stores `{ operation, clientId, subject, target, contentHash }` in `ctx.state` under `brapi/consent/<uuid>` (600 s TTL) and returns the id as `requestState`; each call first redeems (reads and deletes) the record its `requestState` names. An answer counts only when that record matches this caller, base URL + `studyDbId`, and the SHA-256 of the rows — anything else asks again. On the matching round a declined, cancelled, or unparseable answer is terminal (`user_declined`). `force: true` skips the round. Redemption is single-use against a sequential replay only (no atomic `ctx.state.take` yet), and a multi-instance HTTP deployment needs shared storage (`filesystem`, `supabase`, `cloudflare-d1`) for the record. |
 | `ctx.enrich` | Success-path agent context. `brapi_dataframe_query` and `brapi_build_phenotype_matrix` disclose capped results with `ctx.enrich.truncated({ shown, cap, guidance })`. |
 
-`ctx.fail(reason, …)` is the typed thrower keyed off declared `errors[]` contracts — used by 15 tools and 1 resource today. `ctx.recoveryFor(reason)` resolves the matching contract entry's recovery hint into `data.recovery.hint` so it surfaces on the wire. `ctx.content` is unused — no tool emits media blocks outside `brapi_get_image`, which returns image bytes through its own output schema.
+`ctx.fail(reason, …)` is the typed thrower keyed off declared `errors[]` contracts — used by 15 tools and 1 resource today. The framework fills the matching contract entry's recovery hint into `data.recovery.hint` on the wire, for service throws carrying `data.reason` too. `ctx.content` is unused — no tool emits media blocks outside `brapi_get_image`, which returns image bytes through its own output schema.
 
 ---
 
@@ -186,7 +188,7 @@ Handlers receive a unified `ctx` object. Currently used surface:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. The `recovery` field is required descriptive metadata (≥ 5 words, lint-validated); to surface it on the wire, spread `...ctx.recoveryFor('reason')` into `data` or pass an explicit `{ recovery: { hint: '...' } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring. Live across the BrAPI surface today: `brapi_build_phenotype_matrix`, `brapi_connect`, `brapi_dataframe_describe`, `brapi_dataframe_export`, `brapi_dataframe_query`, `brapi_describe_filters`, `brapi_export_genotype_matrix`, `brapi_find_genotype_calls`, `brapi_germplasm_performance`, `brapi_get_germplasm`, `brapi_get_image`, `brapi_get_study`, `brapi_raw_get`, `brapi_raw_search`, `brapi_submit_observations`, plus the `brapi://variable/{observationVariableDbId}` resource.
+**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Every error envelope also carries `data.requestId`, the id the server's log records for that call carry, and `content[]` closes with `(reason … · request <id>)`. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata. A direct `definition.handler(...)` call in a test sees the throw site's error with no fill; assert hints through `runToolContract` (tools) or the resource factory (`tests/resources/_resource-factory.ts`). Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring. Live across the BrAPI surface today: `brapi_build_phenotype_matrix`, `brapi_connect`, `brapi_dataframe_describe`, `brapi_dataframe_export`, `brapi_dataframe_query`, `brapi_describe_filters`, `brapi_export_genotype_matrix`, `brapi_find_genotype_calls`, `brapi_germplasm_performance`, `brapi_get_germplasm`, `brapi_get_image`, `brapi_get_study`, `brapi_raw_get`, `brapi_raw_search`, `brapi_submit_observations`, plus the `brapi://variable/{observationVariableDbId}` resource.
 
 ```ts
 errors: [
@@ -196,8 +198,7 @@ errors: [
 ],
 async handler(input, ctx) {
   const conn = registry.peek(input.alias);
-  if (!conn) throw ctx.fail('unknown_alias', `No connection for ${input.alias}`,
-    { ...ctx.recoveryFor('unknown_alias') });
+  if (!conn) throw ctx.fail('unknown_alias', `No connection for ${input.alias}`);
   // ...
 }
 ```
@@ -308,7 +309,7 @@ src/
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. Keep development skills out of root `skills/`: plugin hosts load that directory for installing agents.
+Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
 
 **Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, Codex: `.codex/skills/`, shared: `.agents/skills/`, others: equivalent). This makes skills available as context without needing to reference `framework-skills/` paths manually. After framework updates, run the `maintenance` skill — it re-syncs the agent directory automatically (Phase B).
 
@@ -329,22 +330,21 @@ Available skills:
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
 | `code-simplifier` | Post-session cleanup against `git diff` — modernize syntax, consolidate duplication, align with the codebase |
 | `techniques` | Catalog of response/data-shaping techniques — overflow handling, payload shaping, retrieval patterns |
-| `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
-| `git-wrapup` | Land working-tree changes as a versioned commit stack; opens a release PR when the project declares release PR mode. |
-| `release-pr-review` | Review an open release PR, land fixups, and keep its body current. Release PR mode only. |
-| `release-and-publish` | Tag + push + npm + MCP Registry + GH Release + Docker. Picks up from `git-wrapup`. |
+| `git-wrapup` | Land working-tree changes as a commit stack — version bump, changelog, verify, commit by concern, release commit on top. No tag, no push to main; opens the release PR when the project declares release PR mode |
+| `release-pr-review` | Review pass on an open release PR — simplifier + correctness review, fixes as ordinary commits on top of the stack, PR body kept in sync. Release PR mode only |
+| `release-and-publish` | Fast-forward merge (release PR mode) + tag + push + npm + MCP Registry + GH Release + Docker. Picks up from `git-wrapup` |
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
 | `orchestrations` | Chain task skills into a gated multi-phase pipeline — build-out, QA-fix, update-ship — when you can spawn sub-agents |
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
 | `report-issue-local` | File a bug or feature request against this server's own repo via `gh` CLI |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
-| `api-linter` | Definition lint rule reference (`format-parity`, `schema-*`, `name-*`, `server-json-*`, …) |
+| `api-linter` | Definition linter rule catalog — invoked by `bun run lint:mcp` and `devcheck` |
 | `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
 | `api-config` | AppConfig, parseConfig, env vars |
 | `api-context` | Context interface, RequestContext, logger, state, multi-round-trip input |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
-| `api-mirror` | MirrorService: persistent SQLite-backed local mirror of a bulk upstream dataset with FTS5 — Tier 3 opt-in |
+| `api-mirror` | MirrorService: persistent self-refreshing local mirror (embedded SQLite + FTS5) of a bulk upstream dataset — Tier 3 opt-in |
 | `api-services` | LLM, Speech, Graph services |
 | `api-telemetry` | OTel catalog: spans, metrics, completion logs, env config, cardinality rules |
 | `api-testing` | createMockContext, test patterns |
@@ -367,20 +367,23 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run rebuild` | Clean + build |
 | `bun run clean` | Remove build artifacts |
 | `bun run devcheck` | Lint + format + typecheck + security + changelog sync |
-| `bun run audit:fix` | Upgrade vulnerable packages within existing ranges with `bun audit fix`; try before `bun update <name>` and `bun dedupe`. |
-| `bun run audit:refresh` | Delete `bun.lock`, reinstall, re-audit. Last resort after in-place fixes; re-resolves ranged dependencies, including the framework. |
+| `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
+| `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run list-skills` | Print the skill index for this project (name, version, description) |
 | `bun run tree` | Generate `docs/tree.md` |
-| `bun run format` | Auto-fix formatting via Biome |
-| `bun run lint:mcp` | Validate MCP tool / resource / prompt definitions against the spec |
-| `bun run lint:packaging` | Verify env var alignment between `manifest.json` and `server.json` |
+| `bun run format` | Auto-fix formatting (safe fixes only) |
+| `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
+| `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
+| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, Dockerfile build platform (run by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
-| `bun run test` | Vitest suite |
+| `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
 | `bun run start` | Production mode — defers transport selection to `MCP_TRANSPORT_TYPE` (stdio default) |
 | `bun run start:stdio` | Production mode (stdio) — requires prior `bun run build` |
 | `bun run start:http` | Production mode (HTTP) — requires prior `bun run build` |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/<minor>.x/` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
+
+**CI is one file.** `.github/workflows/codeql.yml` (scaffolded) is the only GitHub Actions workflow: CodeQL is GitHub-owned end to end, and the file runs only while the repo's CodeQL *default setup* is turned off. Verification — `devcheck`, tests, the release gates — runs locally; don't add a workflow that re-runs it.
 
 ---
 
@@ -454,7 +457,7 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] Tests include at least one sparse upstream payload (fields omitted) alongside the happy path
 - [ ] Registered in the `tools` array of `createApp()` in `src/index.ts`
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
-- [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name; `interface.shortDescription` from `package.json` description
-- [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; user-supplied variables are listed in `env_vars`, never set to empty strings in `env`
-- [ ] `.claude-plugin/plugin.json` populated — metadata from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name; user-supplied variables declared under `userConfig` and referenced as `${user_config.<option>}`
+- [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
+- [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
+- [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`
 - [ ] `bun run devcheck` passes
