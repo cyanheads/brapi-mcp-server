@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-09-24 05:53:14
+Generated on: 2026-10-04 05:56:01
 
 ```text
 brapi-mcp-server/
@@ -132,9 +132,11 @@ brapi-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
@@ -246,6 +248,7 @@ brapi-mcp-server/
 │   │   ├── brapi-eda-study.prompt.test.ts
 │   │   └── brapi-meta-analysis.prompt.test.ts
 │   ├── resources/
+│   │   ├── _resource-factory.ts
 │   │   ├── brapi-calls.resource.test.ts
 │   │   ├── brapi-filters.resource.test.ts
 │   │   ├── brapi-germplasm.resource.test.ts

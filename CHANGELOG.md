@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.1](changelog/0.8.x/0.8.1.md) — 2026-10-04 · 🛡️ Security
+
+Apply-mode brapi_submit_observations writes now proceed only on the round that redeems a single-use consent record of the prompt, so a pre-supplied or replayed confirmation asks again. Adopts @cyanheads/mcp-ts-core ^0.13.11.
+
 ## [0.8.0](changelog/0.8.x/0.8.0.md) — 2026-09-23 · ⚠️ Breaking · 🛡️ Security
 
 Server-configured credentials are only sent to the base URL configured with them, and caller-supplied credentials are refused on session-less shared HTTP. The T3 built-ins are gone, auth walls fail brapi_connect with typed errors, and the orientation envelope names the finders the server supports.
