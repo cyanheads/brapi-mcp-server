@@ -124,11 +124,7 @@ export const brapiRawSearch = tool('brapi_raw_search', {
       throw ctx.fail(
         'search_endpoint_disabled',
         `Dialect '${dialect.id}' marks POST /search/${input.noun} as known-dead on this server (advertised in /calls but unresponsive in practice).${nudge ? ` ${nudge}` : ''}`,
-        {
-          dialectId: dialect.id,
-          noun: input.noun,
-          ...ctx.recoveryFor('search_endpoint_disabled'),
-        },
+        { dialectId: dialect.id, noun: input.noun },
       );
     }
 

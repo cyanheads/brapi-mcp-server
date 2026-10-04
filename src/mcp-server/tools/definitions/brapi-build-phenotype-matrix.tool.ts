@@ -218,7 +218,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
         throw ctx.fail(
           'no_observation_path',
           `Neither /observations nor /observationunits returned a usable path for study '${outcome.studyDbId}'. Check brapi_server_info for the capability list.`,
-          { ...ctx.recoveryFor('no_observation_path'), studyDbId: outcome.studyDbId },
+          { studyDbId: outcome.studyDbId },
         );
       }
       allObs.push(...outcome.observations);

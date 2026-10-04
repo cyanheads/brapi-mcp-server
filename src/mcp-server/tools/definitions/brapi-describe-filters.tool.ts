@@ -62,11 +62,7 @@ export const brapiDescribeFilters = tool('brapi_describe_filters', {
       throw ctx.fail(
         'unknown_endpoint',
         `No filter catalog for endpoint '${input.endpoint}'. Available: ${ENDPOINT_VALUES.join(', ')}.`,
-        {
-          endpoint: input.endpoint,
-          availableEndpoints: ENDPOINT_VALUES,
-          ...ctx.recoveryFor('unknown_endpoint'),
-        },
+        { endpoint: input.endpoint, availableEndpoints: ENDPOINT_VALUES },
       );
     }
     return {

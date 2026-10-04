@@ -222,11 +222,7 @@ export const brapiGetStudy = tool('brapi_get_study', {
         throw ctx.fail(
           'study_not_found',
           `Study '${input.studyDbId}' not found on ${connection.baseUrl}.`,
-          {
-            studyDbId: input.studyDbId,
-            baseUrl: connection.baseUrl,
-            ...ctx.recoveryFor('study_not_found'),
-          },
+          { studyDbId: input.studyDbId, baseUrl: connection.baseUrl },
         );
       }
       throw err;
@@ -236,11 +232,7 @@ export const brapiGetStudy = tool('brapi_get_study', {
       throw ctx.fail(
         'study_not_found',
         `Study '${input.studyDbId}' not found on ${connection.baseUrl}.`,
-        {
-          studyDbId: input.studyDbId,
-          baseUrl: connection.baseUrl,
-          ...ctx.recoveryFor('study_not_found'),
-        },
+        { studyDbId: input.studyDbId, baseUrl: connection.baseUrl },
       );
     }
 

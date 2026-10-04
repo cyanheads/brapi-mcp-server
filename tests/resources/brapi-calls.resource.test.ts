@@ -19,6 +19,7 @@ import {
   pathnameOf,
   resetTestServices,
 } from '../tools/_tool-test-helpers.js';
+import { readResourceError } from './_resource-factory.js';
 
 async function connect(fetcher: MockFetcher) {
   fetcher.mockImplementation(async (url: string) => {
@@ -69,9 +70,16 @@ describe('brapi://calls resource', () => {
     expect(result.supported.germplasm).toBeDefined();
   });
 
-  it('throws NotFound with unknown_alias recovery hint when no connection is registered', async () => {
+  it('throws NotFound with unknown_alias when no connection is registered', async () => {
     const ctx = createMockContext({ tenantId: 't1', errors: brapiCallsResource.errors });
     await expect(brapiCallsResource.handler({}, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'unknown_alias' },
+    });
+  });
+
+  it('fills the unknown_alias recovery hint on the wire', async () => {
+    await expect(readResourceError(brapiCallsResource, 'brapi://calls')).resolves.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: {
         reason: 'unknown_alias',

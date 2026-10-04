@@ -138,7 +138,6 @@ export const brapiConnect = tool('brapi_connect', {
       throw ctx.fail(
         'auth_session_required',
         'Caller-supplied credentials are refused: this HTTP deployment has no per-user auth and the request carries no MCP session, so the connection would be shared with every other session-less caller.',
-        { ...ctx.recoveryFor('auth_session_required') },
       );
     }
 

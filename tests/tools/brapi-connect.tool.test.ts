@@ -11,7 +11,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { resetConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
@@ -481,7 +481,7 @@ describe('brapi_connect against an auth-walled server (real socket)', () => {
     return (await ctx.state.list('brapi/capability/')).items.map((i) => i.key);
   }
 
-  it('fails with upstream_unauthorized and a credentials hint on a 401 /serverinfo, caching nothing', async () => {
+  it('fails with upstream_unauthorized on a 401 /serverinfo, caching nothing', async () => {
     routes['/serverinfo'] = walled(401, ok({ calls: [{ service: 'studies', methods: ['GET'] }] }));
     routes['/commoncropnames'] = ok({ data: ['Wheat'] });
     const ctx = createMockContext({ tenantId: 't1', errors: brapiConnect.errors });
@@ -491,11 +491,7 @@ describe('brapi_connect against an auth-walled server (real socket)', () => {
       .catch((e: unknown) => e);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.Unauthorized,
-      data: {
-        reason: 'upstream_unauthorized',
-        status: 401,
-        recovery: { hint: expect.stringMatching(/credentials/i) },
-      },
+      data: { reason: 'upstream_unauthorized', status: 401 },
     });
     expect(hits).toEqual(['/serverinfo']);
     expect(await cachedProfileKeys(ctx)).toEqual([]);
@@ -522,13 +518,34 @@ describe('brapi_connect against an auth-walled server (real socket)', () => {
       brapiConnect.handler(brapiConnect.input.parse({ baseUrl }), ctx),
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.Forbidden,
-      data: {
-        reason: 'upstream_forbidden',
-        recovery: { hint: expect.stringMatching(/credentials/i) },
-      },
+      data: { reason: 'upstream_forbidden' },
     });
     expect(await cachedProfileKeys(ctx)).toEqual([]);
   });
+
+  it.each([
+    [401, 'upstream_unauthorized', JsonRpcErrorCode.Unauthorized],
+    [403, 'upstream_forbidden', JsonRpcErrorCode.Forbidden],
+  ] as const)(
+    'fills a credentials recovery hint on the wire for a %i /serverinfo',
+    async (code, reason, rpcCode) => {
+      routes['/serverinfo'] = status(code);
+
+      const result = await runToolContract(
+        brapiConnect,
+        { baseUrl },
+        { context: { tenantId: 't1' } },
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: rpcCode,
+          data: { reason, recovery: { hint: expect.stringMatching(/credentials/i) } },
+        },
+      });
+    },
+  );
 
   it('fails the same way when only the /calls fallback answers 401', async () => {
     routes['/serverinfo'] = ok({ serverName: 'Walled BrAPI' });
@@ -847,15 +864,31 @@ describe('brapi_connect session gate for caller-supplied credentials', () => {
     const error = await brapiConnect.handler(bearerInput(), ctx).catch((e: unknown) => e);
     expect(error).toMatchObject({
       code: JsonRpcErrorCode.Forbidden,
-      data: {
-        reason: 'auth_session_required',
-        retryable: false,
-        recovery: { hint: expect.stringMatching(/session/i) },
-      },
+      data: { reason: 'auth_session_required', retryable: false },
     });
     expect(fetcher).not.toHaveBeenCalled();
     // Nothing registered, so no other session-less caller can ride the token.
     expect(await ctx.state.get('brapi/conn/mine')).toBeNull();
+  });
+
+  it('fills the session recovery hint on the wire', async () => {
+    const result = await runToolContract(
+      brapiConnect,
+      { baseUrl: BASE_URL, alias: 'mine', auth: { mode: 'bearer', token: 'caller-tok' } },
+      { context: { tenantId: 'default' } },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.Forbidden,
+        data: {
+          reason: 'auth_session_required',
+          recovery: { hint: expect.stringMatching(/session/i) },
+        },
+      },
+    });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('refuses SGN credentials before the /token exchange', async () => {

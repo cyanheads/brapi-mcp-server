@@ -502,25 +502,15 @@ describe('CapabilityRegistry auth rejections over a real socket', () => {
     expect(hits.length).toBe(before);
   });
 
-  it('carries the calling tool contract recovery hint for the auth reasons', async () => {
+  it('keeps the auth reason and leaves the recovery hint to the calling tool contract', async () => {
     routes['/serverinfo'] = status(401);
-    const ctx = createMockContext({
-      tenantId: 'test-tenant',
-      errors: [
-        {
-          reason: 'upstream_unauthorized',
-          code: JsonRpcErrorCode.Unauthorized,
-          when: 'test contract entry',
-          recovery: 'Supply credentials for this test server.',
-        },
-      ] as const,
-    });
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
 
-    await expect(registry.profile(origin, ctx)).rejects.toMatchObject({
-      data: {
-        reason: 'upstream_unauthorized',
-        recovery: { hint: 'Supply credentials for this test server.' },
-      },
+    const error = await registry.profile(origin, ctx).catch((e: unknown) => e);
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.Unauthorized,
+      data: { reason: 'upstream_unauthorized' },
     });
+    expect((error as { data?: Record<string, unknown> }).data?.recovery).toBeUndefined();
   });
 });

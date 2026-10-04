@@ -192,7 +192,6 @@ export class ServerRegistry {
         tokenUrl,
         payloadKeys: Object.keys(payload),
         reason: 'auth_no_access_token',
-        ...ctx.recoveryFor('auth_no_access_token'),
       });
     }
     const resolved: ResolvedAuth = {
@@ -229,7 +228,6 @@ export class ServerRegistry {
         tokenUrl,
         payloadKeys: Object.keys(payload),
         reason: 'auth_no_access_token',
-        ...ctx.recoveryFor('auth_no_access_token'),
       });
     }
     const tokenType =
@@ -288,7 +286,6 @@ const defaultTokenFetcher: TokenFetcher = async (url, body, ctx, options) => {
       {
         tokenUrl: url,
         reason: 'auth_token_exchange_failed',
-        ...ctx.recoveryFor('auth_token_exchange_failed'),
       },
       { cause: err },
     );

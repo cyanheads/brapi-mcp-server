@@ -82,9 +82,7 @@ export const brapiDataframeDescribe = tool('brapi_dataframe_describe', {
       ctx.tenantId === 'default' &&
       config.mcpTransportType === 'http'
     ) {
-      throw ctx.fail('list_all_disabled_on_shared_http', undefined, {
-        ...ctx.recoveryFor('list_all_disabled_on_shared_http'),
-      });
+      throw ctx.fail('list_all_disabled_on_shared_http');
     }
     const bridge = getCanvasBridge();
     const describeOpts: { tableName?: string } = {};

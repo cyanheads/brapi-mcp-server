@@ -355,11 +355,7 @@ function germplasmNotFound(
   return ctx.fail(
     'germplasm_not_found',
     `Germplasm '${germplasmDbId}' not found on ${connection.baseUrl}.`,
-    {
-      germplasmDbId,
-      baseUrl: connection.baseUrl,
-      ...ctx.recoveryFor('germplasm_not_found'),
-    },
+    { germplasmDbId, baseUrl: connection.baseUrl },
   );
 }
 

@@ -36,11 +36,11 @@ export function isUpstreamNotFound(err: unknown): boolean {
 
 /**
  * Resolve a registered BrAPI connection by alias, throwing the calling tool's
- * `'unknown_alias'` contract on miss so the wire-level error carries
+ * `'unknown_alias'` contract on miss so the framework fills
  * `data.recovery.hint` from the tool's `errors[]` entry. Use this instead of
  * `registry.get(...)` whenever the calling tool/resource declares the
  * `unknown_alias` reason — `registry.get` throws a bare `notFound()` factory
- * that the contract recovery resolver can't reach.
+ * with no `data.reason` for the fill to match.
  *
  * Every caller MUST declare an `errors[]` entry whose `reason` is
  * `'unknown_alias'`; the type signature enforces this at compile time.
@@ -56,7 +56,7 @@ export async function requireRegisteredConnection(
     throw ctx.fail(
       'unknown_alias',
       `No BrAPI connection registered under alias '${resolved}'. Call brapi_connect first.`,
-      { alias: resolved, ...ctx.recoveryFor('unknown_alias') },
+      { alias: resolved },
     );
   }
   return connection;
@@ -124,9 +124,9 @@ export function mergeFilters(
  * typed `all_filters_dropped` error when the dialect dropped every supplied
  * filter — the call would otherwise silently widen to the unfiltered baseline.
  * Tools that call this MUST declare `'all_filters_dropped'` in their `errors[]`
- * contract; the helper looks up the recovery hint via `ctx.recoveryFor` and
- * spreads it into `data` so the wire-level shape stays consistent across the
- * find_* surface. The bare-baseline call (no filters supplied) is exempt:
+ * contract; the framework fills that entry's recovery hint on the wire, so the
+ * shape stays consistent across the find_* surface. The bare-baseline call (no
+ * filters supplied) is exempt:
  * `dropped` is empty so the all-dropped predicate is false.
  *
  * Returns the full {@link DialectAdaptation} so callers can read
@@ -147,11 +147,7 @@ export function applyDialectFiltersOrFail(
     throw ctx.fail(
       'all_filters_dropped',
       `Every filter you supplied was dropped by the ${dialect.id} dialect (${adapted.dropped.join(', ')}); the call would silently widen to the unfiltered baseline.`,
-      {
-        ...ctx.recoveryFor('all_filters_dropped'),
-        dropped: adapted.dropped,
-        dialect: dialect.id,
-      },
+      { dropped: adapted.dropped, dialect: dialect.id },
     );
   }
   return adapted;

@@ -8,7 +8,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
@@ -92,16 +92,21 @@ describe('brapi_server_info tool', () => {
     expect(result.baseUrl).toBe(BASE_URL);
   });
 
-  it('throws NotFound with unknown_alias recovery on the wire when alias is unregistered', async () => {
-    const ctx = createMockContext({ tenantId: 't1', errors: brapiServerInfo.errors });
-    await expect(
-      brapiServerInfo.handler(brapiServerInfo.input.parse({ alias: 'missing' }), ctx),
-    ).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: {
-        reason: 'unknown_alias',
-        alias: 'missing',
-        recovery: { hint: expect.stringContaining('brapi_connect') },
+  it('fails NotFound with unknown_alias recovery on the wire when alias is unregistered', async () => {
+    const result = await runToolContract(
+      brapiServerInfo,
+      { alias: 'missing' },
+      { context: { tenantId: 't1' } },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'unknown_alias',
+          alias: 'missing',
+          recovery: { hint: expect.stringContaining('brapi_connect') },
+        },
       },
     });
   });

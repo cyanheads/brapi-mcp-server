@@ -133,7 +133,7 @@ export const brapiGetImage = tool('brapi_get_image', {
       throw ctx.fail(
         'images_unsupported',
         `BrAPI server at ${connection.baseUrl} does not advertise '/images'. Cannot fetch image bytes.`,
-        { baseUrl: connection.baseUrl, ...ctx.recoveryFor('images_unsupported') },
+        { baseUrl: connection.baseUrl },
       );
     }
     // /imagecontent must declare GET — many servers expose it for PUT-only upload.

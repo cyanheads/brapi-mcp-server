@@ -8,8 +8,8 @@
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { resetConfig } from '@cyanheads/mcp-ts-core/config';
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { brapiDataframeDescribe } from '@/mcp-server/tools/definitions/brapi-dataframe-describe.tool.js';
 import { initCanvasBridge, resetCanvasBridge } from '@/services/canvas-bridge/index.js';
@@ -147,19 +147,19 @@ describe('brapi_dataframe_describe', () => {
     vi.stubEnv('MCP_TRANSPORT_TYPE', 'http');
     vi.stubEnv('MCP_AUTH_MODE', 'none');
     resetConfig();
-    const ctx = createMockContext({
-      tenantId: 'default',
-      errors: brapiDataframeDescribe.errors,
-    });
-    try {
-      await brapiDataframeDescribe.handler(brapiDataframeDescribe.input.parse({}), ctx);
-      expect.fail('expected handler to throw');
-    } catch (err) {
-      expect(err).toBeInstanceOf(McpError);
-      const data = (err as McpError).data as { recovery?: { hint?: string } } | undefined;
-      expect(data?.recovery?.hint).toMatch(/dataframe/);
-      expect(data?.recovery?.hint).toMatch(/find_\*|registerAs/);
-    }
+    const result = await runToolContract(
+      brapiDataframeDescribe,
+      {},
+      {
+        context: { tenantId: 'default' },
+      },
+    );
+    expect(result.isError).toBe(true);
+    const hint = (
+      result.structuredContent as { error?: { data?: { recovery?: { hint?: string } } } }
+    ).error?.data?.recovery?.hint;
+    expect(hint).toMatch(/dataframe/);
+    expect(hint).toMatch(/find_\*|registerAs/);
   });
 
   it('renders provenance lines for df_-prefixed dataframes', () => {

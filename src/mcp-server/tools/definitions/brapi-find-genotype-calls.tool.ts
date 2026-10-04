@@ -254,7 +254,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       throw ctx.fail(
         'search_endpoint_disabled',
         `Dialect '${dialect.id}' marks POST /search/calls as known-dead on this server. Genotype-call workflows are not viable here without bypassing the dialect.`,
-        { dialectId: dialect.id, ...ctx.recoveryFor('search_endpoint_disabled') },
+        { dialectId: dialect.id },
       );
     }
 
@@ -272,7 +272,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       throw ctx.fail(
         'no_filters',
         'Provide at least one filter (variantSetDbId, variantSetDbIds, germplasmDbIds, callSetDbIds, or variantDbIds) — unfiltered genotype-call pulls are prohibitively expensive.',
-        { filters: searchBody, ...ctx.recoveryFor('no_filters') },
+        { filters: searchBody },
       );
     }
 

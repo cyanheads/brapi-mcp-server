@@ -129,12 +129,10 @@ export const brapiDataframeExport = tool('brapi_dataframe_export', {
   async handler(input, ctx) {
     const config = getServerConfig();
     if (!config.exportDir) {
-      throw ctx.fail('export_dir_unset', undefined, { ...ctx.recoveryFor('export_dir_unset') });
+      throw ctx.fail('export_dir_unset');
     }
     if (input.columns && input.sql) {
-      throw ctx.fail('mutually_exclusive_projection', undefined, {
-        ...ctx.recoveryFor('mutually_exclusive_projection'),
-      });
+      throw ctx.fail('mutually_exclusive_projection');
     }
 
     const filename = resolveFilename(input, ctx);
@@ -142,9 +140,7 @@ export const brapiDataframeExport = tool('brapi_dataframe_export', {
 
     const sourceTables = await bridge.describe(ctx, { tableName: input.dataframe });
     if (sourceTables.length === 0) {
-      throw ctx.fail('dataframe_not_found', `Dataframe "${input.dataframe}" not found.`, {
-        ...ctx.recoveryFor('dataframe_not_found'),
-      });
+      throw ctx.fail('dataframe_not_found', `Dataframe "${input.dataframe}" not found.`);
     }
 
     await sweepStaleExports(config.exportDir, config.datasetTtlSeconds, ctx);
@@ -214,9 +210,7 @@ type ExportContext = Parameters<typeof brapiDataframeExport.handler>[1];
 function resolveFilename(input: z.infer<typeof InputSchema>, ctx: ExportContext): string {
   if (input.filename !== undefined) {
     if (FILENAME_REJECT.test(input.filename) || input.filename === '..') {
-      throw ctx.fail('invalid_filename', `Filename "${input.filename}" is not allowed.`, {
-        ...ctx.recoveryFor('invalid_filename'),
-      });
+      throw ctx.fail('invalid_filename', `Filename "${input.filename}" is not allowed.`);
     }
     return input.filename;
   }

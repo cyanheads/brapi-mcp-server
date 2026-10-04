@@ -117,7 +117,6 @@ export const brapiRawGet = tool('brapi_raw_get', {
     if (/^https?:\/\//i.test(input.path)) {
       throw ctx.fail('cross_origin_path', 'path must be a relative BrAPI route, not a full URL.', {
         path: input.path,
-        ...ctx.recoveryFor('cross_origin_path'),
       });
     }
     const path = normalizePath(input.path);

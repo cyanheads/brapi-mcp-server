@@ -126,7 +126,7 @@ export class CapabilityRegistry {
       );
       serverInfo = serverInfoEnv.result;
     } catch (err) {
-      throwIfAuthRejected(err, baseUrl, '/serverinfo', ctx, options.auth !== undefined);
+      throwIfAuthRejected(err, baseUrl, '/serverinfo', options.auth !== undefined);
       const message = err instanceof Error ? err.message : String(err);
       ctx.log.warning('Failed to fetch /serverinfo; falling back to /calls-only profile', {
         baseUrl,
@@ -179,7 +179,7 @@ export class CapabilityRegistry {
       );
       return extractDataArray<CallDescriptor>(env) ?? [];
     } catch (err) {
-      throwIfAuthRejected(err, baseUrl, '/calls', ctx, auth !== undefined);
+      throwIfAuthRejected(err, baseUrl, '/calls', auth !== undefined);
       const message = err instanceof Error ? err.message : String(err);
       ctx.log.warning('Failed to fetch /calls fallback', {
         baseUrl,
@@ -234,14 +234,13 @@ const AUTH_REJECTION_REASONS = new Set(['upstream_unauthorized', 'upstream_forbi
  * Let an HTTP 401/403 from a capability-discovery endpoint escape the soft
  * degradation path. An auth wall is not a sparse server: folding it into an
  * empty profile would cache a "connected, zero services" result and hide the
- * fix (credentials) from the caller. The calling tool's contract recovery
- * hint for the reason rides along when it declares one.
+ * fix (credentials) from the caller. The `reason` survives, so the framework
+ * fills the calling tool's contract recovery hint when it declares one.
  */
 function throwIfAuthRejected(
   err: unknown,
   baseUrl: string,
   endpoint: string,
-  ctx: Context,
   authSent: boolean,
 ): void {
   if (!(err instanceof McpError)) return;
@@ -259,7 +258,7 @@ function throwIfAuthRejected(
   throw new McpError(
     err.code,
     `BrAPI server at ${baseUrl} ${verdict} (HTTP ${String(data.status)} on ${endpoint}), so its capabilities cannot be discovered.`,
-    { ...data, baseUrl, endpoint, ...ctx.recoveryFor(reason) },
+    { ...data, baseUrl, endpoint },
     { cause: err },
   );
 }

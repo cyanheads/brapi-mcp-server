@@ -198,7 +198,7 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
       throw ctx.fail(
         'sql_rejected',
         message,
-        { gateReason, ...extractGateContext(err), ...ctx.recoveryFor('sql_rejected') },
+        { gateReason, ...extractGateContext(err) },
         { cause: err },
       );
     }

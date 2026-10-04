@@ -174,11 +174,7 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
         throw ctx.fail(
           'germplasm_not_found',
           `Germplasm '${input.germplasmDbId}' not found on ${connection.baseUrl}.`,
-          {
-            germplasmDbId: input.germplasmDbId,
-            baseUrl: connection.baseUrl,
-            ...ctx.recoveryFor('germplasm_not_found'),
-          },
+          { germplasmDbId: input.germplasmDbId, baseUrl: connection.baseUrl },
         );
       }
       throw err;
@@ -188,11 +184,7 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
       throw ctx.fail(
         'germplasm_not_found',
         `Germplasm '${input.germplasmDbId}' not found on ${connection.baseUrl}.`,
-        {
-          germplasmDbId: input.germplasmDbId,
-          baseUrl: connection.baseUrl,
-          ...ctx.recoveryFor('germplasm_not_found'),
-        },
+        { germplasmDbId: input.germplasmDbId, baseUrl: connection.baseUrl },
       );
     }
 

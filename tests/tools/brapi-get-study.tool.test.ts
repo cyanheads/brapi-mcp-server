@@ -144,8 +144,8 @@ describe('brapi_get_study tool', () => {
     // Breedbase serves HTTP 500 for unknown /studies/{id} instead of 404.
     // Without the singleton hint the retry loop would burn ~40s before
     // surfacing as a generic transport error; the singleton flow turns this
-    // into the typed `study_not_found` contract with the recovery hint
-    // attached.
+    // into the typed `study_not_found` contract, whose declared recovery hint
+    // the framework fills on the wire.
     fetcher.mockRejectedValue(
       serviceUnavailable('Fetch failed. Status: 500', {
         status: 500,
@@ -156,11 +156,7 @@ describe('brapi_get_study tool', () => {
       brapiGetStudy.handler(brapiGetStudy.input.parse({ studyDbId: 'does-not-exist' }), ctx),
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: {
-        reason: 'study_not_found',
-        studyDbId: 'does-not-exist',
-        recovery: { hint: expect.stringContaining('brapi_find_studies') },
-      },
+      data: { reason: 'study_not_found', studyDbId: 'does-not-exist' },
     });
   });
 

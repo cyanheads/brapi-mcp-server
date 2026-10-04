@@ -227,7 +227,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       throw ctx.fail(
         'search_endpoint_disabled',
         `Dialect '${dialect.id}' marks POST /search/calls as known-dead on this server. Genotype-call workflows are not viable here.`,
-        { dialectId: dialect.id, ...ctx.recoveryFor('search_endpoint_disabled') },
+        { dialectId: dialect.id },
       );
     }
 
@@ -272,7 +272,6 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       throw ctx.fail(
         'no_filters',
         'variantSetDbId is required — unfiltered genotype-call pulls are prohibitively expensive.',
-        { ...ctx.recoveryFor('no_filters') },
       );
     }
 

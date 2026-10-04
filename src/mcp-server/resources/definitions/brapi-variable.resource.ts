@@ -69,11 +69,7 @@ export const brapiVariableResource = resource('brapi://variable/{observationVari
         throw ctx.fail(
           'variable_not_found',
           `Observation variable '${params.observationVariableDbId}' not found on ${connection.baseUrl}.`,
-          {
-            observationVariableDbId: params.observationVariableDbId,
-            baseUrl: connection.baseUrl,
-            ...ctx.recoveryFor('variable_not_found'),
-          },
+          { observationVariableDbId: params.observationVariableDbId, baseUrl: connection.baseUrl },
           { cause: err },
         );
       }
@@ -89,11 +85,7 @@ export const brapiVariableResource = resource('brapi://variable/{observationVari
       throw ctx.fail(
         'variable_not_found',
         `Observation variable '${params.observationVariableDbId}' not found on ${connection.baseUrl}.`,
-        {
-          observationVariableDbId: params.observationVariableDbId,
-          baseUrl: connection.baseUrl,
-          ...ctx.recoveryFor('variable_not_found'),
-        },
+        { observationVariableDbId: params.observationVariableDbId, baseUrl: connection.baseUrl },
       );
     }
     return variable;
