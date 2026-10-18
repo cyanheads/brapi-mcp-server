@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-10-18 11:48:49
+Generated on: 2026-10-18 19:57:08
 
 ```text
 brapi-mcp-server/
@@ -25,6 +25,7 @@ brapi-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.10.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
@@ -192,9 +193,11 @@ brapi-mcp-server/
 │   │           ├── connect-auth-schema.ts
 │   │           ├── find-helpers.ts
 │   │           ├── genotype-calls.ts
+│   │           ├── inline-preview.ts
 │   │           ├── observations.ts
 │   │           ├── orientation-envelope.ts
 │   │           ├── pedigree-diagram.ts
+│   │           ├── raw-preview.ts
 │   │           └── raw-routing-hints.ts
 │   ├── services/
 │   │   ├── brapi-client/
@@ -279,9 +282,11 @@ brapi-mcp-server/
 │   │   ├── shared/
 │   │   │   ├── embedded-observations.test.ts
 │   │   │   ├── find-helpers.test.ts
+│   │   │   ├── inline-preview.test.ts
 │   │   │   ├── observations.test.ts
 │   │   │   ├── orientation-envelope.test.ts
-│   │   │   └── pedigree-diagram.test.ts
+│   │   │   ├── pedigree-diagram.test.ts
+│   │   │   └── raw-preview.test.ts
 │   │   ├── _tool-test-helpers.ts
 │   │   ├── brapi-build-phenotype-matrix.tool.test.ts
 │   │   ├── brapi-connect.tool.test.ts

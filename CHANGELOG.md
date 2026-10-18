@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.0](changelog/0.10.x/0.10.0.md) — 2026-10-18 · ⚠️ Breaking
+
+Bound wide result previews while preserving staged data and pedigree recovery.
+
 ## [0.9.1](changelog/0.9.x/0.9.1.md) — 2026-10-18
 
 Preserve SGN observation completeness and resolve study program metadata.
