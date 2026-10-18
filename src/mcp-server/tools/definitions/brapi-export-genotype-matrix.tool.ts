@@ -253,7 +253,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       .max(GENOTYPE_CALLS_MAX_PULL_CEILING)
       .optional()
       .describe(
-        'Lower the pull cap for this call. Omit to use the deployment ceiling (BRAPI_GENOTYPE_CALLS_MAX_PULL). Cannot raise it: a value above the deployment ceiling is clamped down to it and the effective cap is reported in `warnings`.',
+        'Lower the pull cap for this call. Omit to use the deployment ceiling. Cannot raise it: a value above the deployment ceiling is clamped down to it and the effective cap is reported in `warnings`.',
       ),
     maxColumns: z
       .number()
@@ -262,7 +262,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       .max(GENOTYPE_MATRIX_MAX_COLUMNS_CEILING)
       .optional()
       .describe(
-        'Lower the distinct-variant column cap for this call. Omit to use the deployment ceiling (BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS). Cannot raise it: a value above the deployment ceiling is clamped down to it. When the variant set resolves more distinct variants than the effective cap, the matrix is capped at that many variant columns, `truncated` is set, and the effective cap is reported in `warnings`. Independent of `maxCalls`, which bounds the row (call) pull.',
+        'Lower the distinct-variant column cap for this call. Omit to use the deployment ceiling. Cannot raise it: a value above the deployment ceiling is clamped down to it. When the variant set resolves more distinct variants than the effective cap, the matrix is capped at that many variant columns, `truncated` is set, and the effective cap is reported in `warnings`. Independent of `maxCalls`, which bounds the row (call) pull.',
       ),
   }),
   output: OutputSchema,
@@ -308,7 +308,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     const maxCalls = Math.min(requestedMaxCalls, config.genotypeCallsMaxPull);
     if (maxCalls < requestedMaxCalls) {
       warnings.push(
-        `maxCalls=${requestedMaxCalls} exceeds this deployment's genotype-call ceiling (BRAPI_GENOTYPE_CALLS_MAX_PULL=${config.genotypeCallsMaxPull}); the pull was capped at ${maxCalls} calls. Results may be truncated — see \`truncated\`.`,
+        `maxCalls=${requestedMaxCalls} exceeds this deployment's genotype-call ceiling (${config.genotypeCallsMaxPull}); the pull was capped at ${maxCalls} calls. Results may be truncated — see \`truncated\`.`,
       );
     }
 
@@ -322,7 +322,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     const maxColumns = Math.min(requestedMaxColumns, config.genotypeMatrixMaxColumns);
     if (maxColumns < requestedMaxColumns) {
       warnings.push(
-        `maxColumns=${requestedMaxColumns} exceeds this deployment's genotype-matrix column ceiling (BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS=${config.genotypeMatrixMaxColumns}); the matrix is capped at ${maxColumns} variant columns. See \`truncated\`.`,
+        `maxColumns=${requestedMaxColumns} exceeds this deployment's genotype-matrix column ceiling (${config.genotypeMatrixMaxColumns}); the matrix is capped at ${maxColumns} variant columns. See \`truncated\`.`,
       );
     }
 

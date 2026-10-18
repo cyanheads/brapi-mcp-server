@@ -249,8 +249,7 @@ export class CanvasBridge {
   ): Promise<QueryResult> {
     assertNoSystemCatalogAccess(sql);
     const instance = await this.getInstance(ctx);
-    const cap = this.serverConfig.canvasMaxRows;
-    const rowLimit = Math.min(options.rowLimit ?? cap, cap);
+    const rowLimit = this.queryRowLimit(options.rowLimit);
     const queryOpts: {
       preview?: number;
       registerAs?: string;
@@ -263,6 +262,11 @@ export class CanvasBridge {
     if (options.preview !== undefined) queryOpts.preview = Math.min(options.preview, rowLimit);
     if (options.registerAs !== undefined) queryOpts.registerAs = options.registerAs;
     return await instance.query(sql, queryOpts);
+  }
+
+  /** Effective response row ceiling, shared with the query tool's disclosure. */
+  queryRowLimit(requested?: number): number {
+    return Math.min(requested ?? this.serverConfig.canvasMaxRows, this.serverConfig.canvasMaxRows);
   }
 
   /**

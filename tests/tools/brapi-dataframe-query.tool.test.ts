@@ -79,6 +79,14 @@ function runQuery(input: Record<string, unknown>) {
 }
 
 describe('brapi_dataframe_query', () => {
+  it('qualifies the optional drop tool and offers a different registerAs name', () => {
+    expect(brapiDataframeQuery.input.shape.registerAs.description).toContain('different name');
+    expect(brapiDataframeQuery.input.shape.registerAs.description).toContain(
+      'where this deployment enables it',
+    );
+    expect(recoveryFor('sql_rejected')).toContain('where this deployment enables it');
+    expect(recoveryFor('register_as_clash')).toContain('where this deployment enables it');
+  });
   afterEach(() => {
     resetCanvasBridge();
   });
@@ -271,6 +279,58 @@ describe('brapi_dataframe_query error contract against a real DuckDB canvas', ()
     return await runToolContract(brapiDataframeQuery, brapiDataframeQuery.input.parse(input));
   }
 
+  it('pages a fully materialized wide result exactly once using actual shown counts', async () => {
+    const bridge = initCanvasBridge(canvas, TEST_CONFIG);
+    const instance = await bridge.getInstance(createMockContext());
+    vi.spyOn(bridge, 'getInstance').mockResolvedValue(instance);
+    await instance.registerTable(
+      'source_wide',
+      Array.from({ length: 30 }, (_, id) => ({ id, wide: 'é'.repeat(1000) })),
+    );
+    const initial = await callTool({
+      sql: 'SELECT * FROM source_wide',
+      registerAs: 'all_wide',
+      preview: 30,
+    });
+    expect(initial.isError, JSON.stringify(initial.structuredContent)).toBeFalsy();
+    expect(initial.structuredContent).toMatchObject({
+      rowCount: 30,
+      dataframe: 'all_wide',
+      cap: 30,
+    });
+    expect(
+      (await bridge.describe(createMockContext(), { tableName: 'all_wide' }))[0]?.rowCount,
+    ).toBe(30);
+    const ids: string[] = [];
+    let offset = 0;
+    while (offset < 30) {
+      const res = await callTool({
+        sql: `SELECT * FROM all_wide ORDER BY id LIMIT 30 OFFSET ${offset}`,
+      });
+      expect(res.isError).toBeFalsy();
+      const sc = res.structuredContent as {
+        rows: { id: string }[];
+        shown?: number;
+        columns: { name: string; type: string }[];
+        rowCount: number;
+      };
+      expect(sc.rows.length).toBeGreaterThan(0);
+      expect(Buffer.byteLength(JSON.stringify(sc.rows))).toBeLessThanOrEqual(24_000);
+      const rendered = brapiDataframeQuery.format(sc)[0]?.text ?? '';
+      expect(
+        Buffer.byteLength(JSON.stringify(rendered.slice(rendered.indexOf('## Rows')))),
+      ).toBeLessThanOrEqual(24_000);
+      expect(sc.columns).toContainEqual({ name: 'id', type: 'BIGINT' });
+      ids.push(...sc.rows.map((r) => r.id));
+      offset += sc.rows.length;
+    }
+    expect(ids).toEqual(Array.from({ length: 30 }, (_, i) => String(i)));
+    const end = await callTool({ sql: 'SELECT * FROM all_wide ORDER BY id LIMIT 30 OFFSET 30' });
+    expect(end.structuredContent).toMatchObject({ rowCount: 0, rows: [] });
+    expect(JSON.stringify(end.content)).toContain('No rows');
+    expect(JSON.stringify(end)).not.toContain('_brapi_probe_');
+  });
+
   it.each([
     ['a bare relative file name', "SELECT * FROM 'data.csv'"],
     ['a URL', "SELECT * FROM 'https://example.com/a.parquet'"],
@@ -438,16 +498,20 @@ describe('brapi_dataframe_query preview ceiling against a real DuckDB canvas', (
     };
   }
 
-  it('serves a preview of 2,000 from a 3,000-row result and names preview as the lever', async () => {
+  it('accepts preview 2,000 while the byte budget binds first', async () => {
     const { res, sc } = await run({ sql: threeThousand, preview: 2000 });
     expect(res.isError).toBeFalsy();
     expect(sc.rowCount).toBe(3000);
-    expect(sc.rows).toHaveLength(2000);
+    expect(sc.rows).toHaveLength(834);
     expect(sc.truncated).toBe(true);
-    expect(sc.shown).toBe(2000);
+    expect(sc.shown).toBe(834);
     expect(sc.cap).toBe(2000);
-    expect(sc.notice).toMatch(/^`preview` bound the response at 2000 of 3000 rows/);
-    expect(JSON.stringify(res.content)).toMatch(/`preview` bound the response at 2000 of 3000/);
+    expect(sc.notice).toMatch(
+      /^The 24,000-byte inline budget bound the response at 834 of 3000 rows/,
+    );
+    expect(JSON.stringify(res.content)).toMatch(
+      /24,000-byte inline budget bound the response at 834 of 3000/,
+    );
   });
 
   it('clamps a preview above rowLimit to rowLimit and names rowLimit as the lever', async () => {
@@ -463,20 +527,20 @@ describe('brapi_dataframe_query preview ceiling against a real DuckDB canvas', (
     const withoutPreview = await run({ sql: threeThousand }, capped);
     const { res, sc } = await run({ sql: threeThousand, preview: 5000 }, capped);
     expect(res.isError).toBeFalsy();
-    expect(withoutPreview.sc.rows).toHaveLength(1000);
-    expect(sc.rows).toHaveLength(1000);
-    expect(sc.notice).toMatch(
-      /^The deployment-wide response cap bound the response at 1000 of 3000/,
-    );
+    expect(withoutPreview.sc.rows).toHaveLength(834);
+    expect(sc.rows).toHaveLength(834);
+    expect(sc.cap).toBe(1000);
+    expect(sc.notice).toMatch(/^The 24,000-byte inline budget bound the response at 834 of 3000/);
   });
 
-  it('names the deployment cap, not rowLimit, when a rowLimit above the cap was clamped', async () => {
+  it('preserves the deployment cap when the byte budget binds first', async () => {
     const { sc } = await run(
       { sql: threeThousand, rowLimit: 50_000 },
       { ...TEST_CONFIG, canvasMaxRows: 1000 },
     );
-    expect(sc.rows).toHaveLength(1000);
-    expect(sc.notice).toMatch(/^The deployment-wide response cap bound/);
+    expect(sc.rows).toHaveLength(834);
+    expect(sc.cap).toBe(1000);
+    expect(sc.notice).toMatch(/^The 24,000-byte inline budget bound/);
   });
 
   it('returns an empty result under a large preview without a truncation disclosure', async () => {
@@ -490,6 +554,50 @@ describe('brapi_dataframe_query preview ceiling against a real DuckDB canvas', (
 });
 
 describe('brapi_dataframe_query format', () => {
+  it('bounds wide multibyte rows on both wire surfaces and keeps the effective row cap', async () => {
+    const rows = Array.from({ length: 30 }, (_, n) => ({ n, value: 'é'.repeat(1000) }));
+    vi.spyOn(fakeBridge(), 'query').mockResolvedValue({
+      rows,
+      columns: ['n', 'value'],
+      rowCount: 30,
+    });
+    const res = await runToolContract(brapiDataframeQuery, { sql: 'SELECT * FROM t', preview: 30 });
+    const sc = res.structuredContent as {
+      rows: unknown[];
+      shown: number;
+      cap: number;
+      notice: string;
+    };
+    expect(Buffer.byteLength(JSON.stringify(sc.rows))).toBeLessThanOrEqual(24_000);
+    const text = res.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    const rowSection = text.split('## Rows')[1]?.split('\n>')[0] ?? '';
+    expect(Buffer.byteLength(JSON.stringify(`## Rows${rowSection}`))).toBeLessThanOrEqual(24_000);
+    expect(sc.shown).toBe(sc.rows.length);
+    expect(sc.cap).toBe(30);
+    expect(sc.notice).toContain('24,000-byte');
+    resetCanvasBridge();
+  });
+
+  it('returns no rows when the first row is oversized and requires a narrower projection', async () => {
+    vi.spyOn(fakeBridge(), 'query').mockResolvedValue({
+      rows: [{ value: 'é'.repeat(24_000) }],
+      columns: ['value'],
+      rowCount: 1,
+    });
+    const res = await runToolContract(brapiDataframeQuery, { sql: 'SELECT * FROM t' });
+    expect(res.structuredContent).toMatchObject({
+      rows: [],
+      rowCount: 1,
+      shown: 0,
+      truncated: true,
+    });
+    expect(JSON.stringify(res.content)).toMatch(/narrower projection/);
+    resetCanvasBridge();
+  });
+
   it('renders count, typed columns, returned, and a row block per result', () => {
     const formatted = brapiDataframeQuery.format?.({
       rowCount: 2,

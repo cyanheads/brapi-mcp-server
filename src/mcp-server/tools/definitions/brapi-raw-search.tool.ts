@@ -2,10 +2,8 @@
  * @fileoverview `brapi_raw_search` — last-resort passthrough to any BrAPI
  * `POST /search/{noun}` endpoint with async-search polling handled
  * transparently. Returns the raw upstream envelope once the search completes,
- * and spills to a canvas dataframe when the upstream advertises more rows
- * than `loadLimit` AND the result is a list shape. Spillover is skipped
- * when the caller drives paging via `body.page` / `body.pageSize` — they're
- * walking pages explicitly. Emits a routing nudge when a curated goal-shaped
+ * with list previews bounded by rows and bytes. Omitted fetched rows stay
+ * staged; explicit paging stages only the requested page. Emits a nudge when a curated
  * tool covers the noun.
  *
  * @module mcp-server/tools/definitions/brapi-raw-search.tool
@@ -25,24 +23,20 @@ import {
   AliasInput,
   buildRequestOptions,
   DataframeHandleSchema,
-  extractListRows,
   LoadLimitInput,
-  noteSpillStop,
   renderDataframeHandle,
   renderWarningsTrailer,
   requireRegisteredConnection,
-  spillToCanvas,
-  stagedDataframeNotice,
-  toDataframeHandle,
 } from '../shared/find-helpers.js';
+import { previewRawResult } from '../shared/raw-preview.js';
 import { suggestForSearch } from '../shared/raw-routing-hints.js';
 
 const PaginationSchema = z
   .object({
-    currentPage: z.number().describe('0-indexed page number the server returned.'),
-    pageSize: z.number().describe('Rows per page.'),
-    totalCount: z.number().describe('Total rows matching the query across all pages.'),
-    totalPages: z.number().describe('Total pages at the current pageSize.'),
+    currentPage: z.number().optional().describe('0-indexed page number, when reported.'),
+    pageSize: z.number().optional().describe('Rows per page, when reported.'),
+    totalCount: z.number().optional().describe('Total matching rows, when reported.'),
+    totalPages: z.number().optional().describe('Total pages, when reported.'),
   })
   .passthrough()
   .optional()
@@ -72,7 +66,7 @@ const OutputSchema = z.object({
       'Emitted when a curated goal-shaped tool covers this search, or takes the IDs it lists.',
     ),
   dataframe: DataframeHandleSchema.optional().describe(
-    'Every fetched page of a list-shaped result, inline rows included, staged when the upstream advertised more rows than `loadLimit`. The inline `result` is unchanged.',
+    'Every fetched row of a list result, staged when the inline preview omits rows. Explicit paging stages only the requested page.',
   ),
 });
 
@@ -80,7 +74,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiRawSearch = tool('brapi_raw_search', {
   description:
-    'Passthrough to any BrAPI POST /search/{noun} endpoint, returning the resolved envelope; when the server answers with a searchResultsDbId, this tool polls for the results. Sends `loadLimit` as the `pageSize` of the first page. When the upstream advertises more rows than `loadLimit` AND the result is a list shape, stages every fetched page (the inline rows included) as a canvas dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL); inline `result` is unchanged. A body that sets `page` or `pageSize` is sent verbatim and never staged. No distributions or foreign-key resolution applied.',
+    'Passthrough to BrAPI POST /search/{noun}, polling async search IDs. Sends loadLimit as the initial pageSize unless body.page/pageSize drives explicit paging. List previews fit loadLimit and a 24,000-byte budget on each serialized row representation; an oversized first row returns no inline rows. Every fetched row omitted inline stays in a dataframe readable with brapi_dataframe_describe and brapi_dataframe_query. Explicit paging fetches only the requested page, staging it if trimmed. Non-list results and envelope siblings are preserved; no distributions or foreign-key resolution.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -175,6 +169,17 @@ export const brapiRawSearch = tool('brapi_raw_search', {
   output: OutputSchema,
 
   enrichment: {
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the inline list leaves fetched or matching rows out.'),
+    shown: z.number().int().nonnegative().optional().describe('Actual list rows returned inline.'),
+    cap: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('Effective loadLimit row ceiling, even when the byte budget binds first.'),
     warnings: z
       .array(z.string())
       .optional()
@@ -237,7 +242,10 @@ export const brapiRawSearch = tool('brapi_raw_search', {
         input.noun,
         response.searchResultsDbId,
         ctx,
-        buildRequestOptions(connection),
+        buildRequestOptions(connection, {
+          page: body.page,
+          pageSize: body.pageSize,
+        } as NonNullable<BrapiRequestOptions['params']>),
       );
       kind = 'async';
     }
@@ -253,41 +261,29 @@ export const brapiRawSearch = tool('brapi_raw_search', {
     const suggestion = suggestForSearch(input.noun);
     if (suggestion) result.suggestion = suggestion;
 
-    if (!userControlsPaging) {
-      const totalCount = envelope.metadata?.pagination?.totalCount;
-      const rows = extractListRows(envelope.result);
-      if (
-        rows !== null &&
-        rows.length > 0 &&
-        typeof totalCount === 'number' &&
-        totalCount > loadLimit
-      ) {
-        const spill = await spillToCanvas({
-          bridge,
-          client,
-          connection,
-          ctx,
-          firstPage: rows,
-          totalCount,
-          loadLimit,
-          path: `/search/${input.noun}`,
-          filters: input.body as Record<string, unknown>,
-          source: 'raw_search',
-          route: {
-            kind: 'search',
-            noun: input.noun,
-            service: `search/${input.noun}`,
-            searchBody: input.body,
-          },
-        });
-        const warning = noteSpillStop(ctx, 'raw_search', spill, totalCount);
-        if (warning) ctx.enrich({ warnings: [warning] });
-        if (spill.dataframe) {
-          result.dataframe = toDataframeHandle(spill.dataframe);
-          ctx.enrich.notice(stagedDataframeNotice([result.dataframe]));
-        }
-      }
-    }
+    const preview = await previewRawResult(
+      envelope.result,
+      {
+        bridge,
+        client,
+        connection,
+        ctx,
+        totalCount: envelope.metadata?.pagination?.totalCount,
+        loadLimit,
+        path: `/search/${input.noun}`,
+        filters: input.body as Record<string, unknown>,
+        source: 'raw_search',
+        route: {
+          kind: 'search',
+          noun: input.noun,
+          service: `search/${input.noun}`,
+          searchBody: input.body,
+        },
+      },
+      userControlsPaging,
+    );
+    result.result = preview.result;
+    if (preview.dataframe) result.dataframe = preview.dataframe;
     return result;
   },
 
@@ -300,10 +296,13 @@ export const brapiRawSearch = tool('brapi_raw_search', {
     }
     const pagination = result.metadata.pagination;
     if (pagination) {
-      lines.push('');
-      lines.push(
-        `**Pagination:** page ${pagination.currentPage} of ${pagination.totalPages}, pageSize=${pagination.pageSize}, totalCount=${pagination.totalCount}`,
-      );
+      const parts = [
+        pagination.currentPage === undefined ? undefined : `page ${pagination.currentPage}`,
+        pagination.totalPages === undefined ? undefined : `totalPages=${pagination.totalPages}`,
+        pagination.pageSize === undefined ? undefined : `pageSize=${pagination.pageSize}`,
+        pagination.totalCount === undefined ? undefined : `totalCount=${pagination.totalCount}`,
+      ].filter((part) => part !== undefined);
+      if (parts.length > 0) lines.push('', `**Pagination:** ${parts.join(', ')}`);
     }
     if (result.suggestion) {
       lines.push('');
@@ -324,9 +323,9 @@ export const brapiRawSearch = tool('brapi_raw_search', {
 });
 
 function buildMetadata(metadata: { pagination?: BrapiPagination } | undefined): Output['metadata'] {
-  const pagination = metadata?.pagination;
+  const { pagination, ...rest } = metadata ?? {};
   if (pagination) {
-    return { pagination: { ...pagination } };
+    return { ...rest, pagination: { ...pagination } };
   }
-  return {};
+  return rest;
 }

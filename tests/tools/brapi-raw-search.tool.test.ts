@@ -69,6 +69,81 @@ describe('brapi_raw_search tool', () => {
     expect(typeof body.pageSize).toBe('number');
   });
 
+  it('bounds a wide array page and stages every fetched row without walking', async () => {
+    const ctx = await connect(fetcher);
+    const rows = Array.from({ length: 30 }, (_, n) => ({ n, value: 'é'.repeat(1000) }));
+    fetcher.mockResolvedValue(
+      jsonResponse(
+        envelope(rows, { totalCount: 100, currentPage: 2, pageSize: 30, totalPages: 4 }),
+      ),
+    );
+    const definition = {
+      ...brapiRawSearch,
+      handler: (input, contractCtx) =>
+        brapiRawSearch.handler(input, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiRawSearch;
+    const res = await runToolContract(
+      definition,
+      { noun: 'samples', body: { page: 2, pageSize: 30 } },
+      { context: { tenantId: 't1' } },
+    );
+    expect(res.isError, JSON.stringify(res.structuredContent)).toBeFalsy();
+    const sc = res.structuredContent as {
+      result: unknown[];
+      dataframe: { rowCount: number };
+      shown: number;
+      notice: string;
+    };
+    expect(Buffer.byteLength(JSON.stringify(sc.result))).toBeLessThanOrEqual(24_000);
+    expect(sc.dataframe.rowCount).toBe(30);
+    expect(sc.shown).toBe(sc.result.length);
+    expect(sc.notice).toContain('requested upstream page');
+    expect(sc.notice).toContain('OFFSET 0');
+    const text = res.content.find((block) => block.type === 'text')?.text ?? '';
+    expect(Buffer.byteLength(JSON.stringify(text.split('## Raw result\n')[1]))).toBeLessThanOrEqual(
+      24_000,
+    );
+    expect(JSON.stringify(res.content)).toContain('24,000-byte');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds an async oversized first row without losing its resolved envelope siblings', async () => {
+    const ctx = await connect(fetcher);
+    fetcher
+      .mockResolvedValueOnce(jsonResponse(envelope({ searchResultsDbId: 'wide-search' })))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          metadata: { pagination: { currentPage: 2 }, marker: 'kept' },
+          result: { data: [{ id: 'wide', value: 'é'.repeat(24_000) }], sibling: true },
+        }),
+      );
+    const definition = {
+      ...brapiRawSearch,
+      handler: (input, contractCtx) =>
+        brapiRawSearch.handler(input, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiRawSearch;
+    const res = await runToolContract(
+      definition,
+      { noun: 'samples', body: { page: 2, pageSize: 1 } },
+      { context: { tenantId: 't1' } },
+    );
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      kind: 'async',
+      searchResultsDbId: 'wide-search',
+      metadata: { pagination: { currentPage: 2 }, marker: 'kept' },
+      result: { data: [], sibling: true },
+      dataframe: { rowCount: 1 },
+      shown: 0,
+    });
+    expect(JSON.stringify(res.content)).toContain('narrower projection');
+    expect(JSON.stringify(res.content)).toContain('page 2');
+    expect(JSON.stringify(res.content)).not.toContain('undefined');
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(new URL(String(fetcher.mock.calls[1]?.[0])).searchParams.get('page')).toBe('2');
+    expect(new URL(String(fetcher.mock.calls[1]?.[0])).searchParams.get('pageSize')).toBe('1');
+  });
+
   it('polls when the server returns an async searchResultsDbId', async () => {
     const ctx = await connect(fetcher);
     fetcher
@@ -288,7 +363,7 @@ describe('brapi_raw_search tool', () => {
       expect(text).toContain('Dataframe walk stopped after 10 of 25 upstream row(s)');
       expect(text).toContain(`**Warnings:**\n- ${warnings[0]}`);
       const tableName = (structured.dataframe as { tableName: string }).tableName;
-      expect(structured.notice).toBe(
+      expect(structured.notice).toContain(
         `Staged dataframe \`${tableName}\` (10 rows, truncated — warnings says why): list its columns with brapi_dataframe_describe, then query it with brapi_dataframe_query (SQL).`,
       );
       expect(text).toContain(`> ${structured.notice as string}`);

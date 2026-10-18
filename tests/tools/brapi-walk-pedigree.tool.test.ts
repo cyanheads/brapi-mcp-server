@@ -5,11 +5,15 @@
  * @module tests/tools/brapi-walk-pedigree.tool.test
  */
 
+import { tmpdir } from 'node:os';
+import { CanvasRegistry, DataCanvas, DuckdbProvider } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
+import { brapiDataframeQuery } from '@/mcp-server/tools/definitions/brapi-dataframe-query.tool.js';
 import { brapiWalkPedigree } from '@/mcp-server/tools/definitions/brapi-walk-pedigree.tool.js';
+import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/index.js';
 import {
   BASE_URL,
   envelope,
@@ -18,6 +22,7 @@ import {
   type MockFetcher,
   pathnameOf,
   resetTestServices,
+  TEST_CONFIG,
 } from './_tool-test-helpers.js';
 
 interface PedigreeEntry {
@@ -118,6 +123,264 @@ describe('brapi_walk_pedigree tool', () => {
 
   afterEach(() => {
     resetTestServices();
+  });
+
+  it('characterizes a depth-boundary terminal without expanding beyond the requested side', async () => {
+    const ctx = await connect(fetcher, [PROGENY]);
+    const calls = serveFixture(fetcher, {
+      progeny: {
+        R: { progeny: [{ germplasmDbId: 'C' }] },
+        C: { progeny: [{ germplasmDbId: 'G' }] },
+      },
+    });
+    const result = await walk(ctx, {
+      germplasmDbIds: ['R'],
+      direction: 'descendants',
+      maxDepth: 1,
+    });
+    expect(result.leafCount).toBe(1);
+    expect(result.deadEndCount).toBe(0);
+    expect(calls).toEqual(['pedigree:R', 'progeny:R']);
+  });
+
+  it('bounds wide node and edge previews independently and retains a discovered-graph diagram', async () => {
+    const ctx = await connect(fetcher);
+    serveFixture(fetcher, {
+      pedigree: {
+        R: {
+          parents: [
+            { germplasmDbId: 'P', germplasmName: 'é'.repeat(13000), parentType: 'é'.repeat(13000) },
+          ],
+        },
+      },
+    });
+    const result = await walk(ctx, {
+      germplasmDbIds: ['R'],
+      maxDepth: 1,
+      loadLimit: 10,
+      diagram: 'dot',
+    });
+    expect(Buffer.byteLength(JSON.stringify(result.nodes))).toBeLessThanOrEqual(24000);
+    expect(Buffer.byteLength(JSON.stringify(result.edges))).toBeLessThanOrEqual(24000);
+    expect(result.nodesDataframe?.rowCount).toBe(2);
+    expect(result.edgesDataframe?.rowCount).toBe(1);
+    expect(result.edges).toEqual([]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it.each(['ancestors', 'descendants', 'both'] as const)(
+    'retains known omissions and safety frontier for %s',
+    async (direction) => {
+      const ctx = await connect(fetcher, [PROGENY]);
+      serveFixture(fetcher, {
+        pedigree: { R: { parents: fanOut(1500) } },
+        progeny: { R: { progeny: fanOut(1500) } },
+      });
+      const wire = await runToolContract(
+        bound(ctx),
+        { germplasmDbIds: ['R'], direction, maxDepth: 2, loadLimit: 10 },
+        { context: { tenantId: 't1' } },
+      );
+      const result = wire.structuredContent as WalkOutput;
+      expect(wire.isError).not.toBe(true);
+      expect(result.leafCount).toBe(999);
+      expect(result).toMatchObject({
+        confirmedLeafCount: 0,
+        knownOmittedRelativeCount: direction === 'both' ? 2001 : 501,
+      });
+      expect(result.nodesDataframe?.truncated).toBe(true);
+      expect(result.edgesDataframe?.truncated).toBe(true);
+      expect(result).toHaveProperty('omittedRelativesDataframe');
+      expect(JSON.stringify(wire.content)).toContain('ORDER BY ordinal');
+      expect(JSON.stringify(wire.content)).toContain('OFFSET 0');
+    },
+  );
+
+  it('retrieves every fetched omission in ordered real-DuckDB slices including past-end', async () => {
+    const ctx = await connect(fetcher, [PROGENY]);
+    const provider = new DuckdbProvider({
+      exportRootPath: tmpdir(),
+      tempRootPath: tmpdir(),
+      memoryLimitMb: 256,
+      defaultRowLimit: 10000,
+      schemaSniffRows: 100,
+    });
+    const registry = new CanvasRegistry(provider, {
+      absoluteCapMs: 600000,
+      maxCanvasesPerTenant: 10,
+      sweeperIntervalMs: 0,
+      ttlMs: 600000,
+    });
+    const canvas = new DataCanvas(provider, registry);
+    initCanvasBridge(canvas, TEST_CONFIG);
+    try {
+      serveFixture(fetcher, { progeny: { R: { progeny: fanOut(1024) } } });
+      const result = await walk(ctx, {
+        germplasmDbIds: ['R'],
+        direction: 'descendants',
+        maxDepth: 2,
+        loadLimit: 10,
+      });
+      expect(result.knownOmittedRelativeCount).toBe(25);
+      const table = result.omittedRelativesDataframe!.tableName;
+      const seen: string[] = [];
+      for (const offset of [0, 10, 20, 25]) {
+        const query = await brapiDataframeQuery.handler(
+          brapiDataframeQuery.input.parse({
+            sql: `SELECT germplasmDbId, expansionNodeDbId, side FROM ${table} ORDER BY ordinal LIMIT 10 OFFSET ${offset}`,
+          }),
+          ctx,
+        );
+        expect(query.rows).toHaveLength(offset < 20 ? 10 : offset === 20 ? 5 : 0);
+        expect(
+          query.rows.every((row) => row.side === 'descendant' && row.expansionNodeDbId === 'R'),
+        ).toBe(true);
+        seen.push(...query.rows.map((row) => String(row.germplasmDbId)));
+      }
+      expect(seen).toEqual(
+        fanOut(1024)
+          .slice(999)
+          .map((row) => row.germplasmDbId),
+      );
+      const described = await getCanvasBridge().describe(ctx, {
+        tableName: result.nodesDataframe!.tableName,
+      });
+      expect(described[0]?.provenance?.query).toMatchObject({
+        coverage: 'partial_discovered_graph',
+      });
+    } finally {
+      await canvas.shutdown();
+    }
+  });
+
+  it('distinguishes confirmed leaves, depth frontiers and a failed side without dropping its successful sibling', async () => {
+    const ctx = await connect(fetcher, [PROGENY]);
+    const calls = serveFixture(fetcher, {
+      pedigree: { R: { parents: [{ germplasmDbId: 'P' }] } },
+      progeny: {
+        R: { progeny: [{ germplasmDbId: 'C' }] },
+        C: { progeny: [{ germplasmDbId: 'G' }] },
+      },
+    });
+    const depth = await walk(ctx, { germplasmDbIds: ['R'], direction: 'both', maxDepth: 2 });
+    expect(depth.confirmedLeafCount).toBe(1);
+    expect(depth.frontier).toEqual([
+      { germplasmDbId: 'G', side: 'descendant', outcome: 'depth_limited' },
+    ]);
+    expect(calls).not.toContain('progeny:P');
+    expect(calls).not.toContain('pedigree:C');
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/pedigree')) throw new Error('lookup failed');
+      return jsonResponse(
+        envelope({ progeny: path.includes('/R/') ? [{ germplasmDbId: 'C' }] : [] }),
+      );
+    });
+    const failed = await walk(ctx, { germplasmDbIds: ['R'], direction: 'both', maxDepth: 2 });
+    expect(failed.deadEndCount).toBe(1);
+    expect(failed.confirmedLeafCount).toBe(1);
+    expect(failed.edges).toEqual([{ from: 'C', to: 'R', relationship: 'child' }]);
+    expect(failed.frontier).toMatchObject([
+      { germplasmDbId: 'R', side: 'ancestor', outcome: 'failed' },
+    ]);
+    expect(textOf(failed)).toContain('ancestor · failed');
+  });
+
+  it('retains already-fetched omissions from every root after an interrupted expansion', async () => {
+    const ctx = await connect(fetcher, [PROGENY]);
+    serveFixture(fetcher, {
+      progeny: { A: { progeny: fanOut(1500) }, B: { progeny: [{ germplasmDbId: 'only-B' }] } },
+    });
+    const result = await walk(ctx, {
+      germplasmDbIds: ['A', 'B'],
+      direction: 'descendants',
+      maxDepth: 1,
+      loadLimit: 2000,
+    });
+    expect(result.knownOmittedRelativeCount).toBe(503);
+    expect(
+      result.frontier.filter((row) => row.knownOmittedRelativeCount !== undefined),
+    ).toMatchObject([
+      {
+        germplasmDbId: 'A',
+        side: 'descendant',
+        outcome: 'safety_skipped',
+        knownOmittedRelativeCount: 502,
+      },
+      {
+        germplasmDbId: 'B',
+        side: 'descendant',
+        outcome: 'safety_skipped',
+        knownOmittedRelativeCount: 1,
+      },
+    ]);
+  });
+
+  it('deduplicates repeated relatives at the safety boundary and preserves depth-limited frontier', async () => {
+    const ctx = await connect(fetcher);
+    serveFixture(fetcher, {
+      pedigree: {
+        R: {
+          parents: [
+            ...fanOut(999),
+            { germplasmDbId: 'g-p-998' },
+            { germplasmDbId: 'omitted' },
+            { germplasmDbId: 'omitted' },
+          ],
+        },
+      },
+    });
+    const result = await walk(ctx, { germplasmDbIds: ['R'], maxDepth: 1, loadLimit: 2000 });
+    expect(result.knownOmittedRelativeCount).toBe(1);
+    expect(result.omittedRelativesDataframe?.rowCount).toBe(1);
+    expect(result.frontier.find((entry) => entry.germplasmDbId === 'R')).toMatchObject({
+      outcome: 'safety_skipped',
+      knownOmittedRelativeCount: 1,
+    });
+    expect(
+      result.frontier
+        .filter((entry) => entry.germplasmDbId !== 'R')
+        .every((entry) => entry.outcome === 'depth_limited'),
+    ).toBe(true);
+    expect(result.frontierCount).toBe(1000);
+  });
+
+  it('returns zero oversized-first-node rows while preserving the staged root', async () => {
+    const ctx = await connect(fetcher);
+    serveFixture(fetcher, { pedigree: { R: { germplasmName: 'é'.repeat(13000), parents: [] } } });
+    const result = await walk(ctx, { germplasmDbIds: ['R'], loadLimit: 10 });
+    expect(result.nodes).toEqual([]);
+    expect(result.nodesDataframe?.rowCount).toBe(1);
+    expect(result.truncated).toBe(false);
+    expect(result.frontier).toEqual([]);
+    expect(result.confirmedLeafCount).toBe(0);
+    expect(textOf(result)).toContain('## Nodes dataframe');
+  });
+
+  it('measures the actual serialized node and edge row renderers within the byte budget', async () => {
+    const ctx = await connect(fetcher);
+    serveFixture(fetcher, {
+      pedigree: {
+        R: {
+          parents: fanOut(200).map((relative) => ({
+            ...relative,
+            germplasmName: 'é\\"'.repeat(100),
+            parentType: 'é\\"'.repeat(100),
+          })),
+        },
+      },
+    });
+    const result = await walk(ctx, { germplasmDbIds: ['R'], maxDepth: 1, loadLimit: 1000 });
+    const text = textOf(result);
+    const lines = text.split('\n');
+    const nodeRows = lines.filter((line) => line.startsWith('- **')).join('\n');
+    const edgeRows = lines.filter((line) => line.includes(' · parent')).join('\n');
+    for (const section of [result.nodes, result.edges, nodeRows, edgeRows])
+      expect(Buffer.byteLength(JSON.stringify(section))).toBeLessThanOrEqual(24000);
+    expect(result.nodesDataframe?.rowCount).toBe(201);
+    expect(result.edgesDataframe?.rowCount).toBe(200);
+    expect(result.nodes.length).toBeLessThan(201);
+    expect(result.edges.length).toBeLessThan(200);
   });
 
   it('walks ancestors BFS, counting only unparented ancestors as leaves', async () => {
@@ -630,7 +893,7 @@ describe('brapi_walk_pedigree tool', () => {
     });
 
     expect(result.truncated).toBe(true);
-    expect(result.nodes.length).toBe(1000); // 1 root + 999 parents, then the cap stops registration
+    expect(result.nodesDataframe?.rowCount).toBe(1000); // Discovered graph: 1 root + 999 parents.
     expect(result.warnings.join('\n')).toContain('safety cap');
     expect(textOf(result)).toContain('truncated: true');
   });
@@ -661,7 +924,7 @@ describe('brapi_walk_pedigree tool', () => {
     const cpu = process.threadCpuUsage(cpuStart);
 
     expect(result.truncated).toBe(true);
-    expect(result.edges).toHaveLength(10_000);
+    expect(result.edgesDataframe?.rowCount).toBe(10_000);
     expect(result.nodes).toHaveLength(151);
     expect(result.cycleCount).toBe(0);
     expect(result.warnings.join('\n')).toContain('10000 edges');
@@ -696,7 +959,7 @@ describe('brapi_walk_pedigree tool', () => {
     expect(structured.rootCount).toBe(1);
     const nodes = structured.nodesDataframe!.tableName;
     const edges = structured.edgesDataframe!.tableName;
-    expect(structured.notice).toBe(
+    expect(structured.notice).toContain(
       `Staged dataframes \`${nodes}\` (21 rows) and \`${edges}\` (20 rows): list their columns with brapi_dataframe_describe, then query them with brapi_dataframe_query (SQL) — join germplasmDbId in \`${nodes}\` to from_ or to in \`${edges}\`.`,
     );
     const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
@@ -828,7 +1091,29 @@ describe('brapi_walk_pedigree tool', () => {
       expect(asked.warnings).toEqual([
         'Mermaid diagram omitted: the walk has 501 edges, past Mermaid\'s default limit of 500. Lower maxDepth, pass fewer germplasmDbIds, or request diagram: "dot".',
       ]);
-      expect({ ...asked, warnings: [] }).toEqual({ ...plain, warnings: [] });
+      const stable = (output: WalkOutput) => ({
+        ...output,
+        warnings: [],
+        nodesDataframe: output.nodesDataframe && {
+          ...output.nodesDataframe,
+          tableName: '',
+          createdAt: '',
+          expiresAt: '',
+        },
+        edgesDataframe: output.edgesDataframe && {
+          ...output.edgesDataframe,
+          tableName: '',
+          createdAt: '',
+          expiresAt: '',
+        },
+        frontierDataframe: output.frontierDataframe && {
+          ...output.frontierDataframe,
+          tableName: '',
+          createdAt: '',
+          expiresAt: '',
+        },
+      });
+      expect(stable(asked)).toEqual(stable(plain));
     });
 
     it('omits a DOT diagram past 50,000 characters with one warning, from both surfaces', async () => {

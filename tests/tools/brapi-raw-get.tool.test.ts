@@ -74,6 +74,79 @@ describe('brapi_raw_get tool', () => {
     expect(result.suggestion).toBeUndefined();
   });
 
+  it('bounds a wide explicit page, stages omitted rows, and preserves envelope siblings', async () => {
+    const ctx = await connect(fetcher);
+    const rows = Array.from({ length: 30 }, (_, n) => ({ n, value: 'é'.repeat(1000) }));
+    fetcher.mockResolvedValue(
+      jsonResponse(
+        envelope(
+          { data: rows, sibling: 'kept' },
+          { totalCount: 100, currentPage: 2, pageSize: 30, totalPages: 4 },
+        ),
+      ),
+    );
+    const definition = {
+      ...brapiRawGet,
+      handler: (input, contractCtx) =>
+        brapiRawGet.handler(input, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiRawGet;
+    const res = await runToolContract(
+      definition,
+      { path: '/samples', params: { page: 2, pageSize: 30 } },
+      { context: { tenantId: 't1' } },
+    );
+    expect(res.isError, JSON.stringify(res.structuredContent)).toBeFalsy();
+    const sc = res.structuredContent as {
+      result: { data: unknown[]; sibling: string };
+      dataframe: { rowCount: number };
+      shown: number;
+      notice: string;
+    };
+    expect(Buffer.byteLength(JSON.stringify(sc.result.data))).toBeLessThanOrEqual(24_000);
+    expect(sc.result.sibling).toBe('kept');
+    expect(sc.dataframe.rowCount).toBe(30);
+    expect(sc.shown).toBe(sc.result.data.length);
+    expect(sc.notice).toContain('requested upstream page');
+    expect(sc.notice).toContain('OFFSET 0');
+    const text = res.content.find((block) => block.type === 'text')?.text ?? '';
+    expect(Buffer.byteLength(JSON.stringify(text.split('## Raw result\n')[1]))).toBeLessThanOrEqual(
+      24_000,
+    );
+    expect(JSON.stringify(res.content)).toContain('24,000-byte');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains sparse pagination and metadata siblings when a first row exceeds the budget', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(
+      jsonResponse({
+        metadata: { pagination: { currentPage: 2 }, marker: 'kept' },
+        result: { data: [{ id: 'wide', value: 'é'.repeat(24_000) }], sibling: true },
+      }),
+    );
+    const definition = {
+      ...brapiRawGet,
+      handler: (input, contractCtx) =>
+        brapiRawGet.handler(input, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiRawGet;
+    const res = await runToolContract(
+      definition,
+      { path: '/samples', params: { page: 2 } },
+      { context: { tenantId: 't1' } },
+    );
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({
+      result: { data: [], sibling: true },
+      metadata: { pagination: { currentPage: 2 }, marker: 'kept' },
+      dataframe: { rowCount: 1 },
+      shown: 0,
+    });
+    expect(JSON.stringify(res.content)).toContain('narrower projection');
+    expect(JSON.stringify(res.content)).toContain('page 2');
+    expect(JSON.stringify(res.content)).not.toContain('undefined');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   it('emits a suggestion when the path is covered by a curated tool', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
@@ -232,7 +305,7 @@ describe('brapi_raw_get tool', () => {
       expect(text).toContain('Dataframe walk stopped after 10 of 25 upstream row(s)');
       expect(text).toContain(`**Warnings:**\n- ${warnings[0]}`);
       const tableName = (structured.dataframe as { tableName: string }).tableName;
-      expect(structured.notice).toBe(
+      expect(structured.notice).toContain(
         `Staged dataframe \`${tableName}\` (10 rows, truncated — warnings says why): list its columns with brapi_dataframe_describe, then query it with brapi_dataframe_query (SQL).`,
       );
       expect(text).toContain(`> ${structured.notice as string}`);
@@ -248,7 +321,7 @@ describe('brapi_raw_get tool', () => {
         rowCount: 25,
         tableName: expect.stringMatching(/^df_/),
       });
-      // Inline `result` is unchanged — raw passthrough preserves the upstream page.
+      // This narrow upstream page fits the inline row and byte limits.
       expect((structured.result as { data?: unknown[] }).data).toHaveLength(10);
       expect(structured).not.toHaveProperty('warnings');
       expect(structured.notice).toContain('brapi_dataframe_describe');

@@ -41,6 +41,7 @@ import {
   getCanvasBridge,
   SYSTEM_CATALOG_ACCESS_REASON,
 } from '@/services/canvas-bridge/index.js';
+import { selectPreviewRows } from '../shared/inline-preview.js';
 
 /**
  * Refusals that reach the caller as the typed `sql_rejected` contract reason,
@@ -145,7 +146,7 @@ const InputSchema = z.object({
     .regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/)
     .optional()
     .describe(
-      'Persist the result as a new dataframe under this name. The response still returns at most `preview` rows; the full result remains queryable as a new dataframe. Conflicts with an existing dataframe name fail — drop first via brapi_dataframe_drop. Identifier rules: letters, digits, and underscores; must start with a letter or underscore; max 63 characters.',
+      'Persist the full result as a new dataframe under this name. The response is bounded by preview and a 24,000-byte row budget. Conflicts fail — choose a different name, or remove the existing dataframe with brapi_dataframe_drop where this deployment enables it. Identifier rules: letters, digits, and underscores; must start with a letter or underscore; max 63 characters.',
     ),
   preview: z
     .number()
@@ -191,7 +192,9 @@ const OutputSchema = z.object({
           'One result row. Columns are projected from the SQL SELECT clause; call brapi_dataframe_describe to inspect source dataframe schemas.',
         ),
     )
-    .describe('Materialized rows, bounded by preview/rowLimit.'),
+    .describe(
+      'Leading rows bounded by preview/rowLimit and 24,000 bytes on each serialized row representation. May be empty when the first row is oversized.',
+    ),
   dataframe: z
     .string()
     .optional()
@@ -210,7 +213,7 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'SQL broke the read-only rules: more than one statement, a non-SELECT, a disallowed operation or function, a file or URL named as a table, a system-catalog read, or a DESCRIBE, SUMMARIZE, or SHOW statement',
       recovery:
-        'Submit a single SELECT statement using only registered dataframes. For changes, use `registerAs` in this tool to materialize a result, or brapi_dataframe_drop to remove a dataframe.',
+        'Submit a single SELECT statement using only registered dataframes. Materialize changes under a different `registerAs` name, or remove an existing dataframe with brapi_dataframe_drop where this deployment enables it.',
     },
     {
       reason: 'sql_execution_error',
@@ -318,32 +321,36 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
       }
     }
 
+    const cap = Math.min(input.preview ?? Infinity, bridge.queryRowLimit(input.rowLimit));
+    const selection = selectPreviewRows(result.rows, cap, (rows) =>
+      renderQueryRows(rows, typedColumns),
+    );
     const out: z.infer<typeof OutputSchema> = {
       rowCount: result.rowCount,
       columns: typedColumns,
-      rows: result.rows,
+      rows: selection.rows,
     };
     if (userRegisterAs !== undefined) out.dataframe = userRegisterAs;
 
     if (out.rows.length < out.rowCount) {
-      // Three ceilings can bind here — `preview`, the caller's `rowLimit`, and
-      // the deployment-wide cap the bridge clamps both to — and the rows that
-      // came back are exactly the one that did, so report that count as the
-      // cap and name the lever that produced it.
       const shown = out.rows.length;
       const lever =
-        input.preview !== undefined && shown === input.preview
-          ? '`preview`'
-          : input.rowLimit !== undefined && shown === input.rowLimit
-            ? '`rowLimit`'
-            : 'The deployment-wide response cap';
+        selection.bound === 'budget'
+          ? 'The 24,000-byte inline budget'
+          : input.preview !== undefined && cap === input.preview
+            ? '`preview`'
+            : input.rowLimit !== undefined && cap === input.rowLimit
+              ? '`rowLimit`'
+              : 'The deployment-wide response cap';
       ctx.enrich.truncated({
         shown,
-        cap: shown,
+        cap,
         guidance: `${lever} bound the response at ${shown} of ${out.rowCount} rows. ${
-          userRegisterAs
-            ? `Query \`${userRegisterAs}\` with LIMIT/OFFSET to walk the remainder, or aggregate instead of materializing it.`
-            : 'Re-run with `registerAs` to keep the full result queryable, then page it with LIMIT/OFFSET.'
+          shown === 0
+            ? 'Use a narrower projection (SELECT only the needed columns) or aggregate before retrying.'
+            : userRegisterAs
+              ? `Query \`${userRegisterAs}\` with a deterministic ORDER BY and LIMIT/OFFSET starting at OFFSET 0, then advance OFFSET by rows actually shown by each ordered SQL call. Use a narrower projection or aggregate to reduce row width.`
+              : 'Re-run with `registerAs` to keep the full result queryable, then query that table with a deterministic ORDER BY and LIMIT/OFFSET, advancing OFFSET by the actual rows shown. Use a narrower projection to reduce row width.'
         }`,
       });
     }
@@ -397,11 +404,19 @@ function renderQuery(result: z.infer<typeof OutputSchema>): string {
     return lines.join('\n');
   }
   lines.push('');
-  lines.push('## Rows');
-  for (const [i, row] of result.rows.entries()) {
+  lines.push(renderQueryRows(result.rows, result.columns));
+  return lines.join('\n');
+}
+
+function renderQueryRows(
+  rows: readonly Record<string, unknown>[],
+  columns: readonly { name: string }[],
+): string {
+  const lines = ['## Rows'];
+  for (const [i, row] of rows.entries()) {
     lines.push('');
     lines.push(`### Row ${i + 1}`);
-    for (const col of result.columns) {
+    for (const col of columns) {
       const value = row[col.name];
       if (value === undefined || value === null) continue;
       const rendered = typeof value === 'object' ? JSON.stringify(value) : String(value);

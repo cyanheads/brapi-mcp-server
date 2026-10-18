@@ -540,8 +540,16 @@ describe('brapi_export_genotype_matrix tool', () => {
     // The operator's ceiling wins over the caller's override.
     expect(result.rowCount).toBeLessThanOrEqual(2);
     expect(result.dataframe.maxRows).toBe(2);
-    expect(result.warnings.some((w) => w.includes('BRAPI_GENOTYPE_CALLS_MAX_PULL=2'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes("deployment's genotype-call ceiling (2)"))).toBe(
+      true,
+    );
+    expect(JSON.stringify(result.warnings)).not.toContain('BRAPI_');
     expect(result.warnings.some((w) => w.includes('capped at 2 calls'))).toBe(true);
+  });
+
+  it('describes deployment ceilings without operator environment names', () => {
+    expect(brapiExportGenotypeMatrix.input.shape.maxCalls.description).not.toContain('BRAPI_');
+    expect(brapiExportGenotypeMatrix.input.shape.maxColumns.description).not.toContain('BRAPI_');
   });
 
   it('honors a maxCalls that lowers the pull below the ceiling, without warning', async () => {
@@ -596,6 +604,7 @@ describe('brapi_export_genotype_matrix tool', () => {
       brapiExportGenotypeMatrix.input.parse({
         variantSetDbId: 'vset-1',
         format: 'matrix-json',
+        maxColumns: 100,
       }),
       ctx,
     );
@@ -608,6 +617,13 @@ describe('brapi_export_genotype_matrix tool', () => {
     // `maxRows` stays row-scoped — a pure column cap never sets it.
     expect(result.dataframe.maxRows).toBeUndefined();
     expect(result.warnings.some((w) => w.includes('more than 2 distinct variants'))).toBe(true);
+    expect(
+      result.warnings.some((w) => w.includes("deployment's genotype-matrix column ceiling (2)")),
+    ).toBe(true);
+    expect(JSON.stringify(result.warnings)).not.toContain('BRAPI_');
+    expect(JSON.stringify(brapiExportGenotypeMatrix.format(result))).toContain(
+      'column ceiling (2)',
+    );
     // The single germplasm row survives; only beyond-cap variant columns drop.
     expect(result.rowCount).toBe(1);
     expect(result.dataframe.columns).toContain('germplasmDbId');

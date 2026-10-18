@@ -35,6 +35,7 @@ import {
   stagedDataframeNotice,
   toDataframeHandle,
 } from '../shared/find-helpers.js';
+import { selectPreviewRows } from '../shared/inline-preview.js';
 import { renderPedigreeDiagram } from '../shared/pedigree-diagram.js';
 
 const DEFAULT_MAX_DEPTH = 3;
@@ -89,6 +90,31 @@ const EdgeSchema = z
   })
   .describe('One parent–child pair, recorded once whichever side found it.');
 
+const FrontierSchema = z
+  .object({
+    germplasmDbId: z.string().describe('Expansion node identifier.'),
+    side: z.enum(['ancestor', 'descendant']).describe('Direction not fully expanded.'),
+    outcome: z
+      .enum(['depth_limited', 'safety_skipped', 'failed', 'unsupported'])
+      .describe('Why this direction remains unresolved.'),
+    knownOmittedRelativeCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe(
+        'Already-fetched relatives omitted from the discovered graph; absent when not requested or failed.',
+      ),
+    error: z.string().optional().describe('Failure message for a failed expansion.'),
+  })
+  .describe('One unresolved expansion direction, distinct from a confirmed empty lookup.');
+
+const SnapshotHandleSchema = DataframeHandleSchema.omit({
+  truncated: true,
+  maxRows: true,
+  totalCount: true,
+});
+
 const OutputSchema = z.object({
   alias: z.string().describe('Connection alias the call used.'),
   direction: z
@@ -102,9 +128,13 @@ const OutputSchema = z.object({
   nodes: z
     .array(NodeSchema)
     .describe(
-      'Deduplicated node list — every germplasm reached by the walk, sorted by depth then DbId.',
+      'Discovered nodes sorted by depth/DbId. Preview fits loadLimit and 24,000 bytes for array JSON and serialized row text; nodesDataframe retains omitted rows.',
     ),
-  edges: z.array(EdgeSchema).describe('One edge per parent–child pair.'),
+  edges: z
+    .array(EdgeSchema)
+    .describe(
+      'One edge per discovered pair. Preview independently fits loadLimit and 24,000 bytes for array JSON and serialized row text; edgesDataframe retains omitted rows.',
+    ),
   depthReached: z
     .number()
     .int()
@@ -120,6 +150,36 @@ const OutputSchema = z.object({
     .describe(
       'Non-root nodes with nothing recorded beyond them: ancestors with no parents, descendants with no progeny (a node on both sides needs neither). Includes nodes the depth limit stopped at.',
     ),
+  confirmedLeafCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe(
+      'Non-root nodes with successful empty lookups on every reached side; unresolved directions never confirm leaves.',
+    ),
+  frontierCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe('Unresolved node/side expansions across the full walk.'),
+  frontier: z
+    .array(FrontierSchema)
+    .describe(
+      'Bounded preview of unresolved directions; frontierDataframe retains omitted entries.',
+    ),
+  frontierDataframe: SnapshotHandleSchema.optional().describe(
+    'Every unresolved node/side expansion, with ordinal ordering.',
+  ),
+  knownOmittedRelativeCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe(
+      'Distinct fetched relative IDs per expansion node/side omitted by safety limits; unrequested counts remain unknown.',
+    ),
+  omittedRelativesDataframe: SnapshotHandleSchema.optional().describe(
+    'Fetched omitted relatives with ordinal, germplasmDbId, expansionNodeDbId and side; not an unvisited graph or resumable walk.',
+  ),
   cycleCount: z
     .number()
     .int()
@@ -146,13 +206,13 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Mermaid (`flowchart …`) or DOT (`digraph …`) source for the whole walk, nodes and edges past loadLimit included; present when `diagram` was requested. A diagram past 50,000 characters, or a Mermaid one past 500 edges, is omitted with a warning.',
+      'Requested Mermaid or DOT for the discovered graph, beyond previews; partial when capped. Omitted with a warning past 50,000 characters, or 500 edges for Mermaid.',
     ),
   nodesDataframe: DataframeHandleSchema.optional().describe(
-    'The full node set, staged when the walk exceeds loadLimit; nodes[] is then a bounded preview. JOIN its germplasmDbId to the edges dataframe on from_ or to.',
+    'Discovered nodes when either preview is trimmed; truncated marks partial traversal. No unvisited relatives. JOIN germplasmDbId to the edge table on from_ or to.',
   ),
   edgesDataframe: DataframeHandleSchema.optional().describe(
-    'The full edge set, staged when the walk exceeds loadLimit; edges[] is then a bounded preview. Reserved-word columns are renamed (`from` → `from_`; see columnLegend).',
+    'Discovered edges when either preview is trimmed; truncated marks partial traversal. SQL renames from to from_; see columnLegend.',
   ),
 });
 
@@ -160,7 +220,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
   description:
-    'Walk germplasm ancestry or descendancy as a deduplicated DAG, with multi-generation traversal, cycle detection, and depth limits. Returns one edge per parent–child pair plus traversal stats (depthReached, rootCount, leafCount, cycleCount, deadEndCount), and optionally the walk as a Mermaid or Graphviz diagram. A walk larger than loadLimit stages its nodes and edges as two dataframes — read them with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
+    'Walk germplasm ancestry or descendancy as a deduplicated DAG with cycle detection and depth limits. leafCount counts graph terminals, confirmedLeafCount counts successfully verified leaves, and frontier records unresolved directions. Nodes and edges each fit loadLimit and a 24,000-byte preview budget; trimmed discovered graphs and already-fetched omitted relatives are staged for brapi_dataframe_describe and brapi_dataframe_query (SQL). Diagrams describe only the discovered graph, never unvisited relatives.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -257,7 +317,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
         'Also return the walk as diagram source: `mermaid` (flowchart) or `dot` (Graphviz). Edges point parent → child, roots are bold, loop-closing edges are dashed. Omit for no diagram.',
       ),
     loadLimit: LoadLimitInput.describe(
-      'Cap on rows returned inline. Omit for the deployment default. Rows beyond the cap land in a dataframe; query with brapi_dataframe_query (SQL) instead of paging row-by-row.',
+      'Row ceiling for each inline graph/frontier preview, also bounded by a 24,000-byte budget. Omit for the deployment default. A first row exceeding the byte budget yields zero preview rows; retrieve narrower projections from the staged dataframe.',
     ),
     alias: AliasInput,
   }),
@@ -267,7 +327,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     notice: z
       .string()
       .optional()
-      .describe('When the walk was staged, the node and edge dataframes and how to read them.'),
+      .describe('Staged graph, frontier or omitted-relative tables and how to read them.'),
   },
 
   async handler(input, ctx) {
@@ -336,7 +396,16 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     let deadEndCount = 0;
     let depthReached = 0;
 
-    depthLoop: for (let depth = 1; depth <= input.maxDepth; depth++) {
+    const frontier: z.infer<typeof FrontierSchema>[] = [];
+    const confirmed = { ancestor: new Set<string>(), descendant: new Set<string>() };
+    const omitted: (Relative & { ordinal: number; expansionNodeDbId: string; side: Side })[] = [];
+    for (const id of state.nodes.keys()) {
+      if (wantsAncestors && !hasPedigree)
+        frontier.push({ germplasmDbId: id, side: 'ancestor', outcome: 'unsupported' });
+      if (wantsDescendants && !hasProgeny)
+        frontier.push({ germplasmDbId: id, side: 'descendant', outcome: 'unsupported' });
+    }
+    for (let depth = 1; depth <= input.maxDepth; depth++) {
       const upward = state.frontier.ancestor;
       const downward = state.frontier.descendant;
       state.frontier = { ancestor: new Set(), descendant: new Set() };
@@ -345,6 +414,10 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       if (atCap(state)) {
         // Already at the cap from a prior depth — skip fetching another round.
         truncated = true;
+        for (const side of ['ancestor', 'descendant'] as const) {
+          for (const id of side === 'ancestor' ? upward : downward)
+            frontier.push({ germplasmDbId: id, side, outcome: 'safety_skipped' });
+        }
         break;
       }
 
@@ -362,45 +435,70 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       );
 
       for (const result of exp) {
-        if (result.kind === 'deadEnd') {
+        if (result.failures.length > 0) {
           deadEndCount++;
-          warnings.push(`Expansion failed for ${result.id}: ${result.error}`);
-          continue;
+          for (const failure of result.failures) {
+            warnings.push(`Expansion failed for ${result.id} (${failure.side}): ${failure.error}`);
+            frontier.push({
+              germplasmDbId: result.id,
+              side: failure.side,
+              outcome: 'failed',
+              error: failure.error,
+            });
+          }
         }
         const expanded = state.nodes.get(result.id);
         if (expanded && !expanded.germplasmName && result.germplasmName) {
           expanded.germplasmName = result.germplasmName;
         }
 
-        for (const parent of result.parents) {
-          // Hard ceiling: one high-fertility germplasm can enumerate thousands
-          // of parents/children within a single depth, so enforce the cap
-          // per-registration — a depth-boundary check alone lets nodes.size
-          // overshoot MAX_NODES before the next iteration runs.
-          if (atCap(state)) {
-            truncated = true;
-            break depthLoop;
+        for (const side of ['ancestor', 'descendant'] as const) {
+          const relatives = side === 'ancestor' ? result.parents : result.children;
+          if (!relatives) continue;
+          if (relatives.length === 0) confirmed[side].add(result.id);
+          let omittedCount = 0;
+          const seenRelatives = new Set<string>();
+          for (const relative of relatives) {
+            if (seenRelatives.has(relative.germplasmDbId)) continue;
+            seenRelatives.add(relative.germplasmDbId);
+            const parentId = side === 'ancestor' ? relative.germplasmDbId : result.id;
+            const childId = side === 'ancestor' ? result.id : relative.germplasmDbId;
+            if (atCap(state) && !state.edges.has(pairKey(parentId, childId))) {
+              truncated = true;
+              omitted.push({
+                ...relative,
+                ordinal: omitted.length,
+                expansionNodeDbId: result.id,
+                side,
+              });
+              omittedCount++;
+            } else if (link(state, side, parentId, childId, relative, depth)) {
+              depthReached = depth;
+            }
           }
-          if (link(state, 'ancestor', parent.germplasmDbId, result.id, parent, depth)) {
-            depthReached = depth;
-          }
-        }
-
-        for (const child of result.children) {
-          if (atCap(state)) {
-            truncated = true;
-            break depthLoop;
-          }
-          if (link(state, 'descendant', result.id, child.germplasmDbId, child, depth)) {
-            depthReached = depth;
-          }
+          if (omittedCount > 0)
+            frontier.push({
+              germplasmDbId: result.id,
+              side,
+              outcome: 'safety_skipped',
+              knownOmittedRelativeCount: omittedCount,
+            });
         }
       }
     }
 
+    for (const side of ['ancestor', 'descendant'] as const) {
+      for (const id of state.frontier[side])
+        frontier.push({
+          germplasmDbId: id,
+          side,
+          outcome: 'depth_limited',
+        });
+    }
+
     if (truncated) {
       warnings.push(
-        `Walk stopped at its safety cap (${MAX_NODES} nodes or ${MAX_EDGES} edges); the returned DAG is partial. Re-run with fewer roots or a lower maxDepth to stay within the cap.`,
+        `Walk stopped at its safety cap (${MAX_NODES} nodes or ${MAX_EDGES} edges); the discovered DAG and diagram are partial. ${omitted.length} already-fetched relative entries were omitted; unrequested directions have unknown coverage. Retrieve omitted IDs from their dataframe and walk them in batches of up to 20 roots.`,
       );
     }
 
@@ -410,6 +508,16 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     const edges = Array.from(state.edges.values());
     const cycleCount = edges.filter((edge) => edge.isCycle).length;
     const leafCount = computeLeafCount(nodes, edges);
+    const confirmedLeafCount = nodes.filter(
+      (node) =>
+        !node.isRoot &&
+        (node.direction === 'ancestor'
+          ? confirmed.ancestor.has(node.germplasmDbId)
+          : node.direction === 'descendant'
+            ? confirmed.descendant.has(node.germplasmDbId)
+            : confirmed.ancestor.has(node.germplasmDbId) &&
+              confirmed.descendant.has(node.germplasmDbId)),
+    ).length;
 
     let diagram: string | undefined;
     if (input.diagram) {
@@ -418,22 +526,24 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       else warnings.push(rendered.reason);
     }
 
-    // Spillover: when the full graph exceeds loadLimit, materialize the node
-    // and edge sets as two canvas dataframes (JOINable on germplasmDbId) and
-    // return a bounded preview inline — mirrors the find_* pattern. The stats
-    // above still describe the full walk; small walks stay inline-only.
+    // Both graph arrays and their actual rendered rows must fit each preview.
+    // Stats and diagrams continue to describe the discovered graph.
     const loadLimit = input.loadLimit ?? getServerConfig().loadLimit;
-    let previewNodes = nodes;
-    let previewEdges = edges;
+    const selectedNodes = selectPreviewRows(nodes, loadLimit, renderNodeRows);
+    const selectedEdges = selectPreviewRows(edges, loadLimit, renderEdgeRows);
+    const previewNodes = selectedNodes.rows;
+    const previewEdges = selectedEdges.rows;
     let nodesDataframe: DataframeHandle | undefined;
     let edgesDataframe: DataframeHandle | undefined;
-    if (nodes.length > loadLimit || edges.length > loadLimit) {
+    const notices: string[] = [];
+    const query = {
+      germplasmDbIds: input.germplasmDbIds,
+      direction: input.direction,
+      maxDepth: input.maxDepth,
+      coverage: truncated ? 'partial_discovered_graph' : 'discovered_graph',
+    };
+    if (selectedNodes.bound || selectedEdges.bound) {
       const bridge = getCanvasBridge();
-      const query = {
-        germplasmDbIds: input.germplasmDbIds,
-        direction: input.direction,
-        maxDepth: input.maxDepth,
-      };
       // Register sequentially, not in parallel: the first call resolves and
       // caches the default canvas in ctx.state; a concurrent second call would
       // race that cache and land the two tables on different canvases, breaking
@@ -446,7 +556,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
           rows: nodes,
         });
         nodesDataframe = toDataframeHandle(reg, nodes.length);
-        previewNodes = nodes.slice(0, loadLimit);
+        if (truncated) nodesDataframe.truncated = true;
       }
       if (edges.length > 0) {
         const reg = await bridge.registerDataframe(ctx, {
@@ -457,13 +567,13 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
           rows: edges.map((edge) => ({ ...edge, isCycle: edge.isCycle === true })),
         });
         edgesDataframe = toDataframeHandle(reg, edges.length);
-        previewEdges = edges.slice(0, loadLimit);
+        if (truncated) edgesDataframe.truncated = true;
       }
       const staged = [nodesDataframe, edgesDataframe].filter(
         (df): df is DataframeHandle => df !== undefined,
       );
       if (staged.length > 0) {
-        ctx.enrich.notice(
+        notices.push(
           stagedDataframeNotice(
             staged,
             nodesDataframe && edgesDataframe
@@ -472,7 +582,41 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
           ),
         );
       }
+      notices.push(
+        `Inline previews use loadLimit=${loadLimit} and a 24,000-byte budget for each node/edge array and its rendered rows (nodes: ${selectedNodes.bound ?? 'fits'}, edges: ${selectedEdges.bound ?? 'fits'}). Tables contain the discovered graph only${truncated ? ', partial because a safety cap stopped traversal' : ', within the requested depth and available directions'}. In brapi_dataframe_query, order nodes by depth, germplasmDbId and edges by from_, to. Start at OFFSET 0 and advance by rows actually shown; if zero fit, use a narrower projection or aggregation.`,
+      );
     }
+
+    const selectedFrontier = selectPreviewRows(frontier, loadLimit, renderFrontierRows);
+    let frontierDataframe: DataframeHandle | undefined;
+    let omittedRelativesDataframe: DataframeHandle | undefined;
+    for (const entry of [
+      {
+        source: 'walk_pedigree_frontier',
+        rows: selectedFrontier.bound ? frontier.map((row, ordinal) => ({ ordinal, ...row })) : [],
+      },
+      { source: 'walk_pedigree_omitted_relatives', rows: omitted },
+    ]) {
+      if (entry.rows.length === 0) continue;
+      const reg = await getCanvasBridge().registerDataframe(ctx, {
+        source: entry.source,
+        baseUrl: connection.baseUrl,
+        query,
+        rows: entry.rows.map((row) => ({ ...row })),
+      });
+      const handle = toDataframeHandle(reg);
+      if (entry.source === 'walk_pedigree_frontier') frontierDataframe = handle;
+      else omittedRelativesDataframe = handle;
+      notices.push(stagedDataframeNotice([handle]));
+      const columns =
+        entry.source === 'walk_pedigree_frontier'
+          ? 'germplasmDbId, side, outcome'
+          : 'germplasmDbId, expansionNodeDbId, side';
+      notices.push(
+        `Read ${entry.source === 'walk_pedigree_frontier' ? 'unresolved directions' : 'already-fetched omitted relatives'} with brapi_dataframe_query: SELECT ${columns} FROM ${handle.tableName} ORDER BY ordinal LIMIT 20 OFFSET 0; advance OFFSET by rows actually shown. If zero rows fit, use a narrower projection or aggregation. Unrequested relatives have no known count; these tables do not resume traversal.`,
+      );
+    }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     const result: Output = {
       alias: connection.alias,
@@ -483,6 +627,10 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       depthReached,
       rootCount: input.germplasmDbIds.length,
       leafCount,
+      confirmedLeafCount,
+      frontier: selectedFrontier.rows,
+      frontierCount: frontier.length,
+      knownOmittedRelativeCount: omitted.length,
       cycleCount,
       deadEndCount,
       truncated,
@@ -490,6 +638,8 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     };
     if (nodesDataframe) result.nodesDataframe = nodesDataframe;
     if (edgesDataframe) result.edgesDataframe = edgesDataframe;
+    if (frontierDataframe) result.frontierDataframe = frontierDataframe;
+    if (omittedRelativesDataframe) result.omittedRelativesDataframe = omittedRelativesDataframe;
     if (diagram !== undefined) result.diagram = diagram;
     return result;
   },
@@ -505,6 +655,9 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     lines.push(`- edges: ${result.edges.length}`);
     lines.push(`- rootCount: ${result.rootCount}`);
     lines.push(`- leafCount: ${result.leafCount}`);
+    lines.push(`- confirmedLeafCount: ${result.confirmedLeafCount}`);
+    lines.push(`- frontierCount: ${result.frontierCount}`);
+    lines.push(`- knownOmittedRelativeCount: ${result.knownOmittedRelativeCount}`);
     lines.push(`- cycleCount: ${result.cycleCount}`);
     lines.push(`- deadEndCount: ${result.deadEndCount}`);
     lines.push(`- truncated: ${result.truncated}`);
@@ -516,13 +669,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
           ? `## Nodes (preview — ${result.nodes.length} of ${result.nodesDataframe.rowCount}; full set in dataframe \`${result.nodesDataframe.tableName}\`)`
           : '## Nodes',
       );
-      for (const node of result.nodes) {
-        const parts: string[] = [`**${node.germplasmName ?? node.germplasmDbId}**`];
-        parts.push(`id=\`${node.germplasmDbId}\``);
-        parts.push(`depth=${node.depth}`);
-        parts.push(node.direction);
-        lines.push(`- ${parts.join(' · ')}`);
-      }
+      lines.push(renderNodeRows(result.nodes));
     }
 
     if (result.edges.length > 0) {
@@ -532,14 +679,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
           ? `## Edges (preview — ${result.edges.length} of ${result.edgesDataframe.rowCount}; full set in dataframe \`${result.edgesDataframe.tableName}\`)`
           : '## Edges',
       );
-      for (const edge of result.edges) {
-        const suffix = edge.parentType ? ` (${edge.parentType})` : '';
-        const arrow = edge.relationship === 'parent' ? '→' : '←';
-        const cycle = edge.isCycle ? ' · isCycle' : '';
-        lines.push(
-          `- \`${edge.from}\` ${arrow} \`${edge.to}\` · ${edge.relationship}${suffix}${cycle}`,
-        );
-      }
+      lines.push(renderEdgeRows(result.edges));
     }
 
     if (result.nodesDataframe) {
@@ -553,6 +693,16 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       lines.push('## Edges dataframe');
       lines.push(...renderDataframeHandle(result.edgesDataframe));
     }
+    if (result.frontierCount > 0)
+      lines.push('', '## Unresolved directions', renderFrontierRows(result.frontier));
+    if (result.frontierDataframe)
+      lines.push('', '## Frontier dataframe', ...renderDataframeHandle(result.frontierDataframe));
+    if (result.omittedRelativesDataframe)
+      lines.push(
+        '',
+        '## Fetched omitted relatives dataframe',
+        ...renderDataframeHandle(result.omittedRelativesDataframe),
+      );
 
     if (result.diagram !== undefined) {
       // Every source line starts with renderer syntax, so the fence can't close early.
@@ -573,6 +723,33 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
 type PedigreeNode = z.infer<typeof NodeSchema>;
 type PedigreeEdge = z.infer<typeof EdgeSchema>;
 type Side = 'ancestor' | 'descendant';
+
+function renderNodeRows(nodes: readonly PedigreeNode[]): string {
+  return nodes
+    .map(
+      (node) =>
+        `- **${node.germplasmName ?? node.germplasmDbId}** · id=\`${node.germplasmDbId}\` · depth=${node.depth} · ${node.direction}`,
+    )
+    .join('\n');
+}
+
+function renderEdgeRows(edges: readonly PedigreeEdge[]): string {
+  return edges
+    .map(
+      (edge) =>
+        `- \`${edge.from}\` ${edge.relationship === 'parent' ? '→' : '←'} \`${edge.to}\` · ${edge.relationship}${edge.parentType ? ` (${edge.parentType})` : ''}${edge.isCycle ? ' · isCycle' : ''}`,
+    )
+    .join('\n');
+}
+
+function renderFrontierRows(frontier: readonly z.infer<typeof FrontierSchema>[]): string {
+  return frontier
+    .map(
+      (entry) =>
+        `- \`${entry.germplasmDbId}\` · ${entry.side} · ${entry.outcome}${entry.knownOmittedRelativeCount !== undefined ? ` · known omitted relatives=${entry.knownOmittedRelativeCount}` : ''}${entry.error ? ` · ${entry.error}` : ''}`,
+    )
+    .join('\n');
+}
 
 interface WalkState {
   /** Parent → children over every recorded pair, for loop detection. */
@@ -741,16 +918,14 @@ interface Relative {
 
 type LookupEnvelope = BrapiEnvelope<Record<string, unknown> | null>;
 
-type Expansion =
-  | {
-      kind: 'ok';
-      id: string;
-      /** The expanded germplasm's own name, from its /pedigree or /progeny response. */
-      germplasmName?: string;
-      parents: Relative[];
-      children: Relative[];
-    }
-  | { kind: 'deadEnd'; id: string; error: string };
+type Expansion = {
+  id: string;
+  /** The expanded germplasm's own name, from its /pedigree or /progeny response. */
+  germplasmName?: string;
+  parents?: Relative[];
+  children?: Relative[];
+  failures: { side: Side; error: string }[];
+};
 
 interface ExpandInput {
   client: BrapiClient;
@@ -763,32 +938,31 @@ interface ExpandInput {
 }
 
 async function expandNode(id: string, input: ExpandInput): Promise<Expansion> {
-  try {
-    const [pedigree, progeny] = await Promise.all([
-      input.walkAncestors
-        ? (input.pedigree ??
-          requestLookup(input.client, input.connection, id, 'pedigree', input.ctx))
-        : undefined,
-      input.walkDescendants
-        ? requestLookup(input.client, input.connection, id, 'progeny', input.ctx)
-        : undefined,
-    ]);
-    const expansion: Expansion = {
-      kind: 'ok',
-      id,
-      parents: pedigree ? readRelatives(pedigree.result?.parents) : [],
-      children: progeny ? readProgeny(progeny.result) : [],
-    };
-    const name = selfName(pedigree) ?? selfName(progeny);
-    if (name) expansion.germplasmName = name;
-    return expansion;
-  } catch (err) {
-    return {
-      kind: 'deadEnd',
-      id,
-      error: err instanceof Error ? err.message : String(err),
-    };
+  const lookups = await Promise.allSettled([
+    input.walkAncestors
+      ? (input.pedigree ?? requestLookup(input.client, input.connection, id, 'pedigree', input.ctx))
+      : undefined,
+    input.walkDescendants
+      ? requestLookup(input.client, input.connection, id, 'progeny', input.ctx)
+      : undefined,
+  ]);
+  input.ctx.signal?.throwIfAborted();
+  const expansion: Expansion = { id, failures: [] };
+  for (const [index, lookup] of lookups.entries()) {
+    const side = index === 0 ? 'ancestor' : 'descendant';
+    if (lookup.status === 'rejected') {
+      expansion.failures.push({
+        side,
+        error: lookup.reason instanceof Error ? lookup.reason.message : String(lookup.reason),
+      });
+    } else if (lookup.value) {
+      if (side === 'ancestor') expansion.parents = readRelatives(lookup.value.result?.parents);
+      else expansion.children = readProgeny(lookup.value.result);
+      const name = selfName(lookup.value);
+      if (name && !expansion.germplasmName) expansion.germplasmName = name;
+    }
   }
+  return expansion;
 }
 
 function requestLookup(
