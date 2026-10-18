@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-10-04 05:56:01
+Generated on: 2026-10-18 00:52:12
 
 ```text
 brapi-mcp-server/
@@ -32,6 +32,7 @@ brapi-mcp-server/
 │   ├── 0.6.x/
 │   ├── 0.7.x/
 │   ├── 0.8.x/
+│   ├── 0.9.x/
 │   └── template.md
 ├── docs/
 ├── framework-skills/
@@ -193,10 +194,12 @@ brapi-mcp-server/
 │   │           ├── genotype-calls.ts
 │   │           ├── observations.ts
 │   │           ├── orientation-envelope.ts
+│   │           ├── pedigree-diagram.ts
 │   │           └── raw-routing-hints.ts
 │   ├── services/
 │   │   ├── brapi-client/
 │   │   │   ├── brapi-client.ts
+│   │   │   ├── call-deadline.ts
 │   │   │   ├── index.ts
 │   │   │   └── types.ts
 │   │   ├── brapi-dialect/
@@ -276,7 +279,8 @@ brapi-mcp-server/
 │   │   ├── shared/
 │   │   │   ├── find-helpers.test.ts
 │   │   │   ├── observations.test.ts
-│   │   │   └── orientation-envelope.test.ts
+│   │   │   ├── orientation-envelope.test.ts
+│   │   │   └── pedigree-diagram.test.ts
 │   │   ├── _tool-test-helpers.ts
 │   │   ├── brapi-build-phenotype-matrix.tool.test.ts
 │   │   ├── brapi-connect.tool.test.ts
@@ -304,6 +308,7 @@ brapi-mcp-server/
 │   │   ├── brapi-submit-observations.tool.test.ts
 │   │   ├── brapi-walk-pedigree.tool.test.ts
 │   │   └── security.test.ts
+│   ├── index.test.ts
 │   └── registration-gate.test.ts
 ├── .dockerignore
 ├── .env.example

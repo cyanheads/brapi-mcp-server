@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.0](changelog/0.9.x/0.9.0.md) — 2026-10-17 · ⚠️ Breaking · 🛡️ Security
+
+find_* inline results fit a 24,000-byte budget with the rest staged as a dataframe, every upstream request in a call shares one 50 s deadline, configured aliases connect on first use, and observation tools page past page one. brapi_dataframe_query now refuses current_setting, query_table, and read_duckdb. Adopts mcp-ts-core ^0.13.15.
+
 ## [0.8.1](changelog/0.8.x/0.8.1.md) — 2026-10-04 · 🛡️ Security
 
 Apply-mode brapi_submit_observations writes now proceed only on the round that redeems a single-use consent record of the prompt, so a pre-supplied or replayed confirmation asks again. Adopts @cyanheads/mcp-ts-core ^0.13.11.
