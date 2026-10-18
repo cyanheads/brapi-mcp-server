@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.1](changelog/0.9.x/0.9.1.md) — 2026-10-18
+
+Preserve SGN observation completeness and resolve study program metadata.
+
 ## [0.9.0](changelog/0.9.x/0.9.0.md) — 2026-10-17 · ⚠️ Breaking · 🛡️ Security
 
 find_* inline results fit a 24,000-byte budget with the rest staged as a dataframe, upstream requests in a call share one 50 s deadline, configured aliases connect on first use, and phenotype tools page past page one. brapi_dataframe_query refuses current_setting, current_schema(s), in_search_path, and query_table. Adopts mcp-ts-core ^0.13.15.

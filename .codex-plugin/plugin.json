@@ -1,6 +1,6 @@
 {
   "name": "brapi-mcp-server",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "A collaborative BrAPI v2.1 workspace for multi-agent research via MCP. Search studies, germplasm, genotypes, and more across Breedbase, T3, Sweetpotatobase, and any BrAPI v2-compliant server.",
   "author": {
     "name": "Casey Hand",
