@@ -12,8 +12,9 @@
  *      `germplasmDbId` there, and a server that ignores `studyDbId` too returns
  *      its whole observation set, so a match can sit on any page. The walk
  *      stops at `loadLimit` matching rows. A stop before `totalCount` (that
- *      limit, the page cap, a failed later page, or the call deadline) keeps
- *      the collected rows and reports a truncation with the rows examined.
+ *      limit, the page cap, a failed later page, a page repeating the previous
+ *      one, or the call deadline) keeps the collected rows and reports a
+ *      truncation with the rows examined.
  *   2. Fall back to `/observationunits?studyDbId=…` with embedded
  *      `observations[]` arrays when `/observations` returns no rows, fails with
  *      a non-timeout error, or the dialect drops the study filter — required
@@ -52,6 +53,7 @@ import {
   type BrapiListResult,
   buildRequestOptions,
   extractRows,
+  firstRowKey,
   MAX_SPILLOVER_PAGES,
   mergeFilters,
 } from './find-helpers.js';
@@ -91,7 +93,7 @@ export interface ObservationPullFilters {
 
 /** Why and where a study's `/observations` walk stopped before the upstream total. */
 export interface StudyTruncation {
-  /** What stopped the walk — the loadLimit, the page cap, or a failed page. */
+  /** What stopped the walk — the loadLimit, the page cap, a failed, empty, or repeated page. */
   reason: string;
   /** Rows examined before stopping (matching or not). */
   scanned: number;
@@ -444,8 +446,9 @@ function matcher(input: ObservationPullFilters, studyDbId: string): (o: NormObs)
  * match the study and the caller's subsets, until the study is exhausted or
  * `loadLimit` matching rows are collected. `scanned` counts the rows examined,
  * so a stop mid-page never reads as a full page scanned. A first-page error is
- * thrown (the study's failure); a later stop keeps the collected rows and
- * returns a truncation.
+ * thrown (the study's failure); a later stop — including a page that repeats
+ * the previous one, from a server ignoring `page` — keeps the collected rows
+ * and returns a truncation.
  */
 async function scanObservations(
   args: PullStudyObservationsArgs,
@@ -459,6 +462,7 @@ async function scanObservations(
   let scanned = 0;
   let otherStudyRows = 0;
   let totalCount: number | undefined;
+  let previousFirstRow: string | undefined;
   const stopped = (reason: string) => ({
     observations,
     rawRows,
@@ -489,6 +493,13 @@ async function scanObservations(
       const tc = envelope.metadata?.pagination?.totalCount;
       if (typeof tc === 'number') totalCount = tc;
     }
+    const firstRow = firstRowKey(rows);
+    if (page > 0 && firstRow !== undefined && firstRow === previousFirstRow) {
+      return stopped(
+        `page ${page + 1} repeated page ${page} — the server is not paging /observations`,
+      );
+    }
+    previousFirstRow = firstRow;
     for (const row of rows) {
       scanned++;
       const norm = normalizeObsRow(row);

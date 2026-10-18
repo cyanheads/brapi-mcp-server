@@ -479,6 +479,26 @@ describe('pullStudyObservations', () => {
         totalCount: 25,
       });
     });
+
+    it('a page repeating the previous one stops the walk instead of counting its rows twice', async () => {
+      const rows = Array.from({ length: 25 }, (_, i) => row(i));
+      // An upstream that ignores `page`: every request returns the first page.
+      const requests = upstream((u) =>
+        jsonResponse(envelope({ data: rows.slice(0, 10) }, { totalCount: 25 })),
+      );
+
+      const result = await pullStudyObservations(studyArgs());
+
+      expect(result?.observations.map((o) => o.value)).toEqual(
+        Array.from({ length: 10 }, (_, i) => String(i)),
+      );
+      expect(requests).toHaveLength(2);
+      expect(result?.truncation).toEqual({
+        reason: 'page 2 repeated page 1 — the server is not paging /observations',
+        scanned: 10,
+        totalCount: 25,
+      });
+    });
   });
 
   describe('request budget', () => {

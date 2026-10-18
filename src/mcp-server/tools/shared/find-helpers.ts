@@ -1613,7 +1613,7 @@ async function walkSpillPages<T extends Record<string, unknown>>(
 }
 
 /** Identity of a page by its first row — equal keys on consecutive pages mean `page` was ignored. */
-function firstRowKey(rows: readonly unknown[]): string | undefined {
+export function firstRowKey(rows: readonly unknown[]): string | undefined {
   return rows.length > 0 ? JSON.stringify(rows[0]) : undefined;
 }
 
