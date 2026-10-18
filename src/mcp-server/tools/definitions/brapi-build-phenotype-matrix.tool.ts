@@ -230,7 +230,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       .boolean()
       .optional()
       .describe(
-        "True when at least one study's observation scan stopped before the study's upstream total — at loadLimit, the page cap, a failed page, or the call deadline.",
+        "True when at least one study's observation scan stopped before the study's upstream total — at loadLimit, the page cap, a failed, empty, or repeated page, or the call deadline.",
       ),
     shown: z
       .number()

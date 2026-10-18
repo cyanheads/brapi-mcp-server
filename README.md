@@ -233,7 +233,7 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 - `studies` required (≥1), optional `variables` / `germplasm` subsets; `shape` `wide` (default) or `long`; `aggregate` `mean` (default), `median`, `first`, or `all` (always long form); `loadLimit` caps matching observations per study
 - Pages each study's `/observations` against its total and keeps only that study's rows in the `variables` / `germplasm` subsets itself, so rows are found, and other studies' rows left out, even on servers that ignore those filters or `studyDbId`
 - `extraFilters` are forwarded, then checked against the rows the matrix is built from, as on `brapi_find_observations`: `warnings` names a key the rows contradict and the keys no row can speak to
-- Returns the matrix as a dataframe plus `observationCount`, `germplasmCount`, `variableCount`, and `variableLegend` mapping SQL-safe column names to variable names; `truncated` / `cap` flag a study whose scan stopped before its total (at `loadLimit`, the page cap, a failed page, or the call deadline) and the notice names it with the rows examined
+- Returns the matrix as a dataframe plus `observationCount`, `germplasmCount`, `variableCount`, and `variableLegend` mapping SQL-safe column names to variable names; `truncated` / `cap` flag a study whose scan stopped before its total (at `loadLimit`, the page cap, a failed, empty, or repeated page, or the call deadline) and the notice names it with the rows examined
 - A study whose pull fails is named in `warnings` and the others still build the matrix; the call fails only when every study failed. `no_observation_path` when the server exposes neither `/observations` nor `/observationunits`
 
 ---
