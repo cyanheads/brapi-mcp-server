@@ -510,8 +510,8 @@ function withTimeoutHint(error: unknown): unknown {
 
 async function readBinary(response: Response): Promise<BinaryResponse> {
   const buffer = await response.arrayBuffer();
-  const contentType = response.headers.get('Content-Type') ?? 'application/octet-stream';
-  return { bytes: new Uint8Array(buffer), contentType };
+  const contentType = response.headers.get('Content-Type');
+  return { bytes: new Uint8Array(buffer), ...(contentType === null ? {} : { contentType }) };
 }
 
 function extractHttpStatus(err: McpError): number | undefined {

@@ -125,6 +125,6 @@ export type SearchResponse<T> =
 /** Raw bytes returned from a binary fetch (e.g. image content). */
 export interface BinaryResponse {
   bytes: Uint8Array;
-  /** `Content-Type` header as reported by the server; falls back to octet-stream. */
-  contentType: string;
+  /** `Content-Type` header as reported by the server; absent when not supplied. */
+  contentType?: string;
 }

@@ -60,14 +60,15 @@ const ImagePayloadSchema = z
     mimeType: z
       .string()
       .describe(
-        'Content-Type of the byte response, else the metadata mimeType, else application/octet-stream.',
+        'Validated image MIME from the response header, or metadata when absent; lowercase without parameters.',
       ),
     sizeBytes: z.number().int().nonnegative().describe('Size of the returned byte payload.'),
     source: z.enum(['imagecontent', 'imageURL']).describe('How the bytes were fetched.'),
-    data: z.string().describe('Base64-encoded image bytes.'),
     metadata: ImageMetadataSchema.describe('Upstream metadata for this image.'),
   })
-  .describe('Successfully loaded image payload.');
+  .describe(
+    'Metadata for a successfully loaded image; bytes appear once in content[] image blocks.',
+  );
 
 const ImageErrorSchema = z
   .object({
@@ -81,7 +82,7 @@ const ImageWarningSchema = z
     imageDbId: z.string().describe('Image identifier the warning applies to.'),
     warning: z.string().describe('Advisory — bytes loaded but something is suspect.'),
   })
-  .describe('Per-image advisory for loaded-but-suspect content (e.g. non-image MIME).');
+  .describe('Per-image advisory for successfully loaded images.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Connection alias the call used.'),
@@ -89,9 +90,7 @@ const OutputSchema = z.object({
   errors: z.array(ImageErrorSchema).describe('Images that could not be loaded, one entry per id.'),
   warnings: z
     .array(ImageWarningSchema)
-    .describe(
-      'Per-image advisories for loaded payloads that appear suspect — e.g. the imageURL fallback returned a non-image MIME type, suggesting the upstream URL is broken.',
-    ),
+    .describe('Per-image advisories; non-image MIME responses are errors, not successful images.'),
 });
 
 type Output = z.infer<typeof OutputSchema>;
@@ -221,12 +220,7 @@ export const brapiGetImage = tool('brapi_get_image', {
     for (const entry of loaded) {
       if (entry.kind === 'ok') {
         images.push(entry.payload);
-        if (entry.payload.source === 'imageURL' && !entry.payload.mimeType.startsWith('image/')) {
-          warnings.push({
-            imageDbId: entry.payload.imageDbId,
-            warning: `imageURL fallback returned content-type '${entry.payload.mimeType}' (not image/*) — the upstream URL likely points at an HTML error page or wrong resource. The bytes are returned as-is and may not render as an image.`,
-          });
-        }
+        ctx.content.image(entry.data, entry.payload.mimeType);
       } else errors.push(entry);
     }
 
@@ -240,10 +234,7 @@ export const brapiGetImage = tool('brapi_get_image', {
   },
 
   format: (result) => {
-    const blocks: (
-      | { type: 'text'; text: string }
-      | { type: 'image'; data: string; mimeType: string }
-    )[] = [];
+    const blocks: { type: 'text'; text: string }[] = [];
     const header: string[] = [];
     header.push(`# ${result.images.length} image(s) loaded — \`${result.alias}\``);
     if (result.errors.length > 0) {
@@ -297,11 +288,6 @@ export const brapiGetImage = tool('brapi_get_image', {
       if (meta.description) lines.push(`- description: ${meta.description}`);
       appendPassthroughLines(lines, meta as Record<string, unknown>, META_RENDERED);
       blocks.push({ type: 'text', text: lines.join('\n') });
-      blocks.push({
-        type: 'image',
-        data: img.data,
-        mimeType: img.mimeType,
-      });
     }
     for (const err of result.errors) {
       blocks.push({
@@ -320,7 +306,7 @@ export const brapiGetImage = tool('brapi_get_image', {
 });
 
 type FetchResult =
-  | { kind: 'ok'; payload: z.infer<typeof ImagePayloadSchema> }
+  | { kind: 'ok'; payload: z.infer<typeof ImagePayloadSchema>; data: string }
   | { kind: 'error'; imageDbId: string; error: string };
 
 async function fetchOne(
@@ -370,22 +356,35 @@ async function fetchOne(
       };
     }
 
-    const mimeType =
+    const rawMimeType =
       fetched.mimeType ??
       (typeof metadata.mimeType === 'string' ? metadata.mimeType : 'application/octet-stream');
+    const separator = rawMimeType.indexOf(';');
+    const mimeType = rawMimeType
+      .slice(0, separator < 0 ? undefined : separator)
+      .trim()
+      .toLowerCase();
+    if (!mimeType.startsWith('image/') || mimeType.length === 'image/'.length) {
+      return {
+        kind: 'error',
+        imageDbId,
+        error: `Byte response has non-image MIME type '${mimeType}'. Check the image metadata URL or choose another imageDbId.`,
+      };
+    }
 
     return {
       kind: 'ok',
+      data: toBase64(fetched.bytes),
       payload: {
         imageDbId,
         mimeType,
         sizeBytes: fetched.bytes.byteLength,
         source: fetched.source,
-        data: toBase64(fetched.bytes),
         metadata: metadata as z.infer<typeof ImageMetadataSchema>,
       },
     };
   } catch (err) {
+    ctx.signal?.throwIfAborted();
     return {
       kind: 'error',
       imageDbId,
@@ -406,7 +405,8 @@ interface FetchBytesInput {
 async function fetchBytes(
   input: FetchBytesInput,
 ): Promise<
-  { bytes: Uint8Array; mimeType?: string; source: 'imagecontent' | 'imageURL' } | undefined
+  | { bytes: Uint8Array; mimeType: string | undefined; source: 'imagecontent' | 'imageURL' }
+  | undefined
 > {
   if (input.hasImageContent) {
     try {
@@ -422,6 +422,7 @@ async function fetchBytes(
         source: 'imagecontent',
       };
     } catch (err) {
+      input.ctx.signal?.throwIfAborted();
       input.ctx.log.warning('imagecontent endpoint failed, falling back to imageURL', {
         imageDbId: input.imageDbId,
         error: err instanceof Error ? err.message : String(err),
