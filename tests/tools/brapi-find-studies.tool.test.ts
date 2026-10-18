@@ -12,6 +12,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindStudies } from '@/mcp-server/tools/definitions/brapi-find-studies.tool.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import {
   BASE_URL,
   envelope,
@@ -106,6 +107,46 @@ async function callContract(ctx: Context, input: Record<string, unknown>) {
 }
 
 describe('brapi_find_studies tool', () => {
+  it('keeps SGN normalized program fields in inline rows, distributions and staged rows', async () => {
+    const ctx = await connect(fetcher, ['studies'], 'Breedbase');
+    const rows = Array.from({ length: 12 }, (_, i) => ({
+      studyDbId: `s${i}`,
+      additionalInfo: { programDbId: 'p1', programName: 'Program', retained: null },
+      seasons: i === 0 ? ['2011'] : ['2018'],
+    }));
+    serveStudies(fetcher, rows);
+    const staged = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    const definition = {
+      ...brapiFindStudies,
+      handler: (input, contractCtx) =>
+        brapiFindStudies.handler(input, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFindStudies;
+    const result = await runToolContract(
+      definition,
+      { programs: ['p1'], loadLimit: 1 },
+      { context: { tenantId: 't1' } },
+    );
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      results: [
+        { programDbId: 'p1', programName: 'Program', additionalInfo: rows[0]?.additionalInfo },
+      ],
+      distributions: { programName: { Program: 12 }, seasons: { '2011': 1, '2018': 11 } },
+      dataframe: { rowCount: 12 },
+    });
+    expect(textOf(result)).toContain('2018 (11), 2011 (1)');
+    expect(textOf(result)).toContain('Program (12)');
+    expect(staged).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        rows: rows.map((row) => ({ ...row, programDbId: 'p1', programName: 'Program' })),
+      }),
+    );
+    const structured = result.structuredContent as { warnings?: string[] };
+    expect(structured.warnings?.some((warning) => warning.includes("Filter 'programs'"))).not.toBe(
+      true,
+    );
+  });
   let fetcher: MockFetcher;
 
   beforeEach(() => {

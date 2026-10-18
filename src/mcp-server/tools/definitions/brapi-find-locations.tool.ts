@@ -135,6 +135,19 @@ export const brapiFindLocations = tool('brapi_find_locations', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'invalid_bbox',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A nonempty bbox is incomplete or has reversed latitude or longitude bounds',
+      recovery:
+        'Supply all four bbox bounds (minLat, maxLat, minLon, maxLon), with each minimum no greater than its maximum, or omit bbox.',
+    },
+    {
+      reason: 'unresolved_country_names',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'No countryNames resolve and no effective countryCodes restriction remains',
+      recovery: 'Check countryNames spelling or supply countryCodes directly, then retry.',
+    },
+    {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
       when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
@@ -214,12 +227,17 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     alias: AliasInput,
     locations: z.array(NonBlankString).optional().describe('Filter by locationDbIds.'),
     locationNames: z.array(NonBlankString).optional().describe('Filter by display name.'),
-    countryCodes: z.array(NonBlankString).optional().describe('ISO 3166-1 alpha-3 country codes.'),
+    countryCodes: z
+      .array(NonBlankString)
+      .optional()
+      .describe(
+        'Country codes; alphabetic codes are uppercased, numeric upstream codes are preserved.',
+      ),
     countryNames: z
       .array(NonBlankString)
       .optional()
       .describe(
-        'Free-form English country names or aliases (e.g. "Uganda", "United States", "USA") resolved client-side to ISO 3166-1 alpha-3 codes and merged into countryCodes. Names that do not resolve surface as a warning. Prefer countryCodes when you already have alpha-3 codes.',
+        'English country names or aliases (e.g. "Uganda", "United States", "USA") resolved to alpha-3 codes and merged into countryCodes. Unresolved names warn when another effective country restriction remains; otherwise the call fails. Prefer countryCodes when known.',
       ),
     locationTypes: z
       .array(NonBlankString)
@@ -255,7 +273,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       })
       .optional()
       .describe(
-        'Optional post-fetch bounding box. All four corners must be set to activate the filter.',
+        'Optional post-fetch bounding box. Nonempty boxes require all four bounds with minimum <= maximum; malformed boxes fail. An empty object is omitted.',
       ),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
@@ -289,7 +307,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     ...InlineTrimEnrichment,
     warnings: z
       .array(z.string())
-      .describe('Advisory messages (bbox malformed, filter overrides, capability gaps).'),
+      .describe('Advisory messages (unresolved country names, filter overrides, capability gaps).'),
   },
 
   enrichmentTrailer: {
@@ -312,6 +330,12 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
     const warnings: string[] = [];
+    const bbox = normalizeBbox(input.bbox, () => {
+      throw ctx.fail(
+        'invalid_bbox',
+        'Invalid bbox: provide all four bounds with minimum <= maximum.',
+      );
+    });
 
     // Resolve free-form country names to ISO 3166-1 alpha-3 codes and union
     // them into the countryCodes filter slot before mergeFilters runs, so
@@ -333,6 +357,26 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       input.extraFilters,
       warnings,
     );
+    if (Array.isArray(merged.countryCodes)) {
+      merged.countryCodes = merged.countryCodes.map((code) =>
+        typeof code === 'string' ? code.toUpperCase() : code,
+      );
+    } else if (typeof merged.countryCodes === 'string') {
+      merged.countryCodes = merged.countryCodes.toUpperCase();
+    }
+    const effectiveCodes = merged.countryCodes;
+    const hasCountryRestriction = Array.isArray(effectiveCodes)
+      ? effectiveCodes.some(
+          (code) => typeof code === 'number' || (typeof code === 'string' && code.length > 0),
+        )
+      : typeof effectiveCodes === 'number' ||
+        (typeof effectiveCodes === 'string' && effectiveCodes.length > 0);
+    if (input.countryNames?.length && !hasCountryRestriction) {
+      throw ctx.fail(
+        'unresolved_country_names',
+        `No effective country restriction remains for countryNames: ${input.countryNames.join(', ')}. Supply countryCodes or check the spelling.`,
+      );
+    }
 
     const adapted = applyDialectFiltersOrFail(ctx, dialect, 'locations', merged, warnings);
     const filters = adapted.filters;
@@ -357,7 +401,6 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       normalizeRow ? { normalizeRow } : {},
     );
 
-    const bbox = normalizeBbox(input.bbox, warnings);
     /*
      * Axis-order pick runs before spillover so the rowFilter we hand to
      * `maybeSpill` materializes the dataframe under the right coordinate
@@ -581,7 +624,7 @@ function normalizeBbox(
         maxLon?: number | undefined;
       }
     | undefined,
-  warnings: string[],
+  invalid: () => never,
 ): Bbox | undefined {
   if (!bbox) return;
   const { minLat, maxLat, minLon, maxLon } = bbox;
@@ -599,12 +642,10 @@ function normalizeBbox(
     minLon === undefined ||
     maxLon === undefined
   ) {
-    warnings.push('bbox ignored: all four corners (minLat, maxLat, minLon, maxLon) are required.');
-    return;
+    return invalid();
   }
   if (minLat > maxLat || minLon > maxLon) {
-    warnings.push('bbox ignored: min value exceeds max value on latitude or longitude.');
-    return;
+    return invalid();
   }
   return { minLat, maxLat, minLon, maxLon };
 }

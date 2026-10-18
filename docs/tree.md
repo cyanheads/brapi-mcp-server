@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-10-18 00:52:12
+Generated on: 2026-10-18 11:48:49
 
 ```text
 brapi-mcp-server/
@@ -277,6 +277,7 @@ brapi-mcp-server/
 │   │   └── server-registry.test.ts
 │   ├── tools/
 │   │   ├── shared/
+│   │   │   ├── embedded-observations.test.ts
 │   │   │   ├── find-helpers.test.ts
 │   │   │   ├── observations.test.ts
 │   │   │   ├── orientation-envelope.test.ts
@@ -307,6 +308,7 @@ brapi-mcp-server/
 │   │   ├── brapi-server-info.tool.test.ts
 │   │   ├── brapi-submit-observations.tool.test.ts
 │   │   ├── brapi-walk-pedigree.tool.test.ts
+│   │   ├── observation-coverage.test.ts
 │   │   └── security.test.ts
 │   ├── index.test.ts
 │   └── registration-gate.test.ts

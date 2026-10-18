@@ -6,8 +6,8 @@
  */
 
 import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiGetStudy } from '@/mcp-server/tools/definitions/brapi-get-study.tool.js';
 import {
@@ -54,6 +54,32 @@ async function connect(fetcher: MockFetcher, serverName = 'Test') {
 }
 
 describe('brapi_get_study tool', () => {
+  it('renders nested companion arrays with bounded JSON and preserves scalar arrays', async () => {
+    const study = { studyDbId: 's1' };
+    const trial = {
+      trialDbId: 't1',
+      contacts: [{ name: 'Breeder', roles: ['lead'] }],
+      tags: ['a', 'b'],
+      empty: [],
+    };
+    const program = { programDbId: 'p1', contacts: ['Lead', { name: 'Program breeder' }] };
+    const location = { locationDbId: 'l1', contacts: [{ name: 'x'.repeat(500) }] };
+    const definition = {
+      ...brapiGetStudy,
+      handler: async () => ({ alias: 'test', study, trial, program, location, warnings: [] }),
+    };
+    const result = await runToolContract(definition, { studyDbId: 's1' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ trial, program, location });
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain('- **contacts:** [{"name":"Breeder","roles":["lead"]}]');
+    expect(text).toContain('["Lead",{"name":"Program breeder"}]');
+    expect(text).toContain('- **tags:** a, b');
+    expect(text).not.toContain('**empty:**');
+    expect(text).not.toContain('[object Object]');
+    expect(text).not.toContain('x'.repeat(500));
+    expect(text).toContain('structuredContent');
+  });
   let fetcher: MockFetcher;
 
   beforeEach(() => {
@@ -61,8 +87,65 @@ describe('brapi_get_study tool', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     resetTestServices();
   });
+
+  it.each(['additionalInfo', 'trial'])(
+    'resolves an SGN program via %s without stripping singleton fields',
+    async (source) => {
+      const ctx = await connect(fetcher, 'Breedbase');
+      const additionalInfo =
+        source === 'additionalInfo'
+          ? { programDbId: 'p1', programName: 'Embedded', extra: null }
+          : { extra: null };
+      fetcher.mockImplementation(async (url: string) => {
+        const path = pathnameOf(url);
+        if (path.endsWith('/studies/s1'))
+          return jsonResponse(
+            envelope({
+              studyDbId: 's1',
+              trialDbId: 't1',
+              studyCode: null,
+              nested: { value: null },
+              additionalInfo,
+            }),
+          );
+        if (path.endsWith('/trials'))
+          return jsonResponse(envelope({ data: [{ trialDbId: 't1', programDbId: 'p1' }] }));
+        if (path.endsWith('/programs'))
+          return jsonResponse(envelope({ data: [{ programDbId: 'p1', programName: 'Resolved' }] }));
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      });
+      const definition = {
+        ...brapiGetStudy,
+        handler: (input, contractCtx) =>
+          brapiGetStudy.handler(input, { ...contractCtx, state: ctx.state }),
+      } satisfies typeof brapiGetStudy;
+      const result = await runToolContract(
+        definition,
+        { studyDbId: 's1' },
+        { context: { tenantId: 't1' } },
+      );
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        study: { studyDbId: 's1', studyCode: null, nested: { value: null }, additionalInfo },
+        program: { programDbId: 'p1', programName: 'Resolved' },
+      });
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      expect(text).toContain('Resolved');
+      if (source === 'additionalInfo')
+        expect(result.structuredContent).toMatchObject({
+          study: { programDbId: 'p1', programName: 'Embedded' },
+        });
+      expect(
+        fetcher.mock.calls.filter(([url]) => pathnameOf(url).endsWith('/programs')),
+      ).toHaveLength(1);
+      expect(
+        fetcher.mock.calls.filter(([url]) => pathnameOf(url).endsWith('/trials')),
+      ).toHaveLength(1);
+    },
+  );
 
   it('fetches the study, resolves FKs, and attaches companion counts', async () => {
     const ctx = await connect(fetcher);
@@ -366,5 +449,69 @@ describe('brapi_get_study tool', () => {
       data: { reason: 'call_deadline_exceeded', recovery: { hint: expect.any(String) } },
     });
     expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it('retains the primary study when the trial-derived program lookup reaches the call deadline', async () => {
+    const ctx = await connect(fetcher, 'Breedbase');
+    vi.useFakeTimers();
+    fetcher.mockImplementation(
+      async (url: string, timeoutMs: number, _ctx: unknown, init?: { signal?: AbortSignal }) => {
+        const path = pathnameOf(url);
+        if (path.endsWith('/studies/s1'))
+          return jsonResponse(envelope({ studyDbId: 's1', trialDbId: 't1' }));
+        if (path.endsWith('/trials'))
+          return jsonResponse(envelope({ data: [{ trialDbId: 't1', programDbId: 'p1' }] }));
+        if (path.endsWith('/programs')) return stalledResponse(timeoutMs, init?.signal);
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      },
+    );
+    const pending = brapiGetStudy.handler(
+      brapiGetStudy.input.parse({ studyDbId: 's1' }),
+      withCallRemaining(ctx, 300),
+    );
+    const [result] = await Promise.all([pending, vi.advanceTimersByTimeAsync(300)]);
+    expect(result.study.studyDbId).toBe('s1');
+    expect(result.program).toBeUndefined();
+    expect(result.warnings.join('\n')).toContain('program FK lookup failed');
+    expect(result.warnings.join('\n')).toContain('deadline');
+    expect(
+      fetcher.mock.calls.filter(([url]) => pathnameOf(url).endsWith('/programs')),
+    ).toHaveLength(1);
+  });
+
+  it('propagates caller cancellation during the trial-derived program lookup', async () => {
+    const ctx = await connect(fetcher, 'Breedbase');
+    const controller = new AbortController();
+    fetcher.mockImplementation(
+      async (url: string, timeoutMs: number, _ctx: unknown, init?: { signal?: AbortSignal }) => {
+        const path = pathnameOf(url);
+        if (path.endsWith('/studies/s1'))
+          return jsonResponse(envelope({ studyDbId: 's1', trialDbId: 't1' }));
+        if (path.endsWith('/trials'))
+          return jsonResponse(envelope({ data: [{ trialDbId: 't1', programDbId: 'p1' }] }));
+        if (path.endsWith('/programs')) {
+          queueMicrotask(() => controller.abort());
+          return stalledResponse(timeoutMs, init?.signal);
+        }
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      },
+    );
+    const definition = {
+      ...brapiGetStudy,
+      handler: (input, contractCtx) =>
+        brapiGetStudy.handler(input, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiGetStudy;
+    const result = await runToolContract(
+      definition,
+      { studyDbId: 's1' },
+      { context: { tenantId: 't1', signal: controller.signal } },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.RequestCancelled },
+    });
+    expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).toMatch(
+      /cancel/i,
+    );
   });
 });

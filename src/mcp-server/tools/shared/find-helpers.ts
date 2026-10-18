@@ -784,7 +784,7 @@ export async function fetchValidatedScopedCount(
 /**
  * Compute a frequency distribution for one field across a result set.
  * Accepts a field accessor that may return a scalar or array; arrays are
- * exploded. Returns `{value -> count}` sorted by count desc.
+ * exploded. Returns `{value -> count}`; consumers sort by count when ranking.
  */
 export function computeDistribution<T>(
   rows: readonly T[],
@@ -910,7 +910,7 @@ export function renderDistributions(
     );
   }
   for (const [field, counts] of Object.entries(distributions)) {
-    const entries = Object.entries(counts);
+    const entries = Object.entries(counts).sort(([, a], [, b]) => b - a);
     if (entries.length === 0) continue;
     const { text, omitted } = joinWithinBudget(
       entries.map(([value, count]) => `${value} (${count})`),
@@ -1279,6 +1279,8 @@ export interface MaybeSpillInput<T> {
    */
   normalizeRow?: (row: T) => T;
   path: string;
+  /** A caller-owned completed walk stopped early; retain its partial status without fetching again. */
+  preloadedStopReason?: string;
   route?: FindRoute;
   /**
    * Optional client-side predicate applied to every row before persistence.
@@ -1375,7 +1377,9 @@ export async function maybeSpill<T extends Record<string, unknown>>(
         reachedRowCap: false,
         rowsScanned: firstPage.rows.length,
         scanComplete:
-          firstPage.totalCount === undefined || firstPage.rows.length >= firstPage.totalCount,
+          input.preloadedStopReason === undefined &&
+          (firstPage.totalCount === undefined || firstPage.rows.length >= firstPage.totalCount),
+        ...(input.preloadedStopReason && { stopReason: input.preloadedStopReason }),
       };
 
   const inline = selectInline(walk.fullRows);
@@ -1999,7 +2003,7 @@ export function buildRefinementHint(
   if (!dataframe && spill.scanComplete) return;
   let best: { field: string; topValue: string; count: number; cardinality: number } | undefined;
   for (const [field, counts] of Object.entries(distributions)) {
-    const entries = Object.entries(counts);
+    const entries = Object.entries(counts).sort(([, a], [, b]) => b - a);
     if (entries.length < 2) continue;
     const top = entries[0];
     if (!top) continue;

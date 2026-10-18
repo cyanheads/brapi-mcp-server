@@ -110,12 +110,14 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 
 - Filters: `crop`, `trialTypes`, `seasons`, `locations`, `programs`, `trials`, `studyNames`, `active`; on SGN servers (CassavaBase, Breedbase, Sweetpotatobase), which ignore the location filter on `/studies`, `locations` is applied client-side over the scanned studies, and `totalCount` is the matched count
 - `distributions` over `programName`, `studyType`, `seasons`, `locationName`, `commonCropName`
+- SGN/Breedbase studies lift missing program IDs and names from `additionalInfo`, preserving the raw metadata.
 
 ---
 
 ### `brapi_get_study` <sub>tool</sub>
 
 - `studyDbId` required; resolves `program`, `trial`, and `location` inline; `study_not_found` when the upstream has no such study
+- On SGN/Breedbase servers, missing program fields come from `additionalInfo`; when the study has no program ID, the fetched parent trial can supply it for program resolution.
 - Companion counts `observationCount`, `observationUnitCount`, `variableCount`; a count the server can't scope to the study is omitted with a warning, never reported as the server-wide total
 
 ---
@@ -155,6 +157,7 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 ### `brapi_find_observations` <sub>tool</sub>
 
 - Filters: `studies`, `germplasm`, `variables`, `observationUnits`, `observations`, `seasons`, `programs`, `trials`, `observationLevels`, `timestampFrom` / `timestampTo`
+- Study-scoped SGN/Breedbase queries use advertised `/observationunits?includeObservations=true`, preserving zero-valued measurements. Unit totals drive paging; child fields take precedence over inherited unit metadata, and repeated observation IDs are counted once. Observation-level filters are checked after flattening; `appliedFilters` separates upstream requests from client-side criteria
 - A GET query with no `studies`, `trials`, `observationUnits`, or `observations` anchor runs a one-row count probe first and skips the bulk pull when the probe fails or reports more than 5,000 matches; `warnings` says so
 - `distributions` over `observationVariableName`, `studyName`, `germplasmName`, `observationLevel`, `season`
 
@@ -176,7 +179,7 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 
 ### `brapi_find_locations` <sub>tool</sub>
 
-- Filters: `locations`, `locationNames`, `countryCodes` (ISO 3166-1 alpha-3), `countryNames` (English names resolved to alpha-3), `locationTypes`, `abbreviations`; optional `bbox` needs all four of `minLat`, `maxLat`, `minLon`, `maxLon` and applies after the fetch
+- Filters: `locations`, `locationNames`, `countryCodes` (alphabetic codes uppercased; numeric upstream codes preserved), `countryNames` (English names resolved to alpha-3), `locationTypes`, `abbreviations`; unresolved names fail unless an effective country-code restriction remains. Optional `bbox` applies after the fetch; a nonempty box requires all four ordered bounds (`minLat`, `maxLat`, `minLon`, `maxLon`) or fails before location retrieval. An empty box is omitted.
 - `distributions` over `countryCode`, `locationType`; `coordinateAxisOrder: "swapped"` reports a server that stores coordinates as `[lat, lon]`
 
 ---
@@ -231,18 +234,18 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 ### `brapi_build_phenotype_matrix` <sub>tool</sub>
 
 - `studies` required (≥1), optional `variables` / `germplasm` subsets; `shape` `wide` (default) or `long`; `aggregate` `mean` (default), `median`, `first`, or `all` (always long form); `loadLimit` caps matching observations per study
-- Pages each study's `/observations` against its total and keeps only that study's rows in the `variables` / `germplasm` subsets itself, so rows are found, and other studies' rows left out, even on servers that ignore those filters or `studyDbId`
+- Pages each study's observations against the upstream total, preferring embedded observation units on SGN/Breedbase when advertised so zeros are retained; unit totals count raw units, while `loadLimit` counts matching observations. Other servers retain the `/observations` and fallback paths. Study / variable / germplasm subsets are checked on returned rows
 - `extraFilters` are forwarded, then checked against the rows the matrix is built from, as on `brapi_find_observations`: `warnings` names a key the rows contradict and the keys no row can speak to
 - Returns the matrix as a dataframe plus `observationCount`, `germplasmCount`, `variableCount`, and `variableLegend` mapping SQL-safe column names to variable names; `truncated` / `cap` flag a study whose scan stopped before its total (at `loadLimit`, the page cap, a failed, empty, or repeated page, or the call deadline) and the notice names it with the rows examined
-- A study whose pull fails is named in `warnings` and the others still build the matrix; the call fails only when every study failed. `no_observation_path` when the server exposes neither `/observations` nor `/observationunits`
+- `studies` retains the requested IDs; `coverage.studies` distinguishes `contributed`, `empty`, `failed`, `partial`, and `unprocessed` outcomes with collected counts. `coverage.partial` and `truncated` disclose failed or incomplete pulls on both output surfaces. A failed study does not prevent the others from building the matrix; the call fails only when every study failed. `no_observation_path` when the server exposes neither observation route
 
 ---
 
 ### `brapi_germplasm_performance` <sub>tool</sub>
 
-- `germplasmDbId` required; discovers its studies (up to 200) unless `studyDbIds` is supplied; optional `variables` subset; `germplasm_not_found` when the upstream has no such germplasm
+- `germplasmDbId` required; SGN/Breedbase uses advertised germplasm-scoped embedded units, walking their raw total without the study-discovery cap. Other servers discover up to 200 studies. Explicit `studyDbIds` skips discovery and restricts collection to those studies; optional `variables` subset; `germplasm_not_found` when the upstream has no such germplasm
 - `perVariable` rows carry `n`, `mean`, `median`, `sd` (omitted when n < 2 or non-numeric), `min`, `max`, `studyCount`, `studyDbIds`, and `seasons`
-- Same per-study pull as `brapi_build_phenotype_matrix`; a study that failed, or whose scan stopped before its total, is named in `warnings` (with rows scanned vs total) rather than counted as unobserved
+- `studyCount` / `studyDbIds` remain contributors only. Additive `coverage` distinguishes contributed, empty, failed, partial, and unprocessed studies; scoped-unit scans report raw units, pages, total when known, and completion. An incomplete unit walk cannot establish the unseen study count. Repeated observation IDs are counted once; distinct-ID replicates and zero values remain. The deployment observation limit applies per study, including on the germplasm-unit walk; page, observation, and deadline limits are disclosed, and deadline-skipped studies receive one count warning
 
 ---
 
@@ -346,7 +349,7 @@ Agent-friendly output:
 
 - Typed failures: every connection-scoped tool and resource fails with `unknown_alias` for an alias that is neither registered nor configured on the server (a configured alias connects on first use) and with `private_address_blocked`, caching and registering nothing, when its base URL is a private or reserved address the server may not reach; a filter finder fails with `all_filters_dropped` instead of widening to an unfiltered pull when the dialect drops every filter supplied, and `brapi_build_phenotype_matrix` fails with `dialect_all_filters_dropped` when the dialect drops the study filter for every requested study
 - An empty or whitespace-only ID or filter value fails at the input schema instead of reaching the upstream, where a blank filter widens the pull and a blank ID malforms the request path; an empty `text` still means no text filter
-- Query echo on every finder: `totalCount`, `returnedCount`, the exact `appliedFilters` sent upstream (`brapi_find_studies` also lists a `locations` filter it applied client-side), a `refinementHint` that points at a complete dataframe or suggests narrower filters when the scan stopped short, an empty-result `notice`, and `warnings`
+- Query echo on every finder: `totalCount`, `returnedCount`, and `appliedFilters`; embedded observation pulls separate upstream requests from client-side criteria, and `brapi_find_studies` lists client-side `locations` separately. A `refinementHint` points at a complete dataframe or suggests narrower filters when the scan stopped short; empty results carry a `notice`, and `warnings` disclose limitations
 - Graceful partial failure: `brapi_get_image` returns per-image `errors[]` and `warnings[]` rows instead of failing the batch
 - Discriminated outputs: `brapi_submit_observations` returns a `mode`-discriminated result (`preview` / `apply`), `brapi_raw_search` reports `kind`, and `brapi_get_image` reports each image's `source`
 

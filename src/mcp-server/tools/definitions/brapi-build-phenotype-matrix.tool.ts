@@ -41,9 +41,12 @@ import {
   describeError,
   describeTruncation,
   type NormObs,
+  ObservationCoverageSchema,
   pullObservationsForStudies,
   type RawObservationRow,
+  renderObservationCoverage,
   type StudyObservationOutcome,
+  studyCoverage,
 } from '../shared/observations.js';
 
 // ---------------------------------------------------------------------------
@@ -52,7 +55,10 @@ import {
 
 const OutputSchema = z.object({
   alias: z.string().describe('Connection alias the call used.'),
-  studies: z.array(z.string()).describe('studyDbIds that were queried to build the matrix.'),
+  studies: z
+    .array(z.string())
+    .describe('Requested studyDbIds; coverage records collection outcomes.'),
+  coverage: ObservationCoverageSchema,
   shape: z
     .enum(['wide', 'long'])
     .describe(
@@ -230,7 +236,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       .boolean()
       .optional()
       .describe(
-        "True when at least one study's observation scan stopped before the study's upstream total — at loadLimit, the page cap, a failed, empty, or repeated page, or the call deadline.",
+        'True when failed, truncated, or unprocessed studies leave matrix coverage incomplete.',
       ),
     shown: z
       .number()
@@ -373,6 +379,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     const result: Output = {
       alias: connection.alias,
       studies: input.studies,
+      coverage: studyCoverage(input.studies, outcomes),
       shape: input.shape,
       aggregate: input.aggregate,
       observationCount: filteredObs.length,
@@ -409,8 +416,11 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     // One notice: the truncation guidance (when a scan stopped early), then the
     // pointer to the matrix dataframe.
     const pointer = result.dataframe ? stagedDataframeNotice([result.dataframe]) : undefined;
-    if (truncatedStudies.length > 0) {
-      const guidance = `Observation scans stopped early for ${truncatedStudies.join('; ')} — the matrix covers a partial set. Raise loadLimit, narrow with variables / germplasm / fewer studies, or retry when a page failed.`;
+    if (result.coverage.partial) {
+      const guidance =
+        truncatedStudies.length > 0
+          ? `Observation scans stopped early for ${truncatedStudies.join('; ')} — the matrix covers a partial set. Raise loadLimit, narrow with variables / germplasm / fewer studies, or retry when a page failed.${failed.length ? ` Failed studies: ${failed.map((o) => o.studyDbId).join(', ')}.` : ''}`
+          : `Matrix coverage is partial: ${failed.map((o) => `${o.studyDbId} (failed)`).join('; ')}. Retry failed studies or select fewer studies.`;
       ctx.enrich.truncated({
         shown: filteredObs.length,
         cap: loadLimit,
@@ -433,7 +443,8 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     lines.push(
       `Shape: **${result.shape}** · Aggregate: **${result.aggregate}** · Observations collected: ${result.observationCount}`,
     );
-    lines.push(`Studies queried: ${result.studies.join(', ')}`);
+    lines.push(`Studies requested: ${result.studies.join(', ')}`);
+    lines.push(...renderObservationCoverage(result.coverage));
     lines.push('');
 
     // Variable legend

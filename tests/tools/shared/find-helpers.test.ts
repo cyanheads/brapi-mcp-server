@@ -339,6 +339,17 @@ describe('renderDataframeHandle', () => {
 });
 
 describe('renderDistributions', () => {
+  it('ranks numeric and mixed keys by count before applying the budget', () => {
+    expect(renderDistributions({ season: { '2011': 1, '2018': 3, Other: 2 } })).toBe(
+      '- **season:** 2018 (3), Other (2), 2011 (1)',
+    );
+    const counts = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [String(i), i + 1]));
+    const text = renderDistributions({ season: counts }, handle());
+    expect(text).toMatch(/^- \*\*season:\*\* 99 \(100\), 98 \(99\)/);
+    expect(text).toContain('aggregate dataframe');
+    expect(text.length).toBeLessThan(700);
+    expect(counts['99']).toBe(100);
+  });
   it('renders a simple distribution without a caveat', () => {
     const out = renderDistributions({ crop: { Maize: 3, Wheat: 1 } });
     expect(out).toBe('- **crop:** Maize (3), Wheat (1)');
@@ -1718,6 +1729,13 @@ describe('stagedDataframeNotice', () => {
 });
 
 describe('buildRefinementHint', () => {
+  it('selects a maximum-count numeric value rather than the smallest key', () => {
+    const hint = buildRefinementHint(
+      { fullRows: [], scanComplete: false },
+      { season: { '2011': 1, '2018': 3 } },
+    );
+    expect(hint).toContain('narrowing to `2018` would cut to ~3 row(s)');
+  });
   const distributions = {
     observationUnitName: { UG130050: 6, UG130051: 5, UG130052: 4 },
     season: { '2014': 15 },

@@ -151,20 +151,61 @@ describe('brapi_find_locations tool', () => {
     expect(result.results[0]?.locationDbId).toBe('loc-1');
   });
 
-  it('warns and ignores partial bbox specifications', async () => {
+  it.each([
+    { minLat: 30, maxLat: 40 },
+    { minLat: 40, maxLat: 30, minLon: 0, maxLon: 10 },
+    { minLat: 0, maxLat: 10, minLon: 20, maxLon: 10 },
+  ])('rejects malformed bbox before location retrieval: %j', async (bbox) => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [locRow()] }, { totalCount: 1 })));
-
-    await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({
-        bbox: { minLat: 30, maxLat: 40 }, // missing lon corners
-      }),
-      ctx,
-    );
-
-    expect(getEnrichment(ctx).warnings.join('\n')).toContain('all four corners');
-    expect(getEnrichment(ctx).returnedCount).toBe(1); // bbox ignored, original row kept
+    const { result, structured, text } = await callContract(ctx, { bbox });
+    expect(result.isError).toBe(true);
+    expect(structured).toMatchObject({
+      error: { data: { reason: 'invalid_bbox', recovery: { hint: expect.any(String) } } },
+    });
+    expect(text).toContain('bbox');
+    expect(text).toContain('Recovery:');
+    expect(fetcher).not.toHaveBeenCalled();
   });
+
+  it('rejects unresolved names unless an effective country restriction remains', async () => {
+    const ctx = await connect(fetcher);
+    const { result, structured, text } = await callContract(ctx, { countryNames: ['Ugandaa'] });
+    expect(result.isError).toBe(true);
+    expect(structured).toMatchObject({ error: { data: { reason: 'unresolved_country_names' } } });
+    expect(text).toContain('Ugandaa');
+    expect(text).toContain('countryCodes');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([508, [508]])(
+    'preserves a numeric extraFilters country restriction: %j',
+    async (countryCodes) => {
+      const ctx = await connect(fetcher);
+      fetcher.mockImplementation(async (url: string) => {
+        const filtered = new URL(String(url)).searchParams.getAll('countryCodes').includes('508');
+        const rows = filtered ? [locRow({ countryCode: '508' })] : [locRow()];
+        return jsonResponse(envelope({ data: rows }, { totalCount: rows.length }));
+      });
+      const { result, structured } = await callContract(ctx, {
+        countryNames: ['Atlantis'],
+        extraFilters: { countryCodes },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(structured).toMatchObject({ results: [{ countryCode: '508' }] });
+    },
+  );
+
+  it.each([{}, { minLat: 35.78, maxLat: 35.78, minLon: -78.68, maxLon: -78.68 }])(
+    'preserves empty and equal-bound boxes: %j',
+    async (bbox) => {
+      const ctx = await connect(fetcher);
+      fetcher.mockResolvedValue(jsonResponse(envelope({ data: [locRow()] }, { totalCount: 1 })));
+      const { result, structured } = await callContract(ctx, { bbox });
+      expect(result.isError).not.toBe(true);
+      expect(structured).toMatchObject({ results: [{ locationDbId: 'loc-1' }] });
+    },
+  );
 
   it('throws ValidationError when /locations is not advertised', async () => {
     const ctx = await connect(fetcher, ['studies']);
@@ -514,10 +555,28 @@ describe('brapi_find_locations tool', () => {
       [],
     ],
     [
-      'warns on an unresolvable name and sends no country filter',
-      { countryNames: ['Atlantis'] },
-      [],
+      'warns on an unresolvable name while retaining a resolved name',
+      { countryNames: ['Atlantis', 'Uganda'] },
+      ['UGA'],
       ['Could not resolve', 'Atlantis'],
+    ],
+    [
+      'uppercases alphabetic codes and preserves numeric codes',
+      { countryCodes: ['uga', '508'] },
+      ['508', 'UGA'],
+      [],
+    ],
+    [
+      'retains explicit codes with unresolved names',
+      { countryCodes: ['uga'], countryNames: ['Atlantis'] },
+      ['UGA'],
+      ['Atlantis'],
+    ],
+    [
+      'uses effective extraFilters override with unresolved names',
+      { countryNames: ['Atlantis'], extraFilters: { countryCodes: ['uga'] } },
+      ['UGA'],
+      ['Atlantis'],
     ],
   ])('%s', async (_label, input, codes, fragments) => {
     const ctx = await connect(fetcher);

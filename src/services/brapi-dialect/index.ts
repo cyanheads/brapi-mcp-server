@@ -38,6 +38,19 @@ export {
 export { specDialect } from './spec-dialect.js';
 export type { BrapiDialect, DialectAdaptation } from './types.js';
 
+/** Prefer SGN's complete embedded observations only when units GET is advertised. */
+export function prefersEmbeddedObservations(
+  dialect: BrapiDialect,
+  supported: Record<string, { methods?: readonly string[] }>,
+): boolean {
+  const units = supported.observationunits;
+  return (
+    (dialect.id === 'breedbase' || dialect.id === 'cassavabase') &&
+    units !== undefined &&
+    (!units.methods?.length || units.methods.includes('GET'))
+  );
+}
+
 /**
  * Resolve the dialect for a registered connection. Reads the env override
  * first (`BRAPI_<ALIAS>_DIALECT`); on miss, falls back to detection from

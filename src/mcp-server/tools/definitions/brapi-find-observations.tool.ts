@@ -16,7 +16,11 @@ import {
   getBrapiClient,
   isDialectAllDropped,
 } from '@/services/brapi-client/index.js';
-import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
+import {
+  type BrapiDialect,
+  prefersEmbeddedObservations,
+  resolveDialect,
+} from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
@@ -42,6 +46,8 @@ import {
   type LoadedRows,
   LoadLimitInput,
   loadInitialFindPage,
+  MAX_SPILLOVER_PAGES,
+  MAX_SPILLOVER_ROWS,
   maybeSpill,
   mergeFilters,
   NonBlankString,
@@ -54,6 +60,7 @@ import {
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
+import { collectEmbeddedObservations, type RawObservationRow } from '../shared/observations.js';
 
 const ObservationRowSchema = z
   .object({
@@ -290,11 +297,15 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       .number()
       .int()
       .nonnegative()
-      .describe('Total rows reported by the server, else the rows scanned.'),
+      .describe(
+        'Upstream observation total, or the matched observations collected on the embedded-unit route; warnings disclose incomplete scans.',
+      ),
     returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
       .record(z.string(), z.unknown())
-      .describe('Filter map sent upstream (named filters plus extraFilters).'),
+      .describe(
+        'Upstream filter map, or separate upstreamRequests and clientSide criteria for embedded-unit collection.',
+      ),
     refinementHint: z
       .string()
       .optional()
@@ -343,17 +354,23 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       warnings,
     );
 
-    const adapted = applyDialectFiltersOrFail(ctx, dialect, 'observations', merged, warnings);
+    const embeddedRoute =
+      prefersEmbeddedObservations(dialect, profile.supported) && (input.studies?.length ?? 0) > 0;
+    const adapted = embeddedRoute
+      ? { filters: merged, requiresEscalation: false }
+      : applyDialectFiltersOrFail(ctx, dialect, 'observations', merged, warnings);
     const filters = adapted.filters;
-    const route = resolveFindRoute({
-      profile,
-      dialect,
-      endpoint: 'observations',
-      filters,
-      searchBody: merged,
-      warnings,
-      ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
-    });
+    const route: FindRoute = embeddedRoute
+      ? { kind: 'get', path: '/observationunits', service: 'observationunits', filters }
+      : resolveFindRoute({
+          profile,
+          dialect,
+          endpoint: 'observations',
+          filters,
+          searchBody: merged,
+          warnings,
+          ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
+        });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
     const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'observations');
@@ -397,6 +414,51 @@ export const brapiFindObservations = tool('brapi_find_observations', {
 
     let firstPage: Awaited<ReturnType<typeof loadObservations>> | undefined;
     let bulkPullSkipped = false;
+    let embeddedPartial = false;
+    const embeddedRequests: Record<string, unknown>[] = [];
+    if (embeddedRoute) {
+      const rows: Record<string, unknown>[] = [];
+      const seen = new Set<string>();
+      const effectiveStudies = merged.studyDbIds ?? merged.studyDbId ?? [];
+      const studies = Array.isArray(effectiveStudies) ? effectiveStudies : [effectiveStudies];
+      let pagesFetched = 0;
+      for (const [index, study] of studies.entries()) {
+        const pulled = await collectEmbeddedObservations({
+          client,
+          connection,
+          config,
+          ctx,
+          dialect,
+          filters: { ...merged, studyDbIds: [study] },
+          loadLimit: MAX_SPILLOVER_ROWS - rows.length,
+          pageLimit: MAX_SPILLOVER_PAGES - pagesFetched,
+          warnings,
+          keep: (row) => matchesEmbeddedObservation(row, merged),
+        });
+        embeddedRequests.push(pulled.appliedFilters);
+        pagesFetched += pulled.pagesFetched;
+        embeddedPartial ||= pulled.truncation !== undefined;
+        for (const row of pulled.rawRows) {
+          const id = row.observationDbId;
+          if (typeof id === 'string' && id.length > 0) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+          }
+          rows.push(normalizeRow ? normalizeRow(row) : row);
+        }
+        if (
+          index < studies.length - 1 &&
+          (rows.length >= MAX_SPILLOVER_ROWS || pagesFetched >= MAX_SPILLOVER_PAGES)
+        ) {
+          embeddedPartial = true;
+          warnings.push(
+            `Embedded observation collection reached its ${MAX_SPILLOVER_ROWS}-row or ${MAX_SPILLOVER_PAGES}-page budget; ${studies.length - index - 1} remaining studies were not processed.`,
+          );
+          break;
+        }
+      }
+      firstPage = { rows, hasMore: false, pagesFetched: 1, totalCount: rows.length };
+    }
     if (!hasAnchor && route.kind === 'get') {
       const probe = await probeObservationCount({
         client,
@@ -439,13 +501,17 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       ctx,
       bridge,
       warnings,
+      ...(embeddedPartial
+        ? { preloadedStopReason: 'embedded observation scan stopped early (see warnings)' }
+        : {}),
       ...(normalizeRow ? { normalizeRow } : {}),
       spillRequestOptions: {
         timeoutMs: config.companionTimeoutMs,
         retryMaxAttempts: 0,
       },
     });
-    const { fullRows, dataframe, results, hasMore, rowsScanned } = spill;
+    const { fullRows, dataframe, results, rowsScanned } = spill;
+    const hasMore = spill.hasMore || embeddedPartial;
 
     const distributions = {
       observationVariableName: computeDistribution(fullRows, (r) =>
@@ -498,7 +564,11 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       ],
     });
 
-    const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
+    const appliedFilters = embeddedRoute
+      ? { upstreamRequests: embeddedRequests, clientSide: merged }
+      : route.kind === 'search'
+        ? route.searchBody
+        : filters;
     ctx.enrich({
       totalCount,
       returnedCount: results.length,
@@ -513,6 +583,10 @@ export const brapiFindObservations = tool('brapi_find_observations', {
           : 'No observations matched the applied filters. Try narrowing with studies, germplasm, variables, or observationUnits.',
       );
     discloseInlineTrim(ctx, spill, loadLimit);
+    if (embeddedPartial)
+      ctx.enrich.notice(
+        'Embedded observation coverage is partial; inspect warnings and retry with fewer studies.',
+      );
 
     const result: Output = {
       alias: connection.alias,
@@ -620,6 +694,53 @@ function normalizeSeason(value: unknown): string | undefined {
 
   if (label) return year ? `${label} ${year}` : label;
   return year;
+}
+
+/** Apply observation-level criteria after flattening units, including filters units cannot honor. */
+function matchesEmbeddedObservation(
+  row: RawObservationRow,
+  filters: Record<string, unknown>,
+): boolean {
+  const fields: Record<string, string> = {
+    studyDbIds: 'studyDbId',
+    germplasmDbIds: 'germplasmDbId',
+    observationVariableDbIds: 'observationVariableDbId',
+    observationUnitDbIds: 'observationUnitDbId',
+    observationDbIds: 'observationDbId',
+    seasonDbIds: 'seasonDbId',
+    programDbIds: 'programDbId',
+    trialDbIds: 'trialDbId',
+    observationLevels: 'observationLevel',
+  };
+  for (const [key, field] of Object.entries(fields)) {
+    const requested = filters[key] ?? filters[field];
+    if (requested === undefined || (Array.isArray(requested) && requested.length === 0)) continue;
+    const values = Array.isArray(requested) ? requested : [requested];
+    const actual =
+      field === 'seasonDbId' ? (row.seasonDbId ?? normalizeSeason(row.season)) : row[field];
+    if (
+      !values.some((value) =>
+        field === 'observationLevel'
+          ? String(value).toLowerCase() === String(actual).toLowerCase()
+          : String(value) === String(actual),
+      )
+    )
+      return false;
+  }
+  const timestamp = row.observationTimeStamp;
+  if (
+    filters.observationTimeStampRangeStart !== undefined &&
+    (typeof timestamp !== 'string' ||
+      Date.parse(timestamp) < Date.parse(String(filters.observationTimeStampRangeStart)))
+  )
+    return false;
+  if (
+    filters.observationTimeStampRangeEnd !== undefined &&
+    (typeof timestamp !== 'string' ||
+      Date.parse(timestamp) > Date.parse(String(filters.observationTimeStampRangeEnd)))
+  )
+    return false;
+  return true;
 }
 
 /**

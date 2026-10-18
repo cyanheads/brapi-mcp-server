@@ -8,7 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
@@ -121,7 +121,7 @@ const OutputSchema = z.object({
   alias: z.string().describe('Connection alias the call used.'),
   study: StudySchema.describe('Canonical study record as returned by `/studies/{id}`.'),
   program: ProgramSchema.optional().describe(
-    'Resolved program record (when the study has a programDbId and the FK lookup succeeded).',
+    'Resolved program record (when the study or parent trial identifies a program and the FK lookup succeeded).',
   ),
   trial: TrialSchema.optional().describe(
     'Resolved trial record (when the study has a trialDbId and the FK lookup succeeded).',
@@ -295,6 +295,13 @@ export const brapiGetStudy = tool('brapi_get_study', {
         { studyDbId: input.studyDbId, baseUrl: connection.baseUrl },
       );
     }
+    /** Copy only normalized program fields, preserving the singleton's nulls and raw metadata. */
+    const normalizedStudy = dialect.normalizeRow?.('studies', study);
+    for (const key of ['programDbId', 'programName'] as const) {
+      if (study[key] === undefined && normalizedStudy?.[key] !== undefined) {
+        study[key] = normalizedStudy[key];
+      }
+    }
 
     const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
     const supportsObservations = profile.supported.observations?.methods?.includes('GET') ?? false;
@@ -306,86 +313,99 @@ export const brapiGetStudy = tool('brapi_get_study', {
     const trialDbId = asString(study.trialDbId);
     const locationDbId = asString(study.locationDbId);
 
-    const [programs, trials, locations, obsCount, obsUnitCount, variableCount] = await Promise.all([
-      programDbId
-        ? referenceData
-            .getPrograms(connection.baseUrl, [programDbId], ctx, referenceLookup)
-            .catch((err) => recordWarning(warnings, 'program FK lookup failed', err))
-        : Promise.resolve(undefined),
-      trialDbId
-        ? referenceData
-            .getTrials(connection.baseUrl, [trialDbId], ctx, referenceLookup)
-            .catch((err) => recordWarning(warnings, 'trial FK lookup failed', err))
-        : Promise.resolve(undefined),
-      locationDbId
-        ? referenceData
-            .getLocations(connection.baseUrl, [locationDbId], ctx, referenceLookup)
-            .catch((err) => recordWarning(warnings, 'location FK lookup failed', err))
-        : Promise.resolve(undefined),
-      supportsObservations
-        ? fetchValidatedScopedCount({
-            client,
-            connection,
-            ctx,
-            dialect,
-            label: 'observationCount',
-            path: '/observations',
-            scopeDescription: 'study filter',
-            scopeFilter: { studyDbIds: [input.studyDbId] },
-            service: 'observations',
-            warnings,
-          }).catch((err) => recordWarning(warnings, 'observation count probe failed', err))
-        : Promise.resolve(undefined),
-      // observationUnitCount stays a plain probe — the test server (and the
-      // SGN family) honor studyDbId on /observationunits, so it's reliably
-      // study-scoped. The dialect is threaded through the client here so the
-      // plural→singular translation happens at the wire edge.
-      supportsObservationUnits
-        ? fetchTotalCount(
-            client,
-            connection.baseUrl,
-            '/observationunits',
-            ctx,
-            companionRequestOptions(connection, dialect, config, warnings, {
-              studyDbIds: [input.studyDbId],
-              pageSize: 1,
-            }),
-          ).catch((err) => recordWarning(warnings, 'observation-unit count probe failed', err))
-        : Promise.resolve(undefined),
-      supportsVariables
-        ? fetchValidatedScopedCount({
-            client,
-            connection,
-            ctx,
-            dialect,
-            label: 'variableCount',
-            path: '/variables',
-            scopeDescription: 'study filter',
-            // /variables historically responded to singular `studyDbId` on SGN
-            // deployments — keep the singular key so the dialect (which carries
-            // no `variables.studyDbIds → studyDbId` entry) passes it through
-            // rather than dropping it; the baseline cross-check still catches
-            // servers (e.g. the BrAPI test server) that accept but ignore it.
-            scopeFilter: { studyDbId: input.studyDbId },
-            service: 'variables',
-            warnings,
-          }).catch((err) => recordWarning(warnings, 'variable count probe failed', err))
-        : Promise.resolve(undefined),
-    ]);
+    const [initialPrograms, trials, locations, obsCount, obsUnitCount, variableCount] =
+      await Promise.all([
+        programDbId
+          ? referenceData
+              .getPrograms(connection.baseUrl, [programDbId], ctx, referenceLookup)
+              .catch((err) => recordWarning(warnings, 'program FK lookup failed', err, ctx.signal))
+          : Promise.resolve(undefined),
+        trialDbId
+          ? referenceData
+              .getTrials(connection.baseUrl, [trialDbId], ctx, referenceLookup)
+              .catch((err) => recordWarning(warnings, 'trial FK lookup failed', err, ctx.signal))
+          : Promise.resolve(undefined),
+        locationDbId
+          ? referenceData
+              .getLocations(connection.baseUrl, [locationDbId], ctx, referenceLookup)
+              .catch((err) => recordWarning(warnings, 'location FK lookup failed', err, ctx.signal))
+          : Promise.resolve(undefined),
+        supportsObservations
+          ? fetchValidatedScopedCount({
+              client,
+              connection,
+              ctx,
+              dialect,
+              label: 'observationCount',
+              path: '/observations',
+              scopeDescription: 'study filter',
+              scopeFilter: { studyDbIds: [input.studyDbId] },
+              service: 'observations',
+              warnings,
+            }).catch((err) =>
+              recordWarning(warnings, 'observation count probe failed', err, ctx.signal),
+            )
+          : Promise.resolve(undefined),
+        // observationUnitCount stays a plain probe — the test server (and the
+        // SGN family) honor studyDbId on /observationunits, so it's reliably
+        // study-scoped. The dialect is threaded through the client here so the
+        // plural→singular translation happens at the wire edge.
+        supportsObservationUnits
+          ? fetchTotalCount(
+              client,
+              connection.baseUrl,
+              '/observationunits',
+              ctx,
+              companionRequestOptions(connection, dialect, config, warnings, {
+                studyDbIds: [input.studyDbId],
+                pageSize: 1,
+              }),
+            ).catch((err) =>
+              recordWarning(warnings, 'observation-unit count probe failed', err, ctx.signal),
+            )
+          : Promise.resolve(undefined),
+        supportsVariables
+          ? fetchValidatedScopedCount({
+              client,
+              connection,
+              ctx,
+              dialect,
+              label: 'variableCount',
+              path: '/variables',
+              scopeDescription: 'study filter',
+              // /variables historically responded to singular `studyDbId` on SGN
+              // deployments — keep the singular key so the dialect (which carries
+              // no `variables.studyDbIds → studyDbId` entry) passes it through
+              // rather than dropping it; the baseline cross-check still catches
+              // servers (e.g. the BrAPI test server) that accept but ignore it.
+              scopeFilter: { studyDbId: input.studyDbId },
+              service: 'variables',
+              warnings,
+            }).catch((err) =>
+              recordWarning(warnings, 'variable count probe failed', err, ctx.signal),
+            )
+          : Promise.resolve(undefined),
+      ]);
+
+    const trial = trialDbId && trials instanceof Map ? trials.get(trialDbId) : undefined;
+    const effectiveProgramDbId = programDbId ?? asString(trial?.programDbId);
+    const programs =
+      !programDbId && effectiveProgramDbId
+        ? await referenceData
+            .getPrograms(connection.baseUrl, [effectiveProgramDbId], ctx, referenceLookup)
+            .catch((err) => recordWarning(warnings, 'program FK lookup failed', err, ctx.signal))
+        : initialPrograms;
 
     const result: Output = {
       alias: connection.alias,
       study: study as z.infer<typeof StudySchema>,
       warnings,
     };
-    if (programDbId && programs instanceof Map) {
-      const program = programs.get(programDbId);
+    if (effectiveProgramDbId && programs instanceof Map) {
+      const program = programs.get(effectiveProgramDbId);
       if (program) result.program = program as z.infer<typeof ProgramSchema>;
     }
-    if (trialDbId && trials instanceof Map) {
-      const trial = trials.get(trialDbId);
-      if (trial) result.trial = trial as z.infer<typeof TrialSchema>;
-    }
+    if (trial) result.trial = trial as z.infer<typeof TrialSchema>;
     if (locationDbId && locations instanceof Map) {
       const location = locations.get(locationDbId);
       if (location) result.location = location as z.infer<typeof LocationSchema>;
@@ -484,7 +504,20 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function recordWarning(warnings: string[], label: string, err: unknown): undefined {
+function recordWarning(
+  warnings: string[],
+  label: string,
+  err: unknown,
+  signal: AbortSignal,
+): undefined {
+  if (signal.aborted) throw requestCancelled('Study companion lookup cancelled by caller.');
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    err.code === JsonRpcErrorCode.RequestCancelled
+  )
+    throw err;
   warnings.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
   return;
 }
@@ -494,7 +527,11 @@ function renderKeyValues(lines: string[], record: Record<string, unknown>): void
     if (value === undefined || value === null) continue;
     if (Array.isArray(value)) {
       if (value.length === 0) continue;
-      lines.push(`- **${key}:** ${value.join(', ')}`);
+      if (value.some((entry) => entry !== null && typeof entry === 'object')) {
+        appendPassthroughLines(lines, { [key]: value }, new Set());
+      } else {
+        lines.push(`- **${key}:** ${value.join(', ')}`);
+      }
     } else if (typeof value === 'object') {
       lines.push(`- **${key}:** ${JSON.stringify(value)}`);
     } else {

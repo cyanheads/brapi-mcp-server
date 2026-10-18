@@ -210,8 +210,25 @@ function createSgnFamilyDialect(id: string, label: string): BrapiDialect {
  * accession codes legitimately contain "NA"). Add curated allowlist later
  * when a sparse-shape pattern shows up in field tests.
  */
-function normalizeSgnRow(_endpoint: string, row: Record<string, unknown>): Record<string, unknown> {
-  return stripNulls(row) as Record<string, unknown>;
+function normalizeSgnRow(endpoint: string, row: Record<string, unknown>): Record<string, unknown> {
+  const normalized = stripNulls(row) as Record<string, unknown>;
+  if (endpoint === 'studies') {
+    const additionalInfo = row.additionalInfo;
+    if (additionalInfo !== undefined) normalized.additionalInfo = additionalInfo;
+    if (additionalInfo && typeof additionalInfo === 'object' && !Array.isArray(additionalInfo)) {
+      const info = additionalInfo as Record<string, unknown>;
+      for (const key of ['programDbId', 'programName'] as const) {
+        if (
+          row[key] === undefined &&
+          typeof info[key] === 'string' &&
+          info[key].trim().length > 0
+        ) {
+          normalized[key] = info[key];
+        }
+      }
+    }
+  }
+  return normalized;
 }
 
 function stripNulls(value: unknown): unknown {

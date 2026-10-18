@@ -345,6 +345,34 @@ describe('cassavabaseDialect', () => {
   });
 
   describe('normalizeRow (#6)', () => {
+    it('lifts only missing SGN study program fields and preserves raw additionalInfo', () => {
+      const additionalInfo = { programDbId: '132', programName: 'NCSU', nested: { absent: null } };
+      expect(
+        cassavabaseDialect.normalizeRow?.('studies', { studyDbId: 's1', additionalInfo }),
+      ).toEqual({ studyDbId: 's1', programDbId: '132', programName: 'NCSU', additionalInfo });
+      expect(
+        cassavabaseDialect.normalizeRow?.('studies', {
+          programDbId: 'top',
+          programName: 'Top',
+          additionalInfo,
+        }),
+      ).toMatchObject({ programDbId: 'top', programName: 'Top', additionalInfo });
+      for (const value of [undefined, null, [], 'bad', { programDbId: 132, programName: '' }]) {
+        const row = cassavabaseDialect.normalizeRow?.('studies', { additionalInfo: value });
+        expect(row?.programDbId).toBeUndefined();
+        expect(row?.programName).toBeUndefined();
+      }
+      expect(cassavabaseDialect.normalizeRow?.('trials', { additionalInfo })).not.toHaveProperty(
+        'programDbId',
+      );
+      expect(
+        cassavabaseDialect.normalizeRow?.('studies', {
+          programDbId: null,
+          programName: '',
+          additionalInfo,
+        }),
+      ).toEqual({ programName: '', additionalInfo });
+    });
     it('strips top-level null values from upstream rows', () => {
       const row = {
         locationDbId: 'loc-1',

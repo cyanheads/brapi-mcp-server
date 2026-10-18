@@ -4,7 +4,10 @@
  * study-anchored observation collection strategy, its failure contract, and the
  * raw/normalized row shapes, so both tools pull observations identically.
  *
- * Observation pull strategy (server-dependent), per study:
+ * SGN-family servers with advertised observation-unit GET use embedded
+ * observations first: `/observations` can omit zero values. The unit walk
+ * pages against raw unit totals and caps matching child observations.
+ * Other servers retain this per-study strategy:
  *   1. `/observations?studyDbId=…` (BrAPI spec path), paged against the
  *      upstream `totalCount` in `BRAPI_PAGE_SIZE` pages (at most
  *      `MAX_SPILLOVER_PAGES`) and filtered client-side to the study and the
@@ -37,16 +40,17 @@
  * @module mcp-server/tools/shared/observations
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
+import { type Context, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
 import type { ServerConfig } from '@/config/server-config.js';
 import {
   type BrapiClient,
   type BrapiEnvelope,
   type BrapiRequestOptions,
+  CALL_DEADLINE_REASON,
   isDialectAllDropped,
 } from '@/services/brapi-client/index.js';
-import type { BrapiDialect } from '@/services/brapi-dialect/index.js';
+import { type BrapiDialect, prefersEmbeddedObservations } from '@/services/brapi-dialect/index.js';
 import type { CallDescriptor } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 import {
@@ -127,8 +131,8 @@ export interface PullStudyObservationsArgs {
 }
 
 /**
- * Collect observations for a single study, trying `/observations` first and
- * falling back to `/observationunits` (embedded, then germplasm-anchored).
+ * Collect a study's observations from advertised embedded units on SGN.
+ * Other servers try `/observations`, then the embedded or germplasm fallback.
  * Returns `null` when no usable path exists; throws the study's first error when
  * no path gave a definitive answer.
  */
@@ -141,6 +145,25 @@ export async function pullStudyObservations(
   if (input.variables?.length) namedFilters.observationVariableDbIds = input.variables;
   if (input.germplasm?.length) namedFilters.germplasmDbIds = input.germplasm;
   const merged = mergeFilters(namedFilters, input.extraFilters, warnings);
+
+  if (prefersEmbeddedObservations(dialect, args.profile)) {
+    const keep = matcher(input, studyDbId);
+    const pulled = await collectEmbeddedObservations({
+      ...args,
+      filters: merged,
+      keep: (row) => {
+        const norm = normalizeObsRow(row);
+        return norm !== null && keep(norm);
+      },
+    });
+    return {
+      rawRows: pulled.rawRows,
+      observations: pulled.rawRows
+        .map(normalizeObsRow)
+        .filter((row): row is NormObs => row !== null),
+      ...(pulled.truncation && { truncation: pulled.truncation }),
+    };
+  }
 
   // Apply dialect (plurals → singulars on SGN-family servers)
   const adapted = dialect.adaptGetFilters('observations', merged);
@@ -406,6 +429,291 @@ function supportsGet(profile: Record<string, CallDescriptor>, service: string): 
   if (!descriptor) return false;
   if (!descriptor.methods || descriptor.methods.length === 0) return true;
   return descriptor.methods.includes('GET');
+}
+
+/** A bounded embedded-unit scan; totals count raw units, never child observations. */
+export interface EmbeddedObservationPull {
+  appliedFilters: Record<string, unknown>;
+  cappedStudyDbIds: string[];
+  pagesFetched: number;
+  rawRows: RawObservationRow[];
+  scanned: number;
+  studyDbIds: string[];
+  totalCount?: number;
+  truncation?: StudyTruncation;
+}
+
+/**
+ * Walk advertised SGN units with embedded observations. Parent metadata fills
+ * missing child fields; actual observation IDs alone identify repeated records.
+ * First-page failures propagate, later failures retain a disclosed partial set.
+ */
+export async function collectEmbeddedObservations(args: {
+  client: BrapiClient;
+  config: ServerConfig;
+  connection: RegisteredServer;
+  ctx: Context;
+  dialect: BrapiDialect;
+  filters: Record<string, unknown>;
+  loadLimit: number;
+  perStudyLimit?: number;
+  pageLimit?: number;
+  warnings: string[];
+  keep: (row: RawObservationRow) => boolean;
+}): Promise<EmbeddedObservationPull> {
+  const { client, connection, ctx, config, dialect, warnings } = args;
+  const unitFilters = Object.fromEntries(
+    Object.entries(args.filters).filter(([key, value]) => {
+      if (!Array.isArray(value) || value.length <= 1) return true;
+      warnings.push(
+        `Filter '${key}' has multiple values; omitted from the singular units request and checked against returned observations.`,
+      );
+      return false;
+    }),
+  );
+  const adapted = dialect.adaptGetFilters('observationunits', unitFilters);
+  warnings.push(...adapted.warnings);
+  const rawRows: RawObservationRow[] = [];
+  const studies = new Set<string>();
+  const seen = new Set<string>();
+  const studyCounts = new Map<string, number>();
+  const cappedStudies = new Set<string>();
+  let scanned = 0;
+  let pagesFetched = 0;
+  let totalCount: number | undefined;
+  let previousPage: string | undefined;
+  let missingEmbeddedUnits = 0;
+  const result = (): EmbeddedObservationPull => ({
+    rawRows,
+    studyDbIds: [...studies],
+    scanned,
+    pagesFetched,
+    cappedStudyDbIds: [...cappedStudies],
+    appliedFilters: { ...adapted.filters, includeObservations: true },
+    ...(totalCount !== undefined && { totalCount }),
+  });
+  const stopped = (reason: string): EmbeddedObservationPull => {
+    const truncation = { reason, scanned, ...(totalCount !== undefined && { totalCount }) };
+    warnings.push(
+      `Embedded observation scan ${describeTruncation(truncation)} — coverage is partial.`,
+    );
+    return { ...result(), truncation };
+  };
+  const completed = (): EmbeddedObservationPull =>
+    missingEmbeddedUnits > 0
+      ? stopped(
+          `${missingEmbeddedUnits} units did not supply observations arrays; embedded measurements are unavailable for those units`,
+        )
+      : result();
+  const pageLimit = args.pageLimit ?? MAX_SPILLOVER_PAGES;
+  for (let page = 0; page < pageLimit; page++) {
+    let envelope: BrapiEnvelope<BrapiListResult<Record<string, unknown>>>;
+    try {
+      envelope = await client.get(
+        connection.baseUrl,
+        '/observationunits',
+        ctx,
+        buildRequestOptions(
+          connection,
+          {
+            ...(adapted.filters as QueryParams),
+            includeObservations: true,
+            pageSize: config.pageSize,
+            page,
+          },
+          { dialect, retryOnTimeout: false },
+        ),
+      );
+    } catch (error) {
+      if (page === 0 || ctx.signal.aborted || isDialectAllDropped(error)) throw error;
+      return stopped(`page ${page + 1} failed (${describeError(error)})`);
+    }
+    pagesFetched++;
+    const units = extractRows<Record<string, unknown>>(envelope.result);
+    if (page === 0) totalCount = envelope.metadata?.pagination?.totalCount;
+    const signature = JSON.stringify(units);
+    if (page > 0 && units.length > 0 && signature === previousPage)
+      return stopped(`page ${page + 1} repeated page ${page}`);
+    previousPage = signature;
+    for (const unit of units) {
+      scanned++;
+      const scopedGermplasm = args.filters.germplasmDbIds ?? args.filters.germplasmDbId;
+      const unitInScope =
+        scopedGermplasm === undefined ||
+        (Array.isArray(scopedGermplasm) ? scopedGermplasm : [scopedGermplasm]).includes(
+          unit.germplasmDbId,
+        );
+      if (unitInScope && typeof unit.studyDbId === 'string') studies.add(unit.studyDbId);
+      if (!Array.isArray(unit.observations)) {
+        missingEmbeddedUnits++;
+        continue;
+      }
+      const { observations: _children, ...parent } = unit;
+      for (const child of unit.observations) {
+        if (!child || typeof child !== 'object' || Array.isArray(child)) continue;
+        const row: RawObservationRow = { ...parent };
+        for (const [key, value] of Object.entries(child))
+          if (value !== undefined && value !== null) row[key] = value;
+        if (
+          row.observationLevel == null &&
+          unit.observationUnitPosition &&
+          typeof unit.observationUnitPosition === 'object'
+        ) {
+          const level = (unit.observationUnitPosition as Record<string, unknown>).observationLevel;
+          if (level && typeof level === 'object')
+            row.observationLevel = (level as Record<string, unknown>).levelName;
+        }
+        if (typeof row.value === 'number') row.value = String(row.value);
+        if (!args.keep(row)) continue;
+        if (typeof row.studyDbId === 'string') studies.add(row.studyDbId);
+        const id = row.observationDbId;
+        if (typeof id === 'string' && id.length > 0) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+        }
+        if (args.perStudyLimit !== undefined && typeof row.studyDbId === 'string') {
+          const count = studyCounts.get(row.studyDbId) ?? 0;
+          if (count >= args.perStudyLimit) {
+            cappedStudies.add(row.studyDbId);
+            continue;
+          }
+          studyCounts.set(row.studyDbId, count + 1);
+        }
+        if (rawRows.length >= args.loadLimit)
+          return stopped(`reached loadLimit (${args.loadLimit}) matching observations`);
+        rawRows.push(row);
+      }
+    }
+    if (units.length === 0) {
+      if (totalCount === undefined || scanned >= totalCount) return completed();
+      return stopped(`page ${page + 1} came back empty`);
+    }
+    if (totalCount === undefined ? units.length < config.pageSize : scanned >= totalCount)
+      return completed();
+    if (rawRows.length >= args.loadLimit)
+      return stopped(`reached loadLimit (${args.loadLimit}) matching observations`);
+  }
+  return stopped(`reached the ${pageLimit}-page cap`);
+}
+
+/** Shared additive coverage contract; contributor fields retain their original meaning. */
+export const ObservationCoverageSchema = z
+  .object({
+    partial: z
+      .boolean()
+      .describe('True when failed, truncated, or unprocessed work leaves coverage incomplete.'),
+    discoveryLimited: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when generic study discovery reached its bound; additional studies may exist.',
+      ),
+    studies: z
+      .array(
+        z
+          .object({
+            studyDbId: z
+              .string()
+              .describe('Requested study, or a study encountered in scoped units.'),
+            status: z
+              .enum(['contributed', 'empty', 'failed', 'partial', 'unprocessed'])
+              .describe('Outcome of collecting this study; partial may contain observations.'),
+            observationCount: z
+              .number()
+              .int()
+              .nonnegative()
+              .describe('Matching observations collected for this study.'),
+            reason: z.string().optional().describe('Why collection failed or remained incomplete.'),
+          })
+          .describe('One study collection outcome.'),
+      )
+      .describe('Per-study outcomes in requested or encounter order.'),
+    scan: z
+      .object({
+        complete: z
+          .boolean()
+          .describe('Whether the scoped unit walk exhausted its authoritative total.'),
+        scannedUnits: z
+          .number()
+          .int()
+          .nonnegative()
+          .describe('Raw upstream units examined, including repeated IDs.'),
+        pagesFetched: z
+          .number()
+          .int()
+          .nonnegative()
+          .describe('Unit pages returned before stopping.'),
+        totalUnits: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe('Upstream raw unit total, when reported.'),
+        reason: z.string().optional().describe('Bound or failure that stopped the unit walk.'),
+      })
+      .optional()
+      .describe('Scoped-unit scan coverage; unseen studies are unknown after an incomplete walk.'),
+  })
+  .describe('Collection coverage, independent of the number of contributing studies.');
+
+/** Reconcile requested studies against actual outcomes without treating empty as failed. */
+export function studyCoverage(
+  studies: string[],
+  outcomes: StudyObservationOutcome[],
+): z.infer<typeof ObservationCoverageSchema> {
+  const byId = new Map(outcomes.map((outcome) => [outcome.studyDbId, outcome]));
+  const rows = studies.map((studyDbId) => {
+    const outcome = byId.get(studyDbId);
+    const deadlineSkipped =
+      outcome?.error instanceof McpError &&
+      outcome.error.data?.reason === CALL_DEADLINE_REASON &&
+      outcome.error.message.includes('was not sent');
+    const status =
+      !outcome || deadlineSkipped
+        ? 'unprocessed'
+        : outcome.error !== undefined || outcome.observations === null
+          ? 'failed'
+          : outcome.truncation
+            ? 'partial'
+            : outcome.observations.length
+              ? 'contributed'
+              : 'empty';
+    const reason =
+      outcome?.error !== undefined ? describeError(outcome.error) : outcome?.truncation?.reason;
+    return {
+      studyDbId,
+      status,
+      observationCount: outcome?.observations?.length ?? 0,
+      ...(reason !== undefined && { reason }),
+    } as z.infer<typeof ObservationCoverageSchema>['studies'][number];
+  });
+  return {
+    partial: rows.some(
+      (row) => row.status === 'failed' || row.status === 'partial' || row.status === 'unprocessed',
+    ),
+    studies: rows,
+  };
+}
+
+/** Render every coverage outcome on clients that only forward formatted content. */
+export function renderObservationCoverage(
+  coverage: z.infer<typeof ObservationCoverageSchema>,
+): string[] {
+  return [
+    `Coverage: ${coverage.partial ? 'partial' : 'complete'} · ${coverage.studies.filter((s) => s.observationCount > 0).length} contributing / ${coverage.studies.length} known studies`,
+    ...(coverage.discoveryLimited !== undefined
+      ? [`Study discovery limited: ${coverage.discoveryLimited}`]
+      : []),
+    ...coverage.studies.map(
+      (s) =>
+        `- ${s.studyDbId}: ${s.status} (${s.observationCount} observations)${s.reason ? ` — ${s.reason}` : ''}`,
+    ),
+    ...(coverage.scan
+      ? [
+          `Unit scan: ${coverage.scan.scannedUnits}${coverage.scan.totalUnits === undefined ? '' : ` / ${coverage.scan.totalUnits}`} units · ${coverage.scan.pagesFetched} pages · ${coverage.scan.complete ? 'complete' : 'partial'}${coverage.scan.reason ? ` — ${coverage.scan.reason}` : ''}`,
+        ]
+      : []),
+  ];
 }
 
 /**
