@@ -141,8 +141,11 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 - 1–20 root `germplasmDbIds` (`germplasmDbId` also accepted); `direction` is `ancestors` (default), `descendants`, or `both`; `maxDepth` 1–10 (default 3); the walk stops at 1,000 nodes or 10,000 edges and sets `truncated`
 - `both` is the union of the two walks: ancestors expand only through `/pedigree` and descendants only through `/progeny`, so a descendant's other parent is not pulled in
 - One edge per parent–child pair; `cycleCount` counts the edges marked `isCycle`, where a germplasm becomes its own ancestor — shared ancestors and siblings are not cycles
-- Deduplicated `nodes` and `edges` with `depthReached`, `rootCount`, `leafCount`, `cycleCount`, `deadEndCount`; past `loadLimit`, both sets spill to `nodesDataframe` and `edgesDataframe`
-- `diagram: "mermaid" | "dot"` adds the whole walk as Mermaid or Graphviz source, edges drawn parent → child and loop-closing edges dashed; either format is left out with a warning past 50,000 characters, and Mermaid past 500 edges
+- `leafCount` counts graph terminals, including depth-boundary nodes; `confirmedLeafCount` counts non-root nodes whose relevant lookups successfully returned no relatives. `frontier` / `frontierCount` distinguish depth-limited, safety-skipped, failed and unsupported directions; `deadEndCount` still counts nodes with failed lookups
+- `nodes` and `edges` each fit `loadLimit` and a 24,000-byte budget for both array JSON and serialized rendered rows. Trimmed previews retain the discovered graph in `nodesDataframe` and `edgesDataframe`; a first row over budget yields zero inline rows. Preview trimming never changes traversal `truncated`
+- Safety-capped graph tables are marked `truncated` and contain only discovered nodes/edges. `knownOmittedRelativeCount` and `omittedRelativesDataframe` retain already-fetched omitted relatives with `germplasmDbId`, `expansionNodeDbId`, `side` and `ordinal`; unrequested directions have unknown counts. Large frontiers also stage a `frontierDataframe`
+- Retrieve omitted IDs with `SELECT germplasmDbId, expansionNodeDbId, side FROM <table> ORDER BY ordinal LIMIT 20 OFFSET 0`, advance by rows actually shown, then walk those IDs in batches of up to 20 roots. If zero fit, narrow the projection or aggregate; these tables do not resume traversal
+- `diagram: "mermaid" | "dot"` adds the discovered graph (including rows beyond the preview), with partial coverage when safety-capped; edges are drawn parent → child and loop-closing edges dashed. Either format is left out with a warning past 50,000 characters, and Mermaid past 500 edges
 
 ---
 
@@ -173,7 +176,8 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 ### `brapi_get_image` <sub>tool</sub>
 
 - 1–5 `imageDbIds` per call, up to 20 MB each; `images_unsupported` when the server doesn't advertise `/images`
-- Each image's `source` is `imagecontent` or the `imageURL` fallback; failed fetches land in per-image `errors[]` and suspect payloads (a non-image MIME type) in `warnings[]`, so a partial batch still returns
+- Each image's `source` is `imagecontent` or the `imageURL` fallback. Both sources require an effective `image/*` MIME type (case and parameters normalized; metadata is used when the byte response has no type). Non-image responses and fetch failures land in per-image `errors[]`; successful siblings still return
+- Bytes appear once as `content[]` image blocks. `images[]` carries metadata, MIME, byte size and source only; `format()` renders metadata without repeating base64
 
 ---
 
@@ -211,8 +215,9 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 
 - `sql` is a single `SELECT`; writes, DDL, `COPY`, `PRAGMA`, `ATTACH`, file reads (a file or URL named as a table included), system-catalog reads, and `DESCRIBE` / `SUMMARIZE` / `SHOW` fail as `sql_rejected`, with the specific reason in `data.gateReason` (`brapi_dataframe_describe` lists a dataframe's columns and types)
 - A query that fails on the data (a cast that does not convert) fails as `sql_execution_error`, a dataframe name that no longer exists as `missing_table`, and a `registerAs` name already in use as `register_as_clash`
-- Returns `rowCount`, typed `columns`, and `rows` bounded by `preview`, `rowLimit`, and `BRAPI_CANVAS_MAX_ROWS`, each clamped to the next; `truncated`, `shown`, `cap`, and `notice` disclose the cut and name the bound that applied
+- Returns `rowCount`, typed `columns`, and leading `rows` bounded by `preview`, `rowLimit`, and `BRAPI_CANVAS_MAX_ROWS`, each clamped to the next, then 24,000 bytes on each serialized row array and rendered row section (escaping and markers included). `shown` is the delivered count; `cap` remains the effective row ceiling. An oversized first row returns zero rows: use a narrower projection or aggregation
 - `registerAs` (identifier, ≤63 characters) saves the full result as a new dataframe for chaining
+- Page persisted results with deterministic `ORDER BY` and `LIMIT/OFFSET`, advancing the offset by rows actually returned, not the requested limit. Without `registerAs`, rerun with it before paging a saved result
 
 ---
 
@@ -268,14 +273,15 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 ### `brapi_raw_get` <sub>tool</sub>
 
 - `path` is a relative route such as `/samples` (a full URL fails as `cross_origin_path`); optional `params` and `loadLimit`
-- Returns the raw envelope (`url`, `metadata`, `result`) plus a `suggestion` when a curated tool covers the endpoint or takes the IDs it lists (`/variantsets` names the genotype tools); list results past `loadLimit` spill to a dataframe unless `params.page` / `params.pageSize` drive paging
+- Returns the envelope (`url`, `metadata`, `result`) plus a `suggestion` when a curated tool covers the endpoint or takes the IDs it lists. List previews (`result` arrays or `result.data`) fit `loadLimit` and 24,000 bytes on each serialized row array and rendered row section, markers and escaping included; non-list results and envelope siblings are preserved. Every fetched row omitted inline stays staged, including an oversized first row that leaves zero inline rows
+- `params.page` / `params.pageSize` fetches only the requested upstream page; a trimmed page is staged without walking more pages. SQL offsets page that staged table independently of upstream pagination: use deterministic `ORDER BY`, advance by actual rows shown, and use a narrower projection when zero rows fit
 
 ---
 
 ### `brapi_raw_search` <sub>tool</sub>
 
 - `noun` (e.g. `observations`, `calls`, `germplasm`) and a `body` posted verbatim to `POST /search/{noun}`; async searches are polled to completion
-- Returns `kind` (`sync` or `async`), `searchResultsDbId`, `result`, and a `suggestion`; spills like `brapi_raw_get` unless `body.page` / `body.pageSize` is set; `search_endpoint_disabled` when the active dialect marks the route as dead
+- Returns `kind` (`sync` or `async`), `searchResultsDbId`, `result`, and a `suggestion`; previews and stages like `brapi_raw_get`, with `body.page` / `body.pageSize` restricting collection to the requested upstream page; `search_endpoint_disabled` when the active dialect marks the route as dead
 
 ---
 
@@ -357,7 +363,7 @@ Agent-friendly output:
 
 When a finder's inline `results` holds fewer rows than matched — `loadLimit` or the 24,000-byte inline budget bound first — the response carries a `dataframe` handle: `tableName`, `rowCount`, `columns`, `createdAt`, `expiresAt`, and the upstream `totalCount` when the server reports one, plus `truncated` (and `maxRows` when the row cap fired) when the dataframe holds fewer rows than the upstream total; `warnings` then says why the walk stopped. Columns renamed to pass the SQL identifier check map back to their upstream keys in `columnLegend`.
 
-Every response that stages a dataframe — the finders, `brapi_raw_get` / `brapi_raw_search` on a list larger than `loadLimit`, every matrix from `brapi_build_phenotype_matrix` and `brapi_export_genotype_matrix`, and a `brapi_walk_pedigree` walk larger than `loadLimit` (a node table and an edge table) — carries one `notice` naming each table, its row count, whether it is truncated, and `brapi_dataframe_describe` then `brapi_dataframe_query`. `brapi_dataframe_export` is named too where it is registered (stdio with `BRAPI_EXPORT_DIR` set). On a finder, the same notice says which bound cut `results`.
+Every response that stages a dataframe — the finders, `brapi_raw_get` / `brapi_raw_search` when a row or byte bound trims a list, every matrix from `brapi_build_phenotype_matrix` and `brapi_export_genotype_matrix`, and `brapi_walk_pedigree` when graph/frontier previews are trimmed or fetched relatives are omitted — carries one `notice` naming each table, its row count, coverage, and `brapi_dataframe_describe` then `brapi_dataframe_query`. `brapi_dataframe_export` is named too where it is registered (stdio with `BRAPI_EXPORT_DIR` set). On a finder, the same notice says which bound cut `results`.
 
 ```text
 1. brapi_find_observations { studies: ["s-422"] }

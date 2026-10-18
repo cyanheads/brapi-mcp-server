@@ -132,6 +132,10 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
 });
 ```
 
+### Raw and SQL previews
+
+`brapi_raw_get`, `brapi_raw_search`, and `brapi_dataframe_query` use `selectPreviewRows` to bound both the UTF-8 JSON array and serialized rendered row section to 24,000 bytes, including escaping and markers. These previews return zero rows when the first row is oversized; finders retain their first-row exception through `selectInlineRows`. Raw tools stage every omitted fetched row, preserve envelope siblings, and never auto-walk explicit upstream pages. Query keeps full `registerAs` materialization and typed columns; `shown` is the delivered count and `cap` the effective row ceiling from `CanvasBridge.queryRowLimit`. Ordered SQL scans start at OFFSET 0 and advance by actual delivered counts; zero shown requires a narrower projection or aggregation. The byte bound applies to row representations, not the whole envelope.
+
 ### Server config
 
 ```ts
@@ -185,7 +189,9 @@ Handlers receive a unified `ctx` object. Currently used surface:
 | `ctx.requestInput` / `ctx.inputs` | Multi-round-trip input. `brapi_submit_observations` gates apply-mode writes on a `confirm` elicitation behind a consent record (`api-context` § Consent gates): asking stores `{ operation, clientId, subject, target, contentHash }` in `ctx.state` under `brapi/consent/<uuid>` (600 s TTL) and returns the id as `requestState`; each call first redeems (reads and deletes) the record its `requestState` names. An answer counts only when that record matches this caller, base URL + `studyDbId`, and the SHA-256 of the rows — anything else asks again. On the matching round a declined, cancelled, or unparseable answer is terminal (`user_declined`). `force: true` skips the round. Redemption is single-use against a sequential replay only (no atomic `ctx.state.take` yet), and a multi-instance HTTP deployment needs shared storage (`filesystem`, `supabase`, `cloudflare-d1`) for the record. |
 | `ctx.enrich` | Success-path agent context. `brapi_dataframe_query`, `brapi_build_phenotype_matrix`, and the seven filter finders (through `discloseInlineTrim`) disclose capped results with `ctx.enrich.truncated({ shown, cap, guidance })`. |
 
-`ctx.fail(reason, …)` is the typed thrower keyed off declared `errors[]` contracts — declared by every tool except `brapi_dataframe_drop` (24) and all 6 resources today. The framework fills the matching contract entry's recovery hint into `data.recovery.hint` on the wire, for service throws carrying `data.reason` too. `ctx.content` is unused — no tool emits media blocks outside `brapi_get_image`, which returns image bytes through its own output schema.
+`ctx.fail(reason, …)` is the typed thrower keyed off declared `errors[]` contracts — declared by every tool except `brapi_dataframe_drop` (24) and all 6 resources today. The framework fills the matching contract entry's recovery hint into `data.recovery.hint` on the wire, for service throws carrying `data.reason` too. `brapi_get_image` emits bytes once through `ctx.content.image(data, mimeType)`; structured output and `format()` carry metadata only. Both byte sources normalize MIME case/parameters and require `image/*`, using metadata only when response MIME is absent; non-image bytes are per-ID errors, preserving successful siblings.
+
+`brapi_walk_pedigree` keeps graph-terminal `leafCount` separate from `confirmedLeafCount` (successful empty lookups on all reached sides). Its bounded `frontier` identifies unresolved node/side outcomes; large frontiers stage separately. Nodes and edges each use `selectPreviewRows` with their actual renderer, retaining the discovered graph when trimmed. Safety-capped graph handles/provenance declare partial coverage; diagrams use only that discovered graph. Fetched omitted relatives stage separately with ordinal, expansionNodeDbId and side. SQL retrieval projects IDs/side, orders by ordinal, starts at OFFSET 0 and advances by actual delivered rows; zero rows requires a narrower projection or aggregation. Unknown unrequested-relative counts remain unknown; there is no automatic continuation.
 
 ---
 
