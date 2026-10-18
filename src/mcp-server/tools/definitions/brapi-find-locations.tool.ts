@@ -1,8 +1,8 @@
 /**
  * @fileoverview `brapi_find_locations` — find research stations / field sites
  * by country, abbreviation, type, or free-text. Supports a client-side bbox
- * filter (minLat/maxLat/minLon/maxLon) applied after the initial page load,
- * since BrAPI doesn't define a spec-level bounding-box filter. Standard
+ * filter (minLat/maxLat/minLon/maxLon) applied to every scanned row, since
+ * BrAPI doesn't define a spec-level bounding-box filter. Standard
  * find_* pattern: distributions + dataframe spillover.
  *
  * @module mcp-server/tools/definitions/brapi-find-locations.tool
@@ -28,16 +28,22 @@ import {
   computeDistribution,
   DataframeHandleSchema,
   dialectRowMapper,
+  discloseInlineTrim,
   ExtraFiltersInput,
   extractCoordinates,
   hasPointGeometry,
+  InlineTrimEnrichment,
   LoadLimitInput,
   loadInitialFindPage,
   maybeSpill,
   mergeFilters,
+  NonBlankString,
+  renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  renderMoreRowsLine,
+  renderWarningsTrailer,
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
@@ -79,11 +85,11 @@ const LocationRowSchema = z
   .describe('One BrAPI location record.');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   results: z
     .array(LocationRowSchema)
     .describe(
-      'Location rows returned in-context (up to loadLimit). Bbox filter is applied after the upstream fetch.',
+      'Leading matched location rows, up to loadLimit and a 24,000-byte budget, whichever binds first. A bbox filter applies before the cut, across every page scanned.',
     ),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
@@ -95,14 +101,14 @@ const OutputSchema = z.object({
         .record(z.string(), z.number())
         .describe('Location type → count of locations of that type.'),
     })
-    .describe('Value frequency per field across the full result set.'),
+    .describe('Value frequency per field across every matched row fetched.'),
   dataframe: DataframeHandleSchema.optional().describe(
-    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
+    'The matched rows, staged as a dataframe when results[] holds fewer.',
   ),
   coordinateAxisOrder: z
     .enum(['spec', 'swapped'])
     .describe(
-      'Axis interpretation used when reading GeoJSON Point coordinates. "spec" follows the GeoJSON RFC 7946 [lon, lat, alt?] convention. "swapped" indicates the upstream server stores [lat, lon, alt?] (non-conformant) and bbox + rendered coordinates were interpreted accordingly.',
+      'Axis order used to read GeoJSON Point coordinates: "spec" is RFC 7946 [lon, lat, alt?]; "swapped" means the upstream stores [lat, lon, alt?] and bbox and rendered coordinates used that order.',
     ),
 });
 
@@ -115,7 +121,7 @@ const SERVER_TO_USER: Record<string, string> = {
   countryCodes: 'countryCodes',
   locationTypes: 'locationTypes',
   abbreviations: 'abbreviations',
-  // Singulars — SGN-family dialects.
+  // Singulars — emitted by dialects that singularize /locations (BMS, BrAPI Test Server).
   locationDbId: 'locations',
   locationName: 'locationNames',
   countryCode: 'countryCodes',
@@ -125,15 +131,74 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindLocations = tool('brapi_find_locations', {
   description:
-    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Countries filter by ISO 3166-1 alpha-3 code via countryCodes, or by free-form English country name via countryNames (resolved client-side to alpha-3 — "Uganda" → "UGA"). Optional bbox parameter restricts rows to a latitude/longitude window. When the spec-correct GeoJSON [lon, lat, alt] reading produces zero matches and at least one row carries a Point geometry, the bbox filter retries once with axes swapped (handles non-conformant servers that store [lat, lon, alt]) and surfaces a warning + `coordinateAxisOrder: "swapped"`. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
+    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Countries filter by ISO 3166-1 alpha-3 code via countryCodes, or by free-form English country name via countryNames (resolved client-side to alpha-3 — "Uganda" → "UGA"). Optional bbox parameter restricts rows to a latitude/longitude window. When no first-page row falls inside it under the spec GeoJSON [lon, lat, alt] reading and a row carries a Point geometry, bbox is retried with axes swapped; if that matches, the swapped reading is used (non-conformant servers store [lat, lon, alt]) with a warning and `coordinateAxisOrder: "swapped"`. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_locations.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_find_locations.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_find_locations in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_find_locations.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_find_locations.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_find_locations.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_find_locations.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -147,20 +212,20 @@ export const brapiFindLocations = tool('brapi_find_locations', {
   ] as const,
   input: z.object({
     alias: AliasInput,
-    locations: z.array(z.string()).optional().describe('Filter by locationDbIds.'),
-    locationNames: z.array(z.string()).optional().describe('Filter by display name.'),
-    countryCodes: z.array(z.string()).optional().describe('ISO 3166-1 alpha-3 country codes.'),
+    locations: z.array(NonBlankString).optional().describe('Filter by locationDbIds.'),
+    locationNames: z.array(NonBlankString).optional().describe('Filter by display name.'),
+    countryCodes: z.array(NonBlankString).optional().describe('ISO 3166-1 alpha-3 country codes.'),
     countryNames: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe(
         'Free-form English country names or aliases (e.g. "Uganda", "United States", "USA") resolved client-side to ISO 3166-1 alpha-3 codes and merged into countryCodes. Names that do not resolve surface as a warning. Prefer countryCodes when you already have alpha-3 codes.',
       ),
     locationTypes: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe('Location type — e.g. "Research Station", "Field".'),
-    abbreviations: z.array(z.string()).optional().describe('Short location abbreviations.'),
+    abbreviations: z.array(NonBlankString).optional().describe('Short location abbreviations.'),
     bbox: z
       .object({
         minLat: z
@@ -207,7 +272,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       .int()
       .nonnegative()
       .describe(
-        'Total rows reported by the server (or the post-bbox count when a bbox filter is active).',
+        'Total rows reported by the server, else the rows scanned; with an active bbox, the scanned rows inside it.',
       ),
     returnedCount: z
       .number()
@@ -216,36 +281,20 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       .describe('Length of results[] after any bbox filtering.'),
     appliedFilters: z
       .record(z.string(), z.unknown())
-      .describe('The final filter map sent to the server (named + extraFilters).'),
+      .describe('Filter map sent upstream (named filters plus extraFilters).'),
     refinementHint: z
       .string()
       .optional()
-      .describe('Suggested next-step query refinement when the result set is large.'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Guidance when no rows were returned — how to broaden filters or retry.'),
+      .describe('Suggested refinement when the result set is large.'),
+    ...InlineTrimEnrichment,
     warnings: z
       .array(z.string())
       .describe('Advisory messages (bbox malformed, filter overrides, capability gaps).'),
   },
 
   enrichmentTrailer: {
-    appliedFilters: {
-      render: (filters) => {
-        const entries = Object.entries(filters);
-        if (entries.length === 0) return '**Applied Filters:** none';
-        const lines = entries.map(([k, v]) => {
-          const display = SERVER_TO_USER[k] ?? k;
-          return `- **${display}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`;
-        });
-        return `**Applied Filters:**\n${lines.join('\n')}`;
-      },
-    },
-    warnings: {
-      render: (ws) => (ws.length > 0 ? ws.map((w) => `- ${w}`).join('\n') : '_none_'),
-      label: 'Warnings',
-    },
+    appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
+    warnings: { render: renderWarningsTrailer },
   },
 
   async handler(input, ctx) {
@@ -352,28 +401,33 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       loadLimit,
       ctx,
       bridge,
+      warnings,
     };
     if (normalizeRow) spillInput.normalizeRow = normalizeRow;
     if (bboxFilter) spillInput.rowFilter = bboxFilter;
-    const { fullRows, dataframe } = await maybeSpill(spillInput);
+    const spill = await maybeSpill(spillInput);
 
     // fullRows is already post-bbox when a bbox filter was supplied — the
-    // dataframe and SQL surface see the same set. Compute the returned slice
-    // (first-page rows that passed bbox) the same way.
-    const filteredFull = fullRows;
-    const filteredReturned = bboxFilter ? firstPage.rows.filter(bboxFilter) : firstPage.rows;
+    // dataframe and SQL surface see the same set, and results[] holds its
+    // leading rows, not just the first upstream page's matches.
+    const filteredFull = spill.fullRows;
+    const filteredReturned = spill.results;
 
-    if (bbox && firstPage.rows.length > 0 && filteredFull.length === 0) {
+    // Counts describe the rows the scan examined; rows past an incomplete scan
+    // were never checked against the bbox, so they are named apart.
+    const { rowsScanned, scanComplete } = spill;
+    const upstreamTotal = firstPage.totalCount;
+    const scope = scanComplete
+      ? ''
+      : ` scanned; ${upstreamTotal === undefined ? 'the rest were' : `the other ${upstreamTotal - rowsScanned} of ${upstreamTotal} were`} not checked`;
+    if (bbox && rowsScanned > 0 && filteredFull.length === 0) {
       warnings.push(
-        `bbox excluded all ${firstPage.rows.length} upstream location(s) returned on the first page. Verify the latitude/longitude window matches the server's coordinate convention.`,
+        `bbox excluded all ${rowsScanned} upstream location(s)${scope}. Verify the latitude/longitude window matches the server's coordinate convention.`,
       );
-    } else if (
-      bbox &&
-      typeof firstPage.totalCount === 'number' &&
-      filteredFull.length < firstPage.totalCount
-    ) {
-      const excluded = firstPage.totalCount - filteredFull.length;
-      warnings.push(`bbox excluded ${excluded} of ${firstPage.totalCount} upstream location(s).`);
+    } else if (bbox && filteredFull.length < rowsScanned) {
+      warnings.push(
+        `bbox excluded ${rowsScanned - filteredFull.length} of ${rowsScanned} upstream location(s)${scope}.`,
+      );
     }
 
     const distributions = {
@@ -399,8 +453,8 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       ...buildExtraFilterChecks(input.extraFilters, filteredFull, warnings),
     ]);
 
-    const totalCount = bbox ? filteredFull.length : (firstPage.totalCount ?? firstPage.rows.length);
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+    const totalCount = bbox ? filteredFull.length : (firstPage.totalCount ?? spill.rowsScanned);
+    const refinementHint = buildRefinementHint(spill, distributions, {
       availableFilters: [
         'locations',
         'locationNames',
@@ -426,15 +480,16 @@ export const brapiFindLocations = tool('brapi_find_locations', {
           ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
           : 'No locations matched the applied filters. Try broadening locationNames, countryCodes, locationTypes, or bbox.',
       );
+    discloseInlineTrim(ctx, spill, loadLimit);
 
     const result: Output = {
       alias: connection.alias,
       results: filteredReturned as z.infer<typeof LocationRowSchema>[],
-      hasMore: firstPage.hasMore,
+      hasMore: spill.hasMore,
       distributions,
       coordinateAxisOrder,
     };
-    if (dataframe) result.dataframe = dataframe;
+    if (spill.dataframe) result.dataframe = spill.dataframe;
     return result;
   },
 
@@ -450,12 +505,8 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     );
     lines.push(`**Coordinate axis order:** ${result.coordinateAxisOrder}`);
     lines.push('');
-    if (result.hasMore) {
-      lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
-      );
-      lines.push('');
-    }
+    const moreRows = renderMoreRowsLine(result);
+    if (moreRows) lines.push(moreRows, '');
     lines.push('## Distributions');
     lines.push(
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',

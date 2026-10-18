@@ -31,7 +31,7 @@ export const brapiMetaAnalysis = prompt('brapi_meta_analysis', {
       .regex(/^[a-zA-Z0-9_-]+$/)
       .optional()
       .describe(
-        'Connection alias registered via brapi_connect. Omit to use the default connection. For multi-server meta-analyses, run this prompt once per registered alias and merge.',
+        'Connection alias: one registered via brapi_connect, or a built-in or operator-configured alias. Omit to use the default connection. For multi-server meta-analyses, run this prompt once per alias and merge.',
       ),
   }),
   generate: (args) => {

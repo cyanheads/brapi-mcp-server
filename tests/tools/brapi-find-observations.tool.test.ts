@@ -5,11 +5,13 @@
  * @module tests/tools/brapi-find-observations.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindObservations } from '@/mcp-server/tools/definitions/brapi-find-observations.tool.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import {
   BASE_URL,
   envelope,
@@ -174,34 +176,9 @@ describe('brapi_find_observations tool', () => {
 
     expect(result.hasMore).toBe(true);
     expect(result.dataframe?.rowCount).toBe(25);
-    expect(getEnrichment(ctx).refinementHint).toMatch(/25 rows exceed loadLimit=10/);
-  });
-
-  it('returns the first page with a warning when dataframe spillover page pulls fail', async () => {
-    const ctx = await connect(fetcher);
-    const firstRows = Array.from({ length: 10 }, (_, i) =>
-      obsRow({ observationDbId: `obs-${i + 1}`, value: String(i) }),
+    expect(getEnrichment(ctx).refinementHint).toMatch(
+      /^All 25 matched rows are in dataframe `df_[^`]+`: narrow them there with brapi_dataframe_query/,
     );
-    fetcher.mockImplementation(async (url: string) => {
-      const u = new URL(String(url));
-      const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
-      if (page === 0) {
-        return jsonResponse(envelope({ data: firstRows }, { totalCount: 25 }));
-      }
-      throw new Error('upstream page stalled');
-    });
-
-    const result = await brapiFindObservations.handler(
-      brapiFindObservations.input.parse({ studies: ['s-1'], loadLimit: 10 }),
-      ctx,
-    );
-
-    expect(getEnrichment(ctx).returnedCount).toBe(10);
-    expect(getEnrichment(ctx).totalCount).toBe(25);
-    expect(result.hasMore).toBe(true);
-    expect(result.dataframe).toBeUndefined();
-    expect(getEnrichment(ctx).warnings.join('\n')).toContain('Dataframe spillover skipped');
-    expect(getEnrichment(ctx).warnings.join('\n')).toContain('upstream page stalled');
   });
 
   it('throws ValidationError when /observations is not advertised', async () => {
@@ -307,53 +284,43 @@ describe('brapi_find_observations tool', () => {
     ).toBe(true);
   });
 
-  it('preflights unscoped variable-only queries (symmetric to germplasm-only blow-up on cassavabase)', async () => {
-    const ctx = await connect(fetcher);
-    fetcher.mockImplementation(async (url: string) => {
-      const u = new URL(String(url));
-      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '0', 10);
-      if (pageSize === 1) {
-        return jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 80_000 }));
-      }
-      throw new Error(`Bulk pull should have been skipped; got pageSize=${pageSize}`);
-    });
+  // An unanchored query (no study / trial / observationUnit / observation) is
+  // probed with pageSize=1; above the threshold the bulk pull is skipped and the
+  // probe's one row comes back inline, untrimmed, with hasMore for the rest.
+  it.each([
+    ['germplasm-only', { germplasm: ['g-1'] }, 50_000],
+    ['variable-only', { variables: ['var-1'] }, 80_000],
+    ['bare', { loadLimit: 200 }, 1_000_000],
+  ] as const)(
+    'preflights an unscoped %s query and skips the bulk pull above the threshold',
+    async (_label, input, total) => {
+      const ctx = await connect(fetcher);
+      fetcher.mockImplementation(async (url: string) => {
+        const u = new URL(String(url));
+        const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '0', 10);
+        if (pageSize === 1) {
+          return jsonResponse(envelope({ data: [obsRow()] }, { totalCount: total }));
+        }
+        throw new Error(`Bulk pull should have been skipped; got pageSize=${pageSize}`);
+      });
 
-    await brapiFindObservations.handler(
-      brapiFindObservations.input.parse({ variables: ['var-1'] }),
-      ctx,
-    );
+      const result = await brapiFindObservations.handler(
+        brapiFindObservations.input.parse(input),
+        ctx,
+      );
 
-    expect(fetcher.mock.calls.length).toBe(1);
-    expect(getEnrichment(ctx).returnedCount).toBe(1);
-    expect(getEnrichment(ctx).totalCount).toBe(80_000);
-    expect(
-      getEnrichment(ctx).warnings.some((w) =>
-        /Preflight detected 80000 observations.*Bulk pull skipped/.test(w),
-      ),
-    ).toBe(true);
-  });
-
-  it('preflights bare /observations queries (no filters → unanchored full scan risk)', async () => {
-    const ctx = await connect(fetcher);
-    fetcher.mockImplementation(async (url: string) => {
-      const u = new URL(String(url));
-      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '0', 10);
-      if (pageSize === 1) {
-        return jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 1_000_000 }));
-      }
-      throw new Error(`Bulk pull should have been skipped; got pageSize=${pageSize}`);
-    });
-
-    await brapiFindObservations.handler(brapiFindObservations.input.parse({ loadLimit: 200 }), ctx);
-
-    expect(fetcher.mock.calls.length).toBe(1);
-    expect(getEnrichment(ctx).totalCount).toBe(1_000_000);
-    expect(
-      getEnrichment(ctx).warnings.some((w) =>
-        /Preflight detected 1000000 observations.*Bulk pull skipped/.test(w),
-      ),
-    ).toBe(true);
-  });
+      expect(fetcher.mock.calls.length).toBe(1);
+      expect(result.hasMore).toBe(true);
+      expect(result.dataframe).toBeUndefined();
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment).toMatchObject({ returnedCount: 1, totalCount: total });
+      for (const key of ['truncated', 'shown', 'cap']) expect(enrichment).not.toHaveProperty(key);
+      const preflight = (enrichment.warnings as string[]).find((w) => w.startsWith('Preflight'));
+      expect(preflight).toMatch(new RegExp(`^Preflight detected ${total} observations`));
+      expect(preflight).toContain('Bulk pull skipped');
+      expect(preflight).toContain('Returning only the 1 row(s) the preflight request returned.');
+    },
+  );
 
   it('skips bulk pull and warns when the preflight count probe stalls/fails', async () => {
     const ctx = await connect(fetcher);
@@ -377,35 +344,6 @@ describe('brapi_find_observations tool', () => {
     expect(getEnrichment(ctx).warnings.join('\n')).toContain(
       'find studies containing the germplasm',
     );
-  });
-
-  it('preflights unscoped germplasm queries and skips bulk pull above threshold', async () => {
-    const ctx = await connect(fetcher);
-    fetcher.mockImplementation(async (url: string) => {
-      const u = new URL(String(url));
-      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '0', 10);
-      // Preflight uses pageSize=1; only return one row + the huge totalCount.
-      if (pageSize === 1) {
-        return jsonResponse(envelope({ data: [obsRow()] }, { totalCount: 50_000 }));
-      }
-      // If anything but the preflight goes out, the test should fail.
-      throw new Error(`Bulk pull should have been skipped; got pageSize=${pageSize}`);
-    });
-
-    const result = await brapiFindObservations.handler(
-      brapiFindObservations.input.parse({ germplasm: ['g-1'] }),
-      ctx,
-    );
-
-    expect(fetcher.mock.calls.length).toBe(1);
-    expect(getEnrichment(ctx).returnedCount).toBe(1);
-    expect(getEnrichment(ctx).totalCount).toBe(50_000);
-    expect(result.dataframe).toBeUndefined();
-    expect(
-      getEnrichment(ctx).warnings.some((w) =>
-        /Preflight detected 50000 observations.*Bulk pull skipped/.test(w),
-      ),
-    ).toBe(true);
   });
 
   it('skips preflight when the query has a study scope', async () => {
@@ -464,5 +402,147 @@ describe('brapi_find_observations tool', () => {
     expect(text).toContain('Dry Matter %');
     expect(text).toContain('Cassava 2022');
     expect(text).toContain('TME419');
+  });
+});
+
+describe('brapi_find_observations inline budget (#66)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetTestServices();
+  });
+
+  interface ServeOptions {
+    /** Fail with HTTP 500 for walk pages at or past this index. */
+    failFromPage?: number;
+    /** Serve every row on one page, whatever pageSize or page was asked for. */
+    ignorePaging?: boolean;
+    /** totalCount to report, when it differs from the rows served. */
+    reportedTotal?: number;
+  }
+
+  /** Serve a paged /observations list; any other host fails the call. */
+  function serve(rows: Record<string, unknown>[], options: ServeOptions = {}): void {
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      if (u.hostname !== 'brapi.example.org' || u.pathname !== '/brapi/v2/observations') {
+        throw new Error(`unmocked fetch: ${u.href}`);
+      }
+      const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
+      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10);
+      if (options.failFromPage !== undefined && page >= options.failFromPage) {
+        return jsonResponse({ error: 'upstream down' }, 500);
+      }
+      const data = options.ignorePaging
+        ? rows
+        : rows.slice(page * pageSize, page * pageSize + pageSize);
+      return jsonResponse(envelope({ data }, { totalCount: options.reportedTotal ?? rows.length }));
+    });
+  }
+
+  async function call(ctx: Context, input: Record<string, unknown>) {
+    const definition = {
+      ...brapiFindObservations,
+      handler: (parsed, contractCtx) =>
+        brapiFindObservations.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFindObservations;
+    const result = await runToolContract(definition, input, { context: { tenantId: 't1' } });
+    const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+    return { result, structured: result.structuredContent as Record<string, unknown>, text };
+  }
+
+  /** Observation rows whose JSON runs ~5 KB each: four fit the 24,000-byte budget. */
+  const wideRows = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      obsRow({ observationDbId: `obs-${i + 1}`, value: 'v'.repeat(4_800) }),
+    );
+  const smallRows = (n: number) =>
+    Array.from({ length: n }, (_, i) => obsRow({ observationDbId: `obs-${i + 1}` }));
+  const resultsBytes = (s: Record<string, unknown>) =>
+    Buffer.byteLength(JSON.stringify(s.results), 'utf8');
+  const truncationKeys = ['truncated', 'shown', 'cap'] as const;
+
+  it('trims results[] to the byte budget and stages every row from the in-memory page', async () => {
+    const ctx = await connect(fetcher);
+    serve(wideRows(8));
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+
+    const { result, structured, text } = await call(ctx, { studies: ['s-1'] });
+
+    expect(result.isError).toBeFalsy();
+    expect(fetcher.mock.calls.length).toBe(1);
+    expect(resultsBytes(structured)).toBeLessThanOrEqual(24_000);
+    expect(structured).toMatchObject({
+      returnedCount: 4,
+      totalCount: 8,
+      hasMore: true,
+      truncated: true,
+      shown: 4,
+      cap: 1_000,
+      dataframe: { rowCount: 8 },
+    });
+    const staged = register.mock.calls[0]![1].rows as Record<string, unknown>[];
+    expect(new Set(staged.map((r) => r.observationDbId)).size).toBe(8);
+    expect(text).toContain('24,000-byte inline budget');
+    expect(text).toContain((structured.dataframe as { tableName: string }).tableName);
+  });
+
+  it('sets no truncation fields on an empty result', async () => {
+    const ctx = await connect(fetcher);
+    serve([]);
+
+    const { result, structured } = await call(ctx, { studies: ['s-1'] });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({ returnedCount: 0, hasMore: false, results: [] });
+    expect(structured.notice).toMatch(/No observations matched/);
+    for (const key of [...truncationKeys, 'dataframe']) {
+      expect(structured).not.toHaveProperty(key);
+    }
+  });
+
+  it('surfaces a failed walk page as a warning on both surfaces, staging what was fetched', async () => {
+    const ctx = await connect(fetcher);
+    serve(smallRows(25), { failFromPage: 1 });
+
+    const { structured, text } = await call(ctx, { studies: ['s-1'], loadLimit: 5 });
+
+    expect(structured).toMatchObject({
+      returnedCount: 5,
+      totalCount: 25,
+      hasMore: true,
+      dataframe: { rowCount: 10, truncated: true, totalCount: 25 },
+    });
+    expect((structured.warnings as string[]).join('\n')).toContain(
+      'Dataframe walk stopped after 10 of 25 upstream row(s)',
+    );
+    expect(text).toContain('Dataframe walk stopped after 10 of 25 upstream row(s)');
+  });
+
+  it('budgets a skipped-pull preflight page whose upstream ignored pageSize=1, staging it truncated', async () => {
+    const ctx = await connect(fetcher);
+    serve(wideRows(8), { ignorePaging: true, reportedTotal: 50_000 });
+
+    const { structured, text } = await call(ctx, { germplasm: ['g-1'] });
+
+    expect(fetcher.mock.calls.length).toBe(1);
+    expect(resultsBytes(structured)).toBeLessThanOrEqual(24_000);
+    expect(structured).toMatchObject({
+      returnedCount: 4,
+      totalCount: 50_000,
+      hasMore: true,
+      truncated: true,
+      shown: 4,
+      dataframe: { rowCount: 8, truncated: true, totalCount: 50_000 },
+    });
+    const preflight = (structured.warnings as string[]).find((w) => w.startsWith('Preflight'));
+    expect(preflight).toContain('Returning only the 8 row(s) the preflight request returned.');
+    expect(preflight).not.toContain('1-row preflight');
+    expect(text).toContain('Returning only the 8 row(s) the preflight request returned.');
   });
 });

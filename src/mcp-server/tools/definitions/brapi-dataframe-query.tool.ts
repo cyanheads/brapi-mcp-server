@@ -6,17 +6,21 @@
  * aggregation (`COUNT`, `GROUP BY`, `AVG`) to summarize without materializing
  * every row in the LLM context. Use `registerAs` to materialize a result as
  * a new dataframe — the response carries a bounded `preview` slice plus the
- * full `rowCount`. Read-only enforcement is the framework's three-layer SQL
- * gate (single statement → SELECT only → plan-walk allowlist).
+ * full `rowCount`. Read-only enforcement is the framework's five-layer SQL
+ * gate (file-function deny-list → single statement → SELECT only → parse-tree
+ * check → plan-walk allowlist) over a DuckDB instance with file access off.
  *
  * Every query runs under a `registerAs` so DuckDB's describe is the
  * authoritative type source for the response columns. When the caller
  * doesn't supply `registerAs`, the handler generates an internal
  * `_brapi_probe_<uuid>` name, describes the materialized table for types,
  * then drops it before returning — so types stay consistent with what
- * `brapi_dataframe_describe` would report.
+ * `brapi_dataframe_describe` would report. Error messages are rewritten so
+ * DuckDB's line excerpt quotes the caller's SQL, never that wrapping
+ * `CREATE TABLE … AS` statement, and a statement that wrapper cannot take
+ * (DESCRIBE, SUMMARIZE, SHOW) is rejected as `sql_rejected`.
  *
- * Defaults to a fresh per-tenant default workspace; the agent never passes a
+ * Defaults to the session's (else the tenant's) workspace; the agent never passes a
  * canvasId. The bridge resolves it via `ctx.state` so multiple calls in the
  * same session reuse the same workspace.
  *
@@ -25,10 +29,11 @@
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import {
+  DUCKDB_ERROR_REASONS,
   inferSchemaFromRows,
   type QueryResult,
+  quoteIdentifier,
   SQL_GATE_REASONS,
-  type SqlGateReason,
 } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
@@ -38,36 +43,57 @@ import {
 } from '@/services/canvas-bridge/index.js';
 
 /**
- * Recognized gate reasons spanning the framework's SQL gate plus the
- * server-local system-catalog deny ({@link SYSTEM_CATALOG_ACCESS_REASON}).
- * When `bridge.query()` rethrows a `validationError`, the handler translates
- * it into the typed `sql_rejected` contract reason while preserving the
- * granular gate reason on `data.gateReason`.
+ * Refusals that reach the caller as the typed `sql_rejected` contract reason,
+ * with the granular reason kept on `data.gateReason`: the framework's SQL gate,
+ * the engine's read-only refusal (`sql_read_only` — a write, or a file or URL
+ * named as a table), and the server-local system-catalog deny
+ * ({@link SYSTEM_CATALOG_ACCESS_REASON}).
  */
-type LocalGateReason = SqlGateReason | typeof SYSTEM_CATALOG_ACCESS_REASON;
-const KNOWN_GATE_REASONS: ReadonlySet<LocalGateReason> = new Set<LocalGateReason>([
+const REFUSAL_REASONS: ReadonlySet<string> = new Set<string>([
   ...Object.values(SQL_GATE_REASONS),
+  DUCKDB_ERROR_REASONS.sqlReadOnly,
   SYSTEM_CATALOG_ACCESS_REASON,
 ]);
 
-function extractSqlGateReason(err: unknown): LocalGateReason | undefined {
-  if (!(err instanceof McpError)) return;
-  if (err.code !== JsonRpcErrorCode.ValidationError) return;
+/**
+ * DuckDB's parser class, as `@duckdb/node-api` reports it (behind `Failed to
+ * extract statements:`). The gate parses the caller's SQL on its own and admits
+ * DESCRIBE, SUMMARIZE, and SHOW as SELECTs, but every query here runs as
+ * `CREATE TABLE … AS <sql>`, which takes only a query, so those fail to parse
+ * there. The framework's canvas classifies that parser error by a class prefix
+ * anchored at the start, so it arrives as an untyped `DatabaseError`; a
+ * classified one carries `sql_parse_error`.
+ */
+const ENGINE_PARSER_ERROR = /^(?:Failed to extract statements: )?Parser Error\b/;
+
+const NOT_A_QUERY_MESSAGE =
+  'Canvas SQL rejected: the statement does not run as a query here. brapi_dataframe_query takes a SELECT (FROM-first and VALUES forms included); DESCRIBE, SUMMARIZE, and SHOW are not accepted. List a dataframe’s columns and types with brapi_dataframe_describe, or compute summary statistics with a SELECT over COUNT, AVG, MIN, and MAX.';
+
+/** True for a parser error the gate let through — see {@link ENGINE_PARSER_ERROR}. */
+function isParserFailure(err: McpError, reason: string | undefined): boolean {
+  if (reason === DUCKDB_ERROR_REASONS.sqlParseError) return true;
+  return (
+    reason === undefined &&
+    err.code === JsonRpcErrorCode.DatabaseError &&
+    ENGINE_PARSER_ERROR.test(err.message)
+  );
+}
+
+function reasonOf(err: McpError): string | undefined {
   const reason = (err.data as { reason?: unknown } | undefined)?.reason;
-  return typeof reason === 'string' && (KNOWN_GATE_REASONS as ReadonlySet<string>).has(reason)
-    ? (reason as LocalGateReason)
-    : undefined;
+  return typeof reason === 'string' ? reason : undefined;
 }
 
 /**
- * Forward the gate's structured context (e.g. `catalog` for system_catalog_access,
- * `operators` for plan_operator_not_allowed, `statementType` for non_select_statement)
- * so structured-only consumers see which specific element matched without parsing
- * the message text. `reason` becomes `gateReason` upstream; `recovery` is
- * overridden by the contract recovery hint.
+ * Forward the canvas error's structured context (e.g. `catalog` for
+ * system_catalog_access, `operators` for plan_operator_not_allowed,
+ * `tableName` for missing_table) so structured-only consumers see which
+ * element matched without parsing the message text. `reason` is replaced by
+ * the contract reason (and kept as `gateReason` for refusals); `recovery` is
+ * replaced by the contract recovery hint.
  */
-function extractGateContext(err: unknown): Record<string, unknown> {
-  if (!(err instanceof McpError) || err.data === null || typeof err.data !== 'object') return {};
+function extractGateContext(err: McpError): Record<string, unknown> {
+  if (err.data === null || typeof err.data !== 'object') return {};
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(err.data)) {
     if (k !== 'reason' && k !== 'recovery') out[k] = v;
@@ -75,12 +101,44 @@ function extractGateContext(err: unknown): Record<string, unknown> {
   return out;
 }
 
+const EXCERPT_INDICATOR = 'LINE 1: ';
+const LINE_ONE_EXCERPT = /\n\nLINE 1: (\.\.\.)?(.*)\n( *)\^/;
+
+/**
+ * DuckDB renders the failing line of a statement under its message (`LINE n:`
+ * plus a caret under the failing token). Every query here runs as the
+ * framework's `CREATE TABLE "<registerAs>" AS <sql>` — the caller's
+ * `registerAs` or the internal type-probe name — so a line-1 excerpt can show
+ * that wrapper, which the caller never sent. Cut the wrapper out of the
+ * excerpt and move the caret with it, so the excerpt quotes only the caller's
+ * SQL; drop the excerpt when the failing token sits inside the wrapper itself.
+ * An excerpt that is not of the wrapped statement (a prepare-time error quotes
+ * the caller's SQL alone) is left as DuckDB wrote it.
+ */
+function quoteCallerSql(message: string, sql: string, tableName: string): string {
+  const match = LINE_ONE_EXCERPT.exec(message);
+  if (!match) return message;
+  const [block, lead = '', body = '', pad = ''] = match;
+  const wrapper = `CREATE TABLE ${quoteIdentifier(tableName)} AS `;
+  const searchable = body.endsWith('...') ? body.slice(0, -3) : body;
+  const wrapped = wrapper + sql;
+  const offset = lead ? wrapped.indexOf(searchable) : wrapped.startsWith(searchable) ? 0 : -1;
+  if (offset < 0 || offset >= wrapper.length) return message;
+  const cut = wrapper.length - offset;
+  const caretColumn = pad.length - lead.length - cut;
+  const excerpt =
+    caretColumn < EXCERPT_INDICATOR.length
+      ? ''
+      : `\n\n${EXCERPT_INDICATOR}${body.slice(cut)}\n${' '.repeat(caretColumn)}^`;
+  return message.slice(0, match.index) + excerpt + message.slice(match.index + block.length);
+}
+
 const InputSchema = z.object({
   sql: z
     .string()
     .min(1)
     .describe(
-      'SELECT statement against dataframes. Single statement only — writes, DDL, file reads, and exports are rejected. Use brapi_dataframe_describe to discover available dataframes. SQL is the primary paging idiom: use `LIMIT/OFFSET` to walk a large dataframe, projection to trim columns, and aggregation (`COUNT`, `GROUP BY`, `AVG`) to summarize without materializing every row.',
+      'SELECT statement against dataframes. Single statement only — writes, DDL, DESCRIBE / SUMMARIZE, file reads, and exports are rejected. Use brapi_dataframe_describe to discover available dataframes. SQL is the primary paging idiom: use `LIMIT/OFFSET` to walk a large dataframe, projection to trim columns, and aggregation (`COUNT`, `GROUP BY`, `AVG`) to summarize without materializing every row.',
     ),
   registerAs: z
     .string()
@@ -93,10 +151,9 @@ const InputSchema = z.object({
     .number()
     .int()
     .positive()
-    .max(1000)
     .optional()
     .describe(
-      'Cap the number of rows returned in this response (1–1000). When omitted, the deployment-wide response cap applies. Lower this with `registerAs` when you only need a sample to verify the query.',
+      'Cap the number of rows returned in this response. A value above `rowLimit` (or, when `rowLimit` is omitted, above the deployment-wide response cap) returns rows up to that ceiling. When omitted, the ceiling applies. Lower this with `registerAs` when you only need a sample to verify the query.',
     ),
   rowLimit: z
     .number()
@@ -113,7 +170,7 @@ const ColumnInfoSchema = z.object({
   type: z
     .string()
     .describe(
-      'SQL/DuckDB column type (e.g. VARCHAR, BIGINT, DOUBLE, BOOLEAN, JSON) sourced from DuckDB schema metadata. The same type appears whether or not `registerAs` was supplied — without it, the handler runs an internal probe to recover authoritative types that would otherwise be lost when DuckDB BigInts serialize to JSON strings.',
+      'DuckDB column type (e.g. VARCHAR, BIGINT, DOUBLE, BOOLEAN, JSON), the same with or without `registerAs`.',
     ),
 });
 
@@ -125,9 +182,7 @@ const OutputSchema = z.object({
     .describe('Total rows the query produced (may exceed `rows.length` when capped).'),
   columns: z
     .array(ColumnInfoSchema.describe('One column descriptor — name and SQL/DuckDB type.'))
-    .describe(
-      'Column metadata in projection order — name and SQL type. Use this to write follow-up queries without round-tripping through brapi_dataframe_describe.',
-    ),
+    .describe('Column names and types in projection order, enough to write a follow-up query.'),
   rows: z
     .array(
       z
@@ -153,9 +208,30 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
     {
       reason: 'sql_rejected',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'SQL violated read-only rules (multi-statement, non-SELECT, or disallowed operation)',
+      when: 'SQL broke the read-only rules: more than one statement, a non-SELECT, a disallowed operation or function, a file or URL named as a table, a system-catalog read, or a DESCRIBE, SUMMARIZE, or SHOW statement',
       recovery:
         'Submit a single SELECT statement using only registered dataframes. For changes, use `registerAs` in this tool to materialize a result, or brapi_dataframe_drop to remove a dataframe.',
+    },
+    {
+      reason: 'sql_execution_error',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The SELECT passed the read-only rules but failed while running on the staged data, such as a cast of a value that does not convert',
+      recovery:
+        'Fix the expression the message points at: use TRY_CAST for conversions, or filter out the rows that fail, then resubmit the query.',
+    },
+    {
+      reason: 'missing_table',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The SQL names a dataframe this workspace does not hold, because it expired, was dropped, or the name is mistyped',
+      recovery:
+        'Re-run the tool that produced it to stage a fresh copy, or check the exact name with brapi_dataframe_describe.',
+    },
+    {
+      reason: 'register_as_clash',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The registerAs name is already taken by a dataframe in this workspace',
+      recovery:
+        'Choose a different `registerAs` name, or remove the existing dataframe with brapi_dataframe_drop where this deployment enables it.',
     },
   ] as const,
   input: InputSchema,
@@ -171,7 +247,9 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
       .int()
       .positive()
       .optional()
-      .describe('Row ceiling that bound the response (the smaller of preview and rowLimit).'),
+      .describe(
+        'Row ceiling that bound the response: the smallest of preview, rowLimit, and the deployment-wide response cap.',
+      ),
     notice: z
       .string()
       .optional()
@@ -192,15 +270,36 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
     try {
       result = await bridge.query(ctx, input.sql, queryOpts);
     } catch (err) {
-      const gateReason = extractSqlGateReason(err);
-      if (gateReason === undefined) throw err;
-      const message = err instanceof Error ? err.message : 'Query rejected.';
-      throw ctx.fail(
-        'sql_rejected',
-        message,
-        { gateReason, ...extractGateContext(err) },
-        { cause: err },
-      );
+      if (!(err instanceof McpError)) throw err;
+      const reason = reasonOf(err);
+      if (isParserFailure(err, reason)) {
+        throw ctx.fail(
+          'sql_rejected',
+          NOT_A_QUERY_MESSAGE,
+          { gateReason: DUCKDB_ERROR_REASONS.sqlParseError },
+          { cause: err },
+        );
+      }
+      const message = quoteCallerSql(err.message, input.sql, probeName);
+      const context = extractGateContext(err);
+      if (
+        reason !== undefined &&
+        REFUSAL_REASONS.has(reason) &&
+        err.code === JsonRpcErrorCode.ValidationError
+      ) {
+        throw ctx.fail('sql_rejected', message, { gateReason: reason, ...context }, { cause: err });
+      }
+      if (reason === 'sql_execution_error') {
+        throw ctx.fail('sql_execution_error', message, context, { cause: err });
+      }
+      if (reason === 'missing_table') {
+        throw ctx.fail('missing_table', message, context, { cause: err });
+      }
+      if (reason === 'register_as_clash') {
+        throw ctx.fail('register_as_clash', message, context, { cause: err });
+      }
+      if (message === err.message) throw err;
+      throw new McpError(err.code, message, err.data, { cause: err });
     }
 
     let typedColumns: { name: string; type: string }[];
@@ -227,15 +326,21 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
     if (userRegisterAs !== undefined) out.dataframe = userRegisterAs;
 
     if (out.rows.length < out.rowCount) {
-      // Two ceilings can bind here — `preview` and the (config-clamped)
-      // `rowLimit` — and the rows that came back are exactly the one that did,
-      // so report that count as the cap and name the lever that produced it.
+      // Three ceilings can bind here — `preview`, the caller's `rowLimit`, and
+      // the deployment-wide cap the bridge clamps both to — and the rows that
+      // came back are exactly the one that did, so report that count as the
+      // cap and name the lever that produced it.
       const shown = out.rows.length;
-      const lever = input.preview !== undefined && shown === input.preview ? 'preview' : 'rowLimit';
+      const lever =
+        input.preview !== undefined && shown === input.preview
+          ? '`preview`'
+          : input.rowLimit !== undefined && shown === input.rowLimit
+            ? '`rowLimit`'
+            : 'The deployment-wide response cap';
       ctx.enrich.truncated({
         shown,
         cap: shown,
-        guidance: `\`${lever}\` bound the response at ${shown} of ${out.rowCount} rows. ${
+        guidance: `${lever} bound the response at ${shown} of ${out.rowCount} rows. ${
           userRegisterAs
             ? `Query \`${userRegisterAs}\` with LIMIT/OFFSET to walk the remainder, or aggregate instead of materializing it.`
             : 'Re-run with `registerAs` to keep the full result queryable, then page it with LIMIT/OFFSET.'

@@ -6,8 +6,9 @@
  * @module tests/tools/brapi-find-images.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindImages } from '@/mcp-server/tools/definitions/brapi-find-images.tool.js';
@@ -206,5 +207,105 @@ describe('brapi_find_images tool', () => {
     expect(text).toContain('image/jpeg');
     expect(text).toContain('1024×768');
     expect(text).toContain('Cassava 2022');
+  });
+});
+
+describe('brapi_find_images inline budget (#66)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  /** Serve a paged /images list, failing walk pages from `failFromPage`; any other host fails the call. */
+  function serve(rows: Record<string, unknown>[], failFromPage = Number.POSITIVE_INFINITY): void {
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      if (u.hostname !== 'brapi.example.org' || u.pathname !== '/brapi/v2/images') {
+        throw new Error(`unmocked fetch: ${u.href}`);
+      }
+      const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
+      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10);
+      if (page >= failFromPage) return jsonResponse({ error: 'upstream down' }, 500);
+      return jsonResponse(
+        envelope(
+          { data: rows.slice(page * pageSize, page * pageSize + pageSize) },
+          { totalCount: rows.length },
+        ),
+      );
+    });
+  }
+
+  async function call(ctx: Context, input: Record<string, unknown>) {
+    const definition = {
+      ...brapiFindImages,
+      handler: (parsed, contractCtx) =>
+        brapiFindImages.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFindImages;
+    const result = await runToolContract(definition, input, { context: { tenantId: 't1' } });
+    const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+    return { result, structured: result.structuredContent as Record<string, unknown>, text };
+  }
+
+  const images = (n: number, extra: Record<string, unknown> = {}) =>
+    Array.from({ length: n }, (_, i) => imgRow({ imageDbId: `img-${i + 1}`, ...extra }));
+
+  it('trims results[] to the byte budget and stages every matched row', async () => {
+    const ctx = await connect(fetcher);
+    // ~5 KB per row: four fit the 24,000-byte budget.
+    serve(images(8, { description: 'd'.repeat(4_800) }));
+
+    const { result, structured, text } = await call(ctx, { studies: ['s-1'] });
+
+    expect(result.isError).toBeFalsy();
+    expect(fetcher.mock.calls.length).toBe(1);
+    expect(Buffer.byteLength(JSON.stringify(structured.results), 'utf8')).toBeLessThanOrEqual(
+      24_000,
+    );
+    expect(structured).toMatchObject({
+      returnedCount: 4,
+      totalCount: 8,
+      hasMore: true,
+      truncated: true,
+      shown: 4,
+      cap: 1_000,
+      dataframe: { rowCount: 8 },
+    });
+    expect(text).toContain('24,000-byte inline budget');
+  });
+
+  it('sets no truncation fields and stages nothing on an empty result', async () => {
+    const ctx = await connect(fetcher);
+    serve([]);
+
+    const { result, structured } = await call(ctx, { studies: ['s-1'] });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({ returnedCount: 0, hasMore: false, results: [] });
+    expect(structured.notice).toMatch(/^No images matched/);
+    for (const key of ['truncated', 'shown', 'cap', 'dataframe']) {
+      expect(structured).not.toHaveProperty(key);
+    }
+  });
+
+  it('reports a failed walk page in warnings, staging the rows already fetched', async () => {
+    const ctx = await connect(fetcher);
+    serve(images(25), 1);
+
+    const { structured, text } = await call(ctx, { studies: ['s-1'], loadLimit: 5 });
+
+    expect(structured).toMatchObject({
+      returnedCount: 5,
+      hasMore: true,
+      dataframe: { rowCount: 10, truncated: true },
+    });
+    expect((structured.warnings as string[]).join('\n')).toContain(
+      'Dataframe walk stopped after 10 of 25 upstream row(s)',
+    );
+    expect(text).toContain('Dataframe walk stopped after 10 of 25 upstream row(s)');
   });
 });

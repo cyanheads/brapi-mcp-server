@@ -9,7 +9,6 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { config } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   AUTH_BASE_URL_MISMATCH_RECOVERY,
@@ -24,6 +23,7 @@ import {
 } from '@/services/capability-registry/index.js';
 import { getServerRegistry } from '@/services/server-registry/index.js';
 import { ConnectAuthSchema } from '../shared/connect-auth-schema.js';
+import { isSharedTenantHttp, logConnectionRegistered } from '../shared/find-helpers.js';
 import {
   buildOrientationEnvelope,
   formatOrientationEnvelope,
@@ -31,7 +31,7 @@ import {
 } from '../shared/orientation-envelope.js';
 
 const BASE_DESCRIPTION =
-  'Open a connection to a BrAPI v2 server, authenticate, and return the full orientation envelope (server identity, capability profile, content summary, suggested next tools). Required handshake before other BrAPI tools. Supports multiple concurrent connections via named aliases. Credentials can be configured server-side and omitted from this call. When a request carries no MCP session on a deployment without per-user auth, aliases live in one namespace shared by every such caller: re-registering an alias re-points their later calls to it.';
+  'Open a connection to a BrAPI v2 server, authenticate, and return the full orientation envelope (server identity, capability profile, content summary, suggested next tools). Other BrAPI tools connect an alias the server has a URL configured for (a built-in or operator-configured alias, or `default` on a deployment with a default server) on first use; call this to connect any other server by `baseUrl`, to pass `auth`, or to re-point an alias. Supports multiple concurrent connections via named aliases. Credentials can be configured server-side and omitted from this call. When a request carries no MCP session on a deployment without per-user auth, aliases live in one namespace shared by every such caller: re-registering an alias re-points their later calls to it.';
 
 const CONFIGURED_ALIASES_HINT = formatConfiguredAliasesHint(discoverConfiguredAliases());
 
@@ -71,6 +71,24 @@ export const brapiConnect = tool('brapi_connect', {
       thrownBy: 'service',
     },
     {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'With no `baseUrl` passed, the base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Set BRAPI_<ALIAS>_BASE_URL on the server to an absolute http(s) URL for this alias before retrying.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL, or the OAuth token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Pass a publicly routable baseUrl, or ask the operator to allow private addresses on this server.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
       reason: 'auth_token_exchange_failed',
       code: JsonRpcErrorCode.Forbidden,
       when: 'SGN or OAuth token exchange against the BrAPI /token endpoint failed',
@@ -99,6 +117,15 @@ export const brapiConnect = tool('brapi_connect', {
       when: 'The server answered HTTP 403 on /serverinfo or /calls — the request (anonymous or credentialed) lacks read access',
       recovery:
         'Retry brapi_connect with credentials that have read access to this server, or ask the operator to configure such credentials for this alias server-side.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_connect in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
       thrownBy: 'service',
     },
   ] as const,
@@ -158,26 +185,7 @@ export const brapiConnect = tool('brapi_connect', {
     if (connection.resolvedAuth) profileLookup.auth = connection.resolvedAuth;
     await capabilities.profile(connection.baseUrl, ctx, profileLookup);
     await registry.save(ctx, connection);
-
-    ctx.log.info('BrAPI connection registered', {
-      alias: connection.alias,
-      baseUrl: connection.baseUrl,
-      authMode: connection.authMode,
-      authSource: input.auth ? 'agent' : 'env',
-    });
-
-    if (isSharedTenantHttp() && connection.authMode !== 'none') {
-      ctx.log.notice(
-        'Connection credentials persisted under shared `default` tenant — set MCP_AUTH_MODE=jwt|oauth for per-client isolation.',
-        {
-          alias: connection.alias,
-          baseUrl: connection.baseUrl,
-          authMode: connection.authMode,
-          mcpTransport: config.mcpTransportType,
-          mcpAuthMode: config.mcpAuthMode,
-        },
-      );
-    }
+    logConnectionRegistered(ctx, connection, { authSource: input.auth ? 'agent' : 'env' });
 
     return buildOrientationEnvelope(ctx, connection, {
       registry: capabilities,
@@ -187,12 +195,3 @@ export const brapiConnect = tool('brapi_connect', {
 
   format: (result) => [{ type: 'text', text: formatOrientationEnvelope(result) }],
 });
-
-/**
- * True when the server is running over HTTP without per-client auth, in which
- * case `ctx.state` collapses every caller into the shared `default` tenant —
- * including the bearer token resolved by SGN/OAuth at connection time.
- */
-function isSharedTenantHttp(): boolean {
-  return config.mcpTransportType === 'http' && config.mcpAuthMode === 'none';
-}

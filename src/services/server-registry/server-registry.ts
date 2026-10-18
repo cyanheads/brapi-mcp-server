@@ -12,13 +12,23 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import {
   forbidden,
+  JsonRpcErrorCode,
+  McpError,
   notFound,
   serviceUnavailable,
+  timeout,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
-import type { ResolvedAuth } from '@/services/brapi-client/index.js';
+import {
+  callDeadlineAt,
+  callDeadlineExceeded,
+  isPrivateAddressBlocked,
+  PRIVATE_ADDRESS_BLOCKED_REASON,
+  type ResolvedAuth,
+  UPSTREAM_TIMEOUT_HINT,
+} from '@/services/brapi-client/index.js';
 import type { AuthMode, ConnectAuth, RegisteredServer } from './types.js';
 
 export const DEFAULT_ALIAS = 'default';
@@ -32,11 +42,50 @@ export interface RegisterInput {
   baseUrl: string;
 }
 
+/** A first-use registration in flight, and the signal of the call running it. */
+interface PendingRegistration {
+  promise: Promise<RegisteredServer>;
+  signal: AbortSignal;
+}
+
 export class ServerRegistry {
+  /** In-flight {@link registerOnce} runs, keyed by tenant + scoped alias key. */
+  private readonly pending = new Map<string, PendingRegistration>();
+
   constructor(
     private readonly serverConfig: ServerConfig,
     private readonly tokenFetcher: TokenFetcher = defaultTokenFetcher,
   ) {}
+
+  /**
+   * Run `register` for an alias, sharing one run among concurrent callers in
+   * the same tenant and scope so a token exchange and capability discovery
+   * happen once; every caller gets that run's connection or its error. A
+   * caller whose shared run was cancelled by the call that started it starts
+   * its own run instead of inheriting the cancellation. Shared within this
+   * process only.
+   */
+  async registerOnce(
+    ctx: Context,
+    alias: string,
+    register: () => Promise<RegisteredServer>,
+  ): Promise<RegisteredServer> {
+    const key = `${ctx.tenantId ?? ''}\n${this.connKey(ctx, alias)}`;
+    const inflight = this.pending.get(key);
+    if (inflight) {
+      try {
+        return await inflight.promise;
+      } catch (err) {
+        if (inflight.signal.aborted && !ctx.signal.aborted) {
+          return await this.registerOnce(ctx, alias, register);
+        }
+        throw err;
+      }
+    }
+    const promise = register().finally(() => this.pending.delete(key));
+    this.pending.set(key, { promise, signal: ctx.signal });
+    return await promise;
+  }
 
   /**
    * Register a connection under an alias: {@link resolve} then {@link save}.
@@ -174,7 +223,7 @@ export class ServerRegistry {
     ctx: Context,
   ): Promise<ResolvedAuth> {
     const tokenUrl = joinUrl(baseUrl, '/token');
-    const payload = await this.tokenFetcher(
+    const payload = await this.fetchToken(
       tokenUrl,
       {
         username: auth.username,
@@ -182,14 +231,10 @@ export class ServerRegistry {
         grant_type: 'password',
       },
       ctx,
-      {
-        timeoutMs: this.serverConfig.requestTimeoutMs,
-        rejectPrivateIPs: !this.serverConfig.allowPrivateIps,
-      },
     );
     if (!payload.access_token) {
       throw forbidden('SGN token exchange returned no access_token', {
-        tokenUrl,
+        tokenUrl: displayTokenUrl(tokenUrl),
         payloadKeys: Object.keys(payload),
         reason: 'auth_no_access_token',
       });
@@ -210,7 +255,7 @@ export class ServerRegistry {
     ctx: Context,
   ): Promise<ResolvedAuth> {
     const tokenUrl = auth.tokenUrl ?? joinUrl(baseUrl, '/token');
-    const payload = await this.tokenFetcher(
+    const payload = await this.fetchToken(
       tokenUrl,
       {
         client_id: auth.clientId,
@@ -218,14 +263,10 @@ export class ServerRegistry {
         grant_type: 'client_credentials',
       },
       ctx,
-      {
-        timeoutMs: this.serverConfig.requestTimeoutMs,
-        rejectPrivateIPs: !this.serverConfig.allowPrivateIps,
-      },
     );
     if (!payload.access_token) {
       throw forbidden('OAuth2 token exchange returned no access_token', {
-        tokenUrl,
+        tokenUrl: displayTokenUrl(tokenUrl),
         payloadKeys: Object.keys(payload),
         reason: 'auth_no_access_token',
       });
@@ -242,6 +283,38 @@ export class ServerRegistry {
       resolved.expiresAt = new Date(Date.now() + payload.expires_in * 1000).toISOString();
     }
     return resolved;
+  }
+
+  /**
+   * The token exchange runs first in a connect, under the same call deadline
+   * as the BrAPI requests that follow it (see `callDeadlineAt`). A `/token`
+   * that does not answer in time fails as a `Timeout` with the upstream-timeout
+   * hint — it says nothing about the credentials — and the call deadline's
+   * `Timeout` when that deadline is what cut the wait short.
+   */
+  private async fetchToken(
+    tokenUrl: string,
+    body: Record<string, unknown>,
+    ctx: Context,
+  ): Promise<TokenResponse> {
+    const { requestTimeoutMs } = this.serverConfig;
+    const callRemainingMs = callDeadlineAt(ctx) - Date.now();
+    const clipped = callRemainingMs < requestTimeoutMs;
+    try {
+      return await this.tokenFetcher(tokenUrl, body, ctx, {
+        timeoutMs: clipped ? callRemainingMs : requestTimeoutMs,
+        rejectPrivateIPs: !this.serverConfig.allowPrivateIps,
+      });
+    } catch (err) {
+      if (ctx.signal.aborted || !isTimeout(err)) throw err;
+      if (clipped) throw callDeadlineExceeded('POST /token', { sent: true }, err);
+      const shown = displayTokenUrl(tokenUrl);
+      throw timeout(
+        `Token exchange at ${shown} did not answer within ${requestTimeoutMs} ms.`,
+        { tokenUrl: shown, retryable: true, recovery: { hint: UPSTREAM_TIMEOUT_HINT } },
+        { cause: err },
+      );
+    }
   }
 }
 
@@ -264,6 +337,7 @@ interface TokenResponse {
 }
 
 const defaultTokenFetcher: TokenFetcher = async (url, body, ctx, options) => {
+  const shown = displayTokenUrl(url);
   const form = new URLSearchParams();
   for (const [key, value] of Object.entries(body)) {
     if (value !== undefined && value !== null) form.set(key, String(value));
@@ -281,10 +355,24 @@ const defaultTokenFetcher: TokenFetcher = async (url, body, ctx, options) => {
       rejectPrivateIPs: options.rejectPrivateIPs,
     });
   } catch (err) {
+    // A stall or a cancellation is not a rejected exchange; the registry reports those.
+    if (ctx.signal.aborted || (isTimeout(err) && err.data?.errorSource !== 'FetchHttpError')) {
+      throw err;
+    }
+    // Nor is a refused address: it fails with its own reason, and the calling
+    // tool's contract supplies the hint.
+    if (isPrivateAddressBlocked(err)) {
+      throw new McpError(
+        err.code,
+        `Token exchange at ${shown} was refused: the host is on a private or reserved address, which this server is not allowed to reach.`,
+        { tokenUrl: shown, reason: PRIVATE_ADDRESS_BLOCKED_REASON },
+        { cause: err },
+      );
+    }
     throw forbidden(
-      `Token exchange failed at ${url}. Verify credentials and that the server exposes /token.`,
+      `Token exchange failed at ${shown}. Verify credentials and that the server exposes /token.`,
       {
-        tokenUrl: url,
+        tokenUrl: shown,
         reason: 'auth_token_exchange_failed',
       },
       { cause: err },
@@ -292,18 +380,36 @@ const defaultTokenFetcher: TokenFetcher = async (url, body, ctx, options) => {
   }
   const text = await response.text();
   if (!text) {
-    throw serviceUnavailable('Token exchange returned an empty body', { tokenUrl: url });
+    throw serviceUnavailable('Token exchange returned an empty body', { tokenUrl: shown });
   }
   try {
     return JSON.parse(text) as TokenResponse;
   } catch (err) {
     throw serviceUnavailable(
       'Token exchange returned non-JSON response',
-      { tokenUrl: url, bodyPreview: text.slice(0, 200) },
+      { tokenUrl: shown, bodyPreview: text.slice(0, 200) },
       { cause: err },
     );
   }
 };
+
+/**
+ * A token URL as errors and logs name it: origin and path only. A configured
+ * or caller-supplied token URL is never checked for userinfo or a query
+ * string, either of which can carry a secret.
+ */
+function displayTokenUrl(tokenUrl: string): string {
+  try {
+    const parsed = new URL(tokenUrl);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return '[unparseable token URL]';
+  }
+}
+
+function isTimeout(error: unknown): error is McpError {
+  return error instanceof McpError && error.code === JsonRpcErrorCode.Timeout;
+}
 
 function validateAlias(alias: string): void {
   if (!/^[a-zA-Z0-9_-]+$/.test(alias)) {
@@ -314,7 +420,8 @@ function validateAlias(alias: string): void {
   }
 }
 
-function validateBaseUrl(baseUrl: string): void {
+/** Throw a `ValidationError` unless `baseUrl` is an absolute http(s) URL without userinfo. */
+export function validateBaseUrl(baseUrl: string): void {
   let parsed: URL;
   try {
     parsed = new URL(baseUrl);

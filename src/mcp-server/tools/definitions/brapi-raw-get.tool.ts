@@ -26,9 +26,13 @@ import {
   DataframeHandleSchema,
   extractListRows,
   LoadLimitInput,
+  NonBlankString,
+  noteSpillStop,
   renderDataframeHandle,
+  renderWarningsTrailer,
   requireRegisteredConnection,
   spillToCanvas,
+  stagedDataframeNotice,
   toDataframeHandle,
 } from '../shared/find-helpers.js';
 import { suggestForGet } from '../shared/raw-routing-hints.js';
@@ -45,7 +49,7 @@ const PaginationSchema = z
   .describe('BrAPI pagination block. Absent when the endpoint does not paginate.');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   url: z.string().describe('Fully resolved URL that was fetched (baseUrl + path + query string).'),
   path: z
     .string()
@@ -60,9 +64,11 @@ const OutputSchema = z.object({
   suggestion: z
     .string()
     .optional()
-    .describe('Emitted when a curated goal-shaped tool covers this endpoint.'),
+    .describe(
+      'Emitted when a curated goal-shaped tool covers this endpoint, or takes the IDs it lists.',
+    ),
   dataframe: DataframeHandleSchema.optional().describe(
-    'Present when the upstream advertised more rows than `loadLimit` AND the result is a list shape. The inline `result` is unchanged; the dataframe carries the full union of pages — query with brapi_dataframe_query.',
+    'The pages of a list-shaped result, staged when the upstream advertised more rows than `loadLimit`. The inline `result` is unchanged.',
   ),
 });
 
@@ -70,15 +76,74 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiRawGet = tool('brapi_raw_get', {
   description:
-    'Passthrough to any BrAPI GET /{path} endpoint. Returns the raw upstream envelope without enrichment or foreign-key resolution. Emits a `suggestion` field when a curated tool exists for the same data. Spills to a canvas dataframe when the upstream advertises more rows than `loadLimit` AND the result is a list shape (`result` array or `result.data` envelope); inline `result` is unchanged. Skips spillover when the caller drives paging via `params.page` / `params.pageSize`.',
+    'Passthrough to any BrAPI GET /{path} endpoint. Returns the raw upstream envelope without enrichment or foreign-key resolution. Emits a `suggestion` field when a curated tool exists for the same data. Spills to a canvas dataframe when the upstream advertises more rows than `loadLimit` AND the result is a list shape (`result` array or `result.data` envelope) — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL); inline `result` is unchanged. Skips spillover when the caller drives paging via `params.page` / `params.pageSize`.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_raw_get.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_raw_get.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_raw_get in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_raw_get.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_raw_get.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_raw_get.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_raw_get.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -91,10 +156,9 @@ export const brapiRawGet = tool('brapi_raw_get', {
   ] as const,
   input: z.object({
     alias: AliasInput,
-    path: z
-      .string()
-      .min(1)
-      .describe('Endpoint path — e.g. "/samples", "/methods". Leading "/" is optional.'),
+    path: NonBlankString.describe(
+      'Endpoint path — e.g. "/samples", "/methods". Leading "/" is optional.',
+    ),
     params: z
       .record(
         z.string(),
@@ -102,9 +166,28 @@ export const brapiRawGet = tool('brapi_raw_get', {
       )
       .optional()
       .describe('Query parameters to append. Arrays are repeated per BrAPI convention.'),
-    loadLimit: LoadLimitInput,
+    loadLimit: LoadLimitInput.describe(
+      'Cap on rows returned inline. Omit for the deployment default. Rows beyond the cap land in a dataframe; query with brapi_dataframe_query (SQL) instead of paging row-by-row.',
+    ),
   }),
   output: OutputSchema,
+
+  enrichment: {
+    warnings: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Advisory messages — present when the dataframe walk stopped before the upstream total.',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe('When a dataframe was staged, its name and the tools that read it.'),
+  },
+
+  enrichmentTrailer: {
+    warnings: { render: renderWarningsTrailer },
+  },
 
   async handler(input, ctx) {
     const client = getBrapiClient();
@@ -166,7 +249,12 @@ export const brapiRawGet = tool('brapi_raw_get', {
           filters: (input.params ?? {}) as Record<string, unknown>,
           source: 'raw_get',
         });
-        result.dataframe = toDataframeHandle(spill.dataframe);
+        const warning = noteSpillStop(ctx, 'raw_get', spill, totalCount);
+        if (warning) ctx.enrich({ warnings: [warning] });
+        if (spill.dataframe) {
+          result.dataframe = toDataframeHandle(spill.dataframe);
+          ctx.enrich.notice(stagedDataframeNotice([result.dataframe]));
+        }
       }
     }
     return result;

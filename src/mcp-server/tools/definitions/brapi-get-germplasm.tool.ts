@@ -21,6 +21,7 @@ import {
   fetchTotalCount,
   fetchValidatedScopedCount,
   isUpstreamNotFound,
+  NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
 
@@ -88,7 +89,7 @@ const AttributeSchema = z
   .describe('One germplasm attribute record.');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   germplasm: GermplasmSchema.describe(
     'Canonical germplasm record as returned by `/germplasm/{id}`.',
   ),
@@ -102,7 +103,11 @@ const OutputSchema = z.object({
     .nonnegative()
     .optional()
     .describe('How many studies this germplasm has appeared in.'),
-  directParentCount: z.number().int().nonnegative().describe('Count of direct parents.'),
+  directParentCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .describe('Length of parents[]; 0 also when the pedigree lookup is unsupported or failed.'),
   directDescendantCount: z
     .number()
     .int()
@@ -124,9 +129,68 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_get_germplasm.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_get_germplasm.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_get_germplasm in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_get_germplasm.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_get_germplasm.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_get_germplasm.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_get_germplasm.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -138,7 +202,7 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     },
   ] as const,
   input: z.object({
-    germplasmDbId: z.string().min(1).describe('Germplasm identifier.'),
+    germplasmDbId: NonBlankString.describe('Germplasm identifier.'),
     alias: AliasInput,
   }),
   output: OutputSchema,

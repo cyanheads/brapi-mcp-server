@@ -85,6 +85,19 @@ describe('brapi_raw_search tool', () => {
     expect(result.suggestion).toContain('brapi_find_observations');
   });
 
+  it('names the genotype tools that take a variantSetDbId when searching variantsets', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [{ variantSetDbId: 'vs1' }] })));
+
+    const result = await brapiRawSearch.handler(
+      brapiRawSearch.input.parse({ noun: 'variantsets', body: {} }),
+      ctx,
+    );
+
+    expect(result.suggestion).toContain('brapi_find_genotype_calls');
+    expect(result.suggestion).toContain('brapi_export_genotype_matrix');
+  });
+
   it('renders async cancellation consistently on both error surfaces without polling again', async () => {
     const ctx = await connect(fetcher);
     const controller = new AbortController();
@@ -169,35 +182,6 @@ describe('brapi_raw_search tool', () => {
     expect(text).toContain('async');
   });
 
-  it('spills sync results to a canvas dataframe when totalCount > loadLimit', async () => {
-    const ctx = await connect(fetcher);
-    const totalCount = 15;
-    const allRows = Array.from({ length: totalCount }, (_, i) => ({
-      observationDbId: `o${i + 1}`,
-      value: String(i),
-    }));
-    fetcher.mockImplementation(
-      async (_url: string, _init?: unknown, _signal?: unknown, init?: RequestInit) => {
-        const body = init?.body ? JSON.parse(init.body as string) : {};
-        const page = typeof body.page === 'number' ? body.page : 0;
-        const pageSize = typeof body.pageSize === 'number' ? body.pageSize : 10;
-        return jsonResponse(
-          envelope({ data: allRows.slice(page * pageSize, page * pageSize + pageSize) }, {
-            totalCount,
-          } as unknown as { totalCount: number }),
-        );
-      },
-    );
-    const result = await brapiRawSearch.handler(
-      brapiRawSearch.input.parse({ noun: 'observations', body: {}, loadLimit: 10 }),
-      ctx,
-    );
-    expect(result.kind).toBe('sync');
-    expect(result.dataframe).toBeDefined();
-    expect(result.dataframe?.rowCount).toBe(15);
-    expect(result.dataframe?.tableName).toMatch(/^df_/);
-  });
-
   it('does not spill when totalCount fits within loadLimit', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(
@@ -237,5 +221,94 @@ describe('brapi_raw_search tool', () => {
     const init = fetcher.mock.calls[0]![3] as RequestInit;
     const body = JSON.parse(init.body as string);
     expect(body.pageSize).toBe(5);
+  });
+
+  describe('dataframe spill and walk stop disclosure', () => {
+    const allRows = Array.from({ length: 25 }, (_, i) => ({ observationDbId: `o${i + 1}` }));
+
+    /** Serve POST /search/observations pages, failing pages at or past `failFromPage`. */
+    function serve(failFromPage: number): void {
+      fetcher.mockImplementation(
+        async (url: string, _init?: unknown, _signal?: unknown, init?: RequestInit) => {
+          const u = new URL(String(url));
+          if (
+            u.hostname !== 'brapi.example.org' ||
+            u.pathname !== '/brapi/v2/search/observations'
+          ) {
+            throw new Error(`unmocked fetch: ${u.href}`);
+          }
+          const body = init?.body ? JSON.parse(init.body as string) : {};
+          const page = typeof body.page === 'number' ? body.page : 0;
+          if (page >= failFromPage) return jsonResponse({ error: 'upstream down' }, 500);
+          const pageSize = typeof body.pageSize === 'number' ? body.pageSize : 10;
+          const totalCount = allRows.length;
+          return jsonResponse({
+            metadata: {
+              pagination: {
+                currentPage: page,
+                pageSize,
+                totalCount,
+                totalPages: Math.ceil(totalCount / pageSize),
+              },
+            },
+            result: { data: allRows.slice(page * pageSize, page * pageSize + pageSize) },
+          });
+        },
+      );
+    }
+
+    async function run(ctx: Awaited<ReturnType<typeof connect>>) {
+      const definition = {
+        ...brapiRawSearch,
+        handler(input, contractCtx) {
+          return brapiRawSearch.handler(input, { ...contractCtx, state: ctx.state });
+        },
+      } satisfies typeof brapiRawSearch;
+      const result = await runToolContract(
+        definition,
+        { noun: 'observations', body: {}, loadLimit: 10 },
+        { context: { tenantId: 't1' } },
+      );
+      const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+      return { result, structured: result.structuredContent as Record<string, unknown>, text };
+    }
+
+    it('warns on both surfaces when a walk page fails, staging the rows already fetched', async () => {
+      const ctx = await connect(fetcher);
+      serve(1);
+
+      const { result, structured, text } = await run(ctx);
+
+      expect(result.isError).toBeFalsy();
+      expect(structured.dataframe).toMatchObject({ rowCount: 10, truncated: true });
+      const warnings = structured.warnings as string[];
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('Dataframe walk stopped after 10 of 25 upstream row(s)');
+      expect(warnings[0]).toContain('page 1 failed');
+      expect(text).toContain('Dataframe walk stopped after 10 of 25 upstream row(s)');
+      expect(text).toContain(`**Warnings:**\n- ${warnings[0]}`);
+      const tableName = (structured.dataframe as { tableName: string }).tableName;
+      expect(structured.notice).toBe(
+        `Staged dataframe \`${tableName}\` (10 rows, truncated — warnings says why): list its columns with brapi_dataframe_describe, then query it with brapi_dataframe_query (SQL).`,
+      );
+      expect(text).toContain(`> ${structured.notice as string}`);
+    });
+
+    it('spills sync results past loadLimit, with no warnings when the walk reaches the upstream total', async () => {
+      const ctx = await connect(fetcher);
+      serve(Number.POSITIVE_INFINITY);
+
+      const { structured, text } = await run(ctx);
+
+      expect(structured.kind).toBe('sync');
+      expect(structured.dataframe).toMatchObject({
+        rowCount: 25,
+        tableName: expect.stringMatching(/^df_/),
+      });
+      expect(structured).not.toHaveProperty('warnings');
+      expect(structured.notice).toContain('brapi_dataframe_describe');
+      expect(structured.notice).toContain('brapi_dataframe_query');
+      expect(text).not.toContain('**Warnings:**');
+    });
   });
 });

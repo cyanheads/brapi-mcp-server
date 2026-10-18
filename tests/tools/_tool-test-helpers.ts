@@ -9,11 +9,16 @@
  */
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { timeout } from '@cyanheads/mcp-ts-core/errors';
 import { vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { resetServerConfig } from '@/config/server-config.js';
 import type { Fetcher } from '@/services/brapi-client/index.js';
-import { initBrapiClient, resetBrapiClient } from '@/services/brapi-client/index.js';
+import {
+  CALL_DEADLINE_MS,
+  initBrapiClient,
+  resetBrapiClient,
+} from '@/services/brapi-client/index.js';
 import {
   initBrapiDialectRegistry,
   resetBrapiDialectRegistry,
@@ -102,4 +107,38 @@ export function resetTestServices(): void {
 /** Extracts the pathname of a URL passed to the fetcher, without query. */
 export function pathnameOf(url: unknown): string {
   return new URL(String(url)).pathname;
+}
+
+/**
+ * A host that accepts the request and never answers: like `fetchWithTimeout`,
+ * settles only by rejecting with `Timeout` at `timeoutMs` or when `signal`
+ * aborts. Use as `fetcher.mockImplementation((url, timeoutMs, _ctx, init) => stalledResponse(timeoutMs, init?.signal))`.
+ */
+export function stalledResponse(timeoutMs: number, signal?: AbortSignal): Promise<Response> {
+  return new Promise((_, reject) => {
+    const timer = setTimeout(
+      () =>
+        reject(timeout(`Fetch timed out after ${timeoutMs}ms`, { errorSource: 'FetchTimeout' })),
+      timeoutMs,
+    );
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+}
+
+/**
+ * `ctx` (same state, signal, and logger) as if its call had started long
+ * enough ago to leave `remainingMs` of the call deadline.
+ */
+export function withCallRemaining<T extends { timestamp: string }>(ctx: T, remainingMs: number): T {
+  return {
+    ...ctx,
+    timestamp: new Date(Date.now() - (CALL_DEADLINE_MS - remainingMs)).toISOString(),
+  };
 }

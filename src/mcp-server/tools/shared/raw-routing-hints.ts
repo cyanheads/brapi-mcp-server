@@ -1,15 +1,16 @@
 /**
  * @fileoverview Routing nudges emitted by `brapi_raw_get` / `brapi_raw_search`
- * when the target endpoint is already covered by a curated goal-shaped tool.
- * Keeps the raw surface honest about its role as a last-resort escape hatch.
+ * when the target endpoint is already covered by a curated goal-shaped tool,
+ * or lists the IDs a curated tool takes next. Keeps the raw surface honest
+ * about its role as a last-resort escape hatch.
  *
  * @module mcp-server/tools/shared/raw-routing-hints
  */
 
 /**
  * Map from a normalized path segment (no leading slash, no query) to the
- * goal-shaped tool that enriches it. Only endpoints that a curated tool
- * strictly supersedes should appear here; niche endpoints stay quiet.
+ * goal-shaped tool that enriches it, or — for a list no curated tool serves —
+ * the curated tools its IDs feed. Niche endpoints stay quiet.
  */
 const GET_NUDGES: Record<string, string> = {
   studies:
@@ -24,6 +25,8 @@ const GET_NUDGES: Record<string, string> = {
     'This endpoint is also served by `brapi_find_images`; use `brapi_get_image` to pull bytes inline.',
   variants:
     'This endpoint is also served by `brapi_find_variants` which handles distributions and dataframe spillover.',
+  variantsets:
+    'Pass a `variantSetDbId` from these rows to `brapi_find_genotype_calls` or `brapi_export_genotype_matrix`, or as `variantSets` to `brapi_find_variants`.',
   locations:
     'This endpoint is also served by `brapi_find_locations` which adds distributions and optional bounding-box filtering.',
   serverinfo:
@@ -43,6 +46,8 @@ const SEARCH_NUDGES: Record<string, string> = {
     'Consider `brapi_find_genotype_calls` — handles async-search polling, deployment-side pull limit, and dataframe spillover automatically.',
   images: 'Consider `brapi_find_images`.',
   variants: 'Consider `brapi_find_variants`.',
+  variantsets:
+    'Pass a `variantSetDbId` from these rows to `brapi_find_genotype_calls` or `brapi_export_genotype_matrix`, or as `variantSets` to `brapi_find_variants`.',
   locations: 'Consider `brapi_find_locations`.',
 };
 

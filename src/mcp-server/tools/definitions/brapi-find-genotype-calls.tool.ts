@@ -5,9 +5,9 @@
  * the hood. The upstream pull is bounded by `BRAPI_GENOTYPE_CALLS_MAX_PULL`
  * (operator policy, default 100k, max 500k) so a single query can't trigger
  * unbounded sequential paginated GETs against the upstream BrAPI server.
- * `loadLimit` bounds the rows returned inline; when the pull exceeds
- * loadLimit, the full collected set is materialized as a dataframe
- * for SQL-based follow-up.
+ * `loadLimit` and a 24,000-byte budget bound the rows returned inline; when
+ * they cut results[] short, the full collected set is materialized as a
+ * dataframe for SQL-based follow-up.
  *
  * @module mcp-server/tools/definitions/brapi-find-genotype-calls.tool
  */
@@ -30,10 +30,14 @@ import {
   collectPassthroughParts,
   computeDistribution,
   DataframeHandleSchema,
+  inlineTrimNotice,
+  NonBlankString,
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  renderWarningsTrailer,
   requireRegisteredConnection,
+  selectInlineRows,
   toDataframeHandle,
 } from '../shared/find-helpers.js';
 import { buildCallsSearchBody, collectCalls } from '../shared/genotype-calls.js';
@@ -75,11 +79,17 @@ const CallRowSchema = z
   .describe('One genotype call row.');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
-  results: z.array(CallRowSchema).describe('Call rows returned in-context (up to loadLimit).'),
+  alias: z.string().describe('Connection alias the call used.'),
+  results: z
+    .array(CallRowSchema)
+    .describe(
+      'Leading collected call rows, up to loadLimit and a 24,000-byte budget, whichever binds first.',
+    ),
   hasMore: z
     .boolean()
-    .describe('True when the collection was truncated (equivalent to `truncated`).'),
+    .describe(
+      'True when the pull stopped early: the deployment pull limit fired (`truncated`), or time for upstream requests ran out before the last page (`warnings` says so). Unlike the filter finders, it ignores the inline cut — shown and cap report that.',
+    ),
   callFormatting: z
     .object({
       expandHomozygotes: z
@@ -114,12 +124,12 @@ const OutputSchema = z.object({
     })
     .describe('Value frequency per field across the full collected call set.'),
   dataframe: DataframeHandleSchema.optional().describe(
-    'Dataframe handle when the full collected calls exceed loadLimit and were materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
+    'Every collected call, staged when results[] holds fewer rows than were collected.',
   ),
   truncated: z
     .boolean()
     .describe(
-      'True when the deployment-wide pull limit was reached and more calls exist upstream. Narrow the filters and re-pull, or query the spilled dataframe.',
+      'True when the deployment-wide pull limit was reached and more calls exist upstream. Narrow the filters and re-pull.',
     ),
 });
 
@@ -127,15 +137,74 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
   description:
-    'Pull genotype calls for a germplasm × variant set. Filter to bound cost — at minimum, set `variantSetDbId` or `germplasmDbIds`. The upstream pull is capped by deployment policy; when the pull is truncated, narrow the filters or query the spilled dataframe. `loadLimit` bounds the rows returned inline; the full collected set is materialized as a dataframe — query it with brapi_dataframe_query (SQL) instead of paging row-by-row.',
+    'Pull genotype calls for a germplasm × variant set. Filter to bound cost — at minimum, set `variantSetDbId` or `germplasmDbIds`. The upstream pull is capped by deployment policy; when the pull is truncated, narrow the filters. results[] holds the leading calls up to `loadLimit` and a 24,000-byte budget; when it holds fewer than were collected, every collected call is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL) instead of paging row-by-row.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_genotype_calls.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_find_genotype_calls.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_find_genotype_calls in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_find_genotype_calls.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_find_genotype_calls.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_find_genotype_calls.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_find_genotype_calls.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -155,21 +224,22 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
   ] as const,
   input: z.object({
     alias: AliasInput,
-    variantSetDbId: z
-      .string()
-      .min(1)
-      .optional()
-      .describe('Scope calls to a single variant set. Strongly recommended.'),
+    variantSetDbId: NonBlankString.optional().describe(
+      'Scope calls to a single variant set. Strongly recommended. List variant sets with brapi_raw_get({ path: "/variantsets" }) — add params.studyDbId to narrow to one study or genotyping project — and read variantSetDbId from the rows.',
+    ),
     variantSetDbIds: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
-      .describe('Alternative: multiple variant sets at once.'),
+      .describe('Alternative: multiple variant sets at once, found the same way.'),
     germplasmDbIds: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe('Restrict to these germplasm (call sets).'),
-    callSetDbIds: z.array(z.string()).optional().describe('Restrict to these call sets directly.'),
-    variantDbIds: z.array(z.string()).optional().describe('Restrict to specific variants.'),
+    callSetDbIds: z
+      .array(NonBlankString)
+      .optional()
+      .describe('Restrict to these call sets directly.'),
+    variantDbIds: z.array(NonBlankString).optional().describe('Restrict to specific variants.'),
     callFormat: z
       .enum(['VCF', 'FLAPJACK', 'DARTSEQ', 'JSON'])
       .optional()
@@ -180,7 +250,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       .positive()
       .optional()
       .describe(
-        'Cap on rows returned inline. Omit for the deployment default. When the collected set exceeds this, the full result lands in a dataframe and only the first `loadLimit` rows return inline — query the dataframe with brapi_dataframe_query (SQL) for the rest. Upstream pageSize is fixed for genotype calls, so this knob only affects the inline preview here (no spillover capacity tradeoff).',
+        'Cap on rows returned inline. Omit for the deployment default. results[] also stops at a 24,000-byte budget, whichever bound comes first, and keeps at least one row when any call was collected. When results[] holds fewer rows than were collected, every collected call lands in a dataframe — query it with brapi_dataframe_query (SQL) for the rest. Upstream pageSize is fixed for genotype calls, so this knob only affects the inline preview here (no spillover capacity tradeoff).',
       ),
   }),
   output: OutputSchema,
@@ -195,13 +265,9 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       .int()
       .nonnegative()
       .describe(
-        'Total calls collected across all pages (may be capped by the deployment-wide pull limit; check `truncated`).',
+        'Total calls collected across all pages (below the upstream total when `hasMore` is true: the deployment-wide pull limit fired, or the upstream deadline ended the pull).',
       ),
-    returnedCount: z
-      .number()
-      .int()
-      .nonnegative()
-      .describe('Length of results[] — rows returned in-context (up to loadLimit).'),
+    returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
       .record(z.string(), z.unknown())
       .describe(
@@ -210,7 +276,25 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when no calls were returned — how to broaden filters or verify IDs.'),
+      .describe(
+        'Why no calls were returned, or which bound cut results[] short and the dataframe holding every collected call.',
+      ),
+    shown: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        'Length of results[] when loadLimit or the inline byte budget cut it short of the collected calls.',
+      ),
+    cap: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe(
+        'The effective loadLimit when results[] was cut short; shown is below it when the 24,000-byte inline budget bound first (notice says which).',
+      ),
     warnings: z
       .array(z.string())
       .describe('Advisory messages (truncation, capability gaps, partial pulls).'),
@@ -227,10 +311,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         return `**Search body:**\n${lines.join('\n')}`;
       },
     },
-    warnings: {
-      render: (ws) => (ws.length > 0 ? ws.map((w) => `- ${w}`).join('\n') : '_none_'),
-      label: 'Warnings',
-    },
+    warnings: { render: renderWarningsTrailer },
   },
 
   async handler(input, ctx) {
@@ -286,30 +367,31 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       warnings,
     });
 
-    const inContext = collected.rows.slice(0, loadLimit);
+    const inline = selectInlineRows(collected.rows, loadLimit);
     const distributions = {
       callSetName: computeDistribution(collected.rows, (r) => asString(r.callSetName)),
       variantName: computeDistribution(collected.rows, (r) => asString(r.variantName)),
       variantSetDbId: computeDistribution(collected.rows, (r) => asString(r.variantSetDbId)),
     };
 
-    const shouldSpill = collected.rows.length > loadLimit;
+    const stoppedEarly = collected.stopReason !== undefined;
     let dataframeHandle: z.infer<typeof DataframeHandleSchema> | undefined;
-    if (shouldSpill) {
+    if (inline.bound) {
       dataframeHandle = await spillCalls({
         bridge,
         ctx,
         connection,
         body: searchBody,
         rows: collected.rows,
-        truncated: collected.truncated,
+        pullCapped: collected.truncated,
+        stoppedEarly,
         maxRows: maxCalls,
       });
     }
 
     ctx.enrich({
       totalCount: collected.rows.length,
-      returnedCount: inContext.length,
+      returnedCount: inline.rows.length,
       appliedFilters: searchBody,
       warnings,
     });
@@ -317,11 +399,21 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       ctx.enrich.notice(
         'No calls matched the requested filters. The variant set or filter combination may not match any data on this server — broaden the scope (variantSetDbId, germplasmDbIds) or verify the IDs.',
       );
+    /**
+     * The output's own `truncated` means the pull cap fired, so the inline cut is
+     * disclosed through shown / cap and the notice, not ctx.enrich.truncated.
+     */
+    if (inline.bound) {
+      ctx.enrich({ shown: inline.rows.length, cap: loadLimit });
+      ctx.enrich.notice(
+        inlineTrimNotice(inline.bound, inline.rows.length, loadLimit, dataframeHandle),
+      );
+    }
 
     const result: Output = {
       alias: connection.alias,
-      results: inContext,
-      hasMore: collected.truncated,
+      results: inline.rows,
+      hasMore: collected.truncated || stoppedEarly,
       callFormatting: collected.callFormatting,
       distributions,
       truncated: collected.truncated,
@@ -412,8 +504,11 @@ interface SpillCallsInput {
   connection: RegisteredServer;
   ctx: Context;
   maxRows: number;
+  /** The deployment pull limit cut the pull short — reported as `maxRows`. */
+  pullCapped: boolean;
   rows: z.infer<typeof CallRowSchema>[];
-  truncated: boolean;
+  /** The call's upstream deadline ended the page walk before the last page. */
+  stoppedEarly: boolean;
 }
 
 async function spillCalls(input: SpillCallsInput): Promise<z.infer<typeof DataframeHandleSchema>> {
@@ -423,10 +518,8 @@ async function spillCalls(input: SpillCallsInput): Promise<z.infer<typeof Datafr
     query: input.body,
     rows: input.rows as Record<string, unknown>[],
   };
-  if (input.truncated) {
-    registerInput.truncated = true;
-    registerInput.maxRows = input.maxRows;
-  }
+  if (input.pullCapped || input.stoppedEarly) registerInput.truncated = true;
+  if (input.pullCapped) registerInput.maxRows = input.maxRows;
   const result = await input.bridge.registerDataframe(input.ctx, registerInput);
   return toDataframeHandle(result);
 }

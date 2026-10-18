@@ -8,11 +8,21 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  serviceUnavailable,
+  timeout,
+} from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
-import { BrapiClient, type Fetcher, type ResolvedAuth } from '@/services/brapi-client/index.js';
+import {
+  BrapiClient,
+  CALL_DEADLINE_MS,
+  type Fetcher,
+  type ResolvedAuth,
+} from '@/services/brapi-client/index.js';
 
 const BASE_URL = 'https://brapi.example.org/brapi/v2';
 
@@ -199,17 +209,17 @@ describe('BrapiClient', () => {
       });
     }
 
-    it('maps HTTP 429 to upstream_rate_limited and still retries it', async () => {
+    it('maps HTTP 429 to upstream_rate_limited and retries it until the budget runs out', async () => {
       respond = (_req, res) => {
         res.writeHead(429).end('slow down');
       };
       await expect(
-        productionClient(1).get(origin, '/brapi/v2/studies', createMockContext()),
+        productionClient(2).get(origin, '/brapi/v2/studies', createMockContext()),
       ).rejects.toMatchObject({
         code: JsonRpcErrorCode.RateLimited,
         data: { reason: 'upstream_rate_limited', status: 429 },
       });
-      expect(hits).toHaveLength(2);
+      expect(hits).toHaveLength(3);
     });
 
     /** Answer `first` for the first `failures` hits, then a real envelope. */
@@ -250,26 +260,6 @@ describe('BrapiClient', () => {
       }
     });
 
-    it('exhausts the retry budget on a persistent 429', async () => {
-      respond = (_req, res) => {
-        res.writeHead(429).end('slow down');
-      };
-      await expect(
-        productionClient(2).get(origin, '/brapi/v2/studies', createMockContext()),
-      ).rejects.toMatchObject({ data: { reason: 'upstream_rate_limited' } });
-      expect(hits).toHaveLength(3);
-    });
-
-    for (const status of [400, 401, 403, 404, 422]) {
-      it(`does not retry HTTP ${status} even when the next attempt would succeed`, async () => {
-        failThenSucceed(status, 1);
-        await expect(
-          productionClient(2).get(origin, '/brapi/v2/studies', createMockContext()),
-        ).rejects.toMatchObject({ data: { status } });
-        expect(hits).toHaveLength(1);
-      });
-    }
-
     it('maps a POST /search HTTP 401 to upstream_unauthorized', async () => {
       respond = (_req, res) => {
         res.writeHead(401).end('login required');
@@ -300,21 +290,6 @@ describe('BrapiClient', () => {
         code: JsonRpcErrorCode.Forbidden,
         data: { reason: 'upstream_forbidden', status: 403 },
       });
-    });
-
-    it('maps a singleton HTTP 500 to NotFound over a real socket', async () => {
-      respond = (_req, res) => {
-        res.writeHead(500).end('unknown study');
-      };
-      await expect(
-        productionClient().get(origin, '/brapi/v2/studies/missing', createMockContext(), {
-          singleton: true,
-        }),
-      ).rejects.toMatchObject({
-        code: JsonRpcErrorCode.NotFound,
-        data: { reason: 'upstream_not_found', upstreamStatus: 500 },
-      });
-      expect(hits).toHaveLength(1);
     });
   });
 
@@ -387,30 +362,19 @@ describe('BrapiClient', () => {
       expect(opts2.rejectPrivateIPs).toBe(false);
     });
 
-    it('reclassifies 404 as NotFound', async () => {
-      fetcher.mockRejectedValue(httpError(404, 'study not found'));
-      const ctx = createMockContext();
+    it.each([
+      [404, JsonRpcErrorCode.NotFound],
+      [401, JsonRpcErrorCode.Unauthorized],
+      [403, JsonRpcErrorCode.Forbidden],
+      [429, JsonRpcErrorCode.RateLimited],
+      [503, JsonRpcErrorCode.ServiceUnavailable],
+      // A non-singleton 500 stays ServiceUnavailable; only singleton=true maps it to NotFound.
+      [500, JsonRpcErrorCode.ServiceUnavailable],
+    ])('reclassifies HTTP %i to code %i', async (status, code) => {
+      fetcher.mockRejectedValue(httpError(status));
 
-      await expect(client.get(BASE_URL, '/studies/missing', ctx)).rejects.toMatchObject({
-        code: JsonRpcErrorCode.NotFound,
-      });
-    });
-
-    it('reclassifies 401 as Unauthorized', async () => {
-      fetcher.mockRejectedValue(httpError(401));
-      const ctx = createMockContext();
-
-      await expect(client.get(BASE_URL, '/studies', ctx)).rejects.toMatchObject({
-        code: JsonRpcErrorCode.Unauthorized,
-      });
-    });
-
-    it('reclassifies 403 as Forbidden', async () => {
-      fetcher.mockRejectedValue(httpError(403));
-      const ctx = createMockContext();
-
-      await expect(client.get(BASE_URL, '/studies', ctx)).rejects.toMatchObject({
-        code: JsonRpcErrorCode.Forbidden,
+      await expect(client.get(BASE_URL, '/studies', createMockContext())).rejects.toMatchObject({
+        code,
       });
     });
 
@@ -424,24 +388,6 @@ describe('BrapiClient', () => {
       expect((result as McpError).code).toBe(JsonRpcErrorCode.ValidationError);
       expect((result as McpError).data).toMatchObject({
         body: 'Unknown filter: bogusFilter',
-      });
-    });
-
-    it('reclassifies 429 as RateLimited (retryable)', async () => {
-      fetcher.mockRejectedValue(httpError(429));
-      const ctx = createMockContext();
-
-      await expect(client.get(BASE_URL, '/studies', ctx)).rejects.toMatchObject({
-        code: JsonRpcErrorCode.RateLimited,
-      });
-    });
-
-    it('passes through 5xx as ServiceUnavailable', async () => {
-      fetcher.mockRejectedValue(httpError(503));
-      const ctx = createMockContext();
-
-      await expect(client.get(BASE_URL, '/studies', ctx)).rejects.toMatchObject({
-        code: JsonRpcErrorCode.ServiceUnavailable,
       });
     });
 
@@ -461,29 +407,13 @@ describe('BrapiClient', () => {
       });
     });
 
-    it('still surfaces 5xx as ServiceUnavailable on non-singleton GETs', async () => {
-      fetcher.mockRejectedValue(httpError(500));
-      const ctx = createMockContext();
+    it.each([
+      ['a payload that is not a BrAPI envelope', () => jsonResponse({ notAnEnvelope: true })],
+      ['an empty response body', () => new Response('', { status: 200 })],
+    ])('rejects %s as ValidationError', async (_label, response) => {
+      fetcher.mockResolvedValue(response());
 
-      await expect(client.get(BASE_URL, '/studies', ctx)).rejects.toMatchObject({
-        code: JsonRpcErrorCode.ServiceUnavailable,
-      });
-    });
-
-    it('rejects payloads that are not a BrAPI envelope', async () => {
-      fetcher.mockResolvedValue(jsonResponse({ notAnEnvelope: true }));
-      const ctx = createMockContext();
-
-      await expect(client.get(BASE_URL, '/studies', ctx)).rejects.toMatchObject({
-        code: JsonRpcErrorCode.ValidationError,
-      });
-    });
-
-    it('rejects empty response bodies', async () => {
-      fetcher.mockResolvedValue(new Response('', { status: 200 }));
-      const ctx = createMockContext();
-
-      await expect(client.get(BASE_URL, '/studies', ctx)).rejects.toMatchObject({
+      await expect(client.get(BASE_URL, '/studies', createMockContext())).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
       });
     });
@@ -737,16 +667,335 @@ describe('BrapiClient', () => {
       const url = new URL(String(fetcher.mock.calls[0]?.[0]));
       expect(url.searchParams.getAll('trialDbIds')).toEqual(['7526']);
     });
+  });
 
-    it('respects retryMaxAttempts override (companion-style: 0 retries)', async () => {
-      const c = new BrapiClient({ ...baseConfig, retryMaxAttempts: 5 }, fetcher);
-      fetcher.mockRejectedValue(httpError(503));
-      const ctx = createMockContext();
+  describe('request budget', () => {
+    type BudgetOptions = {
+      deadlineMs?: number;
+      retryMaxAttempts?: number;
+      retryOnTimeout?: boolean;
+    };
+    /** `get` and `postSearch` take the same per-request budget options. */
+    const budgeted: Array<{
+      name: string;
+      call: (c: BrapiClient, options: BudgetOptions) => Promise<unknown>;
+    }> = [
+      {
+        name: 'get',
+        call: (c, options) => c.get(BASE_URL, '/observations', createMockContext(), options),
+      },
+      {
+        name: 'postSearch',
+        call: (c, options) => c.postSearch(BASE_URL, 'studies', {}, createMockContext(), options),
+      },
+    ];
 
-      await expect(c.get(BASE_URL, '/trials', ctx, { retryMaxAttempts: 0 })).rejects.toMatchObject({
-        code: JsonRpcErrorCode.ServiceUnavailable,
+    describe.each(budgeted)('$name', ({ call }) => {
+      it('retryOnTimeout: false fails a timed-out attempt at once', async () => {
+        const c = new BrapiClient({ ...baseConfig, retryMaxAttempts: 3 }, fetcher);
+        fetcher.mockRejectedValue(timeout('Fetch timed out.', { errorSource: 'FetchTimeout' }));
+
+        await expect(call(c, { retryOnTimeout: false })).rejects.toMatchObject({
+          code: JsonRpcErrorCode.Timeout,
+        });
+        expect(fetcher).toHaveBeenCalledTimes(1);
       });
+
+      it('honors a retryMaxAttempts override (companion-style: 0 retries)', async () => {
+        const c = new BrapiClient({ ...baseConfig, retryMaxAttempts: 5 }, fetcher);
+        fetcher.mockRejectedValue(httpError(503));
+
+        await expect(call(c, { retryMaxAttempts: 0 })).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ServiceUnavailable,
+        });
+        expect(fetcher).toHaveBeenCalledTimes(1);
+      });
+
+      it('deadlineMs aborts the attempt in flight and rejects with Timeout', async () => {
+        const c = new BrapiClient({ ...baseConfig, requestTimeoutMs: 30_000 }, fetcher);
+        let attemptSignal: AbortSignal | undefined;
+        fetcher.mockImplementation(
+          (_url: string, _timeoutMs: number, _ctx: unknown, options?: { signal?: AbortSignal }) =>
+            new Promise<Response>((_, reject) => {
+              attemptSignal = options?.signal;
+              attemptSignal?.addEventListener('abort', () => reject(attemptSignal?.reason), {
+                once: true,
+              });
+            }),
+        );
+
+        await expect(call(c, { deadlineMs: 50 })).rejects.toMatchObject({
+          code: JsonRpcErrorCode.Timeout,
+          data: { reason: 'retry_deadline_exceeded', deadlineMs: 50 },
+        });
+        expect(attemptSignal?.aborted).toBe(true);
+      });
+    });
+
+    it('get retryOnTimeout: false still retries 5xx', async () => {
+      const c = new BrapiClient({ ...baseConfig, retryMaxAttempts: 3 }, fetcher);
+      fetcher
+        .mockRejectedValueOnce(httpError(503))
+        .mockRejectedValueOnce(httpError(502))
+        .mockResolvedValueOnce(jsonResponse(envelope({ data: [] })));
+
+      await expect(
+        c.get(BASE_URL, '/observations', createMockContext(), { retryOnTimeout: false }),
+      ).resolves.toMatchObject({ result: { data: [] } });
+      expect(fetcher).toHaveBeenCalledTimes(3);
+    });
+
+    it('getSearchResults stops polling at a deadlineMs shorter than searchPollTimeoutMs', async () => {
+      const c = new BrapiClient(
+        { ...baseConfig, searchPollTimeoutMs: 5_000, searchPollIntervalMs: 5 },
+        fetcher,
+      );
+      fetcher.mockResolvedValue(new Response('', { status: 202 }));
+      const startedAt = Date.now();
+
+      await expect(
+        c.getSearchResults(BASE_URL, 'studies', 'abc', createMockContext(), { deadlineMs: 40 }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'retry_deadline_exceeded', deadlineMs: 40 },
+      });
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+    });
+
+    it('getSearchResults names no deadline reason when its own poll budget ends first', async () => {
+      const c = new BrapiClient(
+        { ...baseConfig, searchPollTimeoutMs: 40, searchPollIntervalMs: 5 },
+        fetcher,
+      );
+      fetcher.mockResolvedValue(new Response('', { status: 202 }));
+
+      const err = await c
+        .getSearchResults(BASE_URL, 'studies', 'abc', createMockContext(), { deadlineMs: 5_000 })
+        .catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: JsonRpcErrorCode.Timeout, data: { pollTimeoutMs: 40 } });
+      expect((err as { data: { reason?: string } }).data.reason).toBeUndefined();
+    });
+
+    it('getSearchResults clips each poll timeout to what remains of deadlineMs', async () => {
+      const c = new BrapiClient({ ...baseConfig, requestTimeoutMs: 30_000 }, fetcher);
+      fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] })));
+
+      await c.getSearchResults(BASE_URL, 'studies', 'abc', createMockContext(), {
+        deadlineMs: 2_000,
+      });
+      expect(fetcher.mock.calls[0]![1]).toBeLessThanOrEqual(2_000);
+    });
+
+    it('getSearchResults keeps the configured poll timeout without a deadline', async () => {
+      const c = new BrapiClient({ ...baseConfig, requestTimeoutMs: 30_000 }, fetcher);
+      fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] })));
+
+      await c.getSearchResults(BASE_URL, 'studies', 'abc', createMockContext(), {
+        timeoutMs: 7_000,
+      });
+      expect(fetcher.mock.calls[0]![1]).toBe(7_000);
+    });
+  });
+
+  describe('call deadline', () => {
+    /** The call deadline is measured from `ctx.timestamp`, the moment the call started. */
+    const callStartedAgo = (elapsedMs: number) => ({
+      ...createMockContext(),
+      timestamp: new Date(Date.now() - elapsedMs).toISOString(),
+    });
+    /** A context with `remainingMs` left of its call deadline. */
+    const withRemaining = (remainingMs: number) => callStartedAgo(CALL_DEADLINE_MS - remainingMs);
+
+    /**
+     * A fetcher for a host that never answers: like `fetchWithTimeout`, it
+     * rejects with `Timeout` at its `timeoutMs` (capped at `capMs`) or when its
+     * signal aborts.
+     */
+    const stalled =
+      (capMs = 3_000) =>
+      (_url: string, timeoutMs: number, _ctx: unknown, options?: { signal?: AbortSignal }) =>
+        new Promise<Response>((_, reject) => {
+          const timer = setTimeout(
+            () => reject(timeout('stub timed out', { errorSource: 'FetchTimeout' })),
+            Math.min(capMs, timeoutMs),
+          );
+          options?.signal?.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              reject(options.signal?.reason);
+            },
+            { once: true },
+          );
+        });
+
+    const expectCallDeadline = async (pending: Promise<unknown>) => {
+      const error = await pending.catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(McpError);
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'call_deadline_exceeded', callDeadlineMs: CALL_DEADLINE_MS },
+      });
+      const { message, data } = error as McpError;
+      expect(message).toContain(`${CALL_DEADLINE_MS / 1000} s deadline`);
+      expect(message).not.toMatch(/retry deadline|\d+ms/);
+      expect((data as { recovery?: { hint?: string } }).recovery?.hint).toMatch(/\w/);
+      return error as McpError;
+    };
+
+    it('skips a timeout retry when the remaining budget cannot fit another attempt', async () => {
+      const c = new BrapiClient(
+        { ...baseConfig, requestTimeoutMs: 1_000, retryMaxAttempts: 3 },
+        fetcher,
+      );
+      fetcher.mockRejectedValue(timeout('Fetch GET timed out.', { errorSource: 'FetchTimeout' }));
+
+      const error = await c
+        .get(BASE_URL, '/observations', withRemaining(900))
+        .catch((e: unknown) => e);
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.Timeout });
       expect(fetcher).toHaveBeenCalledTimes(1);
+    });
+
+    it('still retries a timeout while the budget fits another attempt', async () => {
+      const c = new BrapiClient(
+        { ...baseConfig, requestTimeoutMs: 1_000, retryMaxAttempts: 3 },
+        fetcher,
+      );
+      fetcher.mockRejectedValue(timeout('Fetch GET timed out.', { errorSource: 'FetchTimeout' }));
+
+      await expect(c.get(BASE_URL, '/observations', withRemaining(20_000))).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+      });
+      expect(fetcher).toHaveBeenCalledTimes(4);
+    });
+
+    it('gives an escaping per-request timeout a recovery hint', async () => {
+      fetcher.mockRejectedValue(timeout('Fetch GET timed out.', { errorSource: 'FetchTimeout' }));
+
+      const error = (await client
+        .get(BASE_URL, '/observations', createMockContext())
+        .catch((e: unknown) => e)) as McpError;
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.Timeout });
+      expect((error.data as { recovery?: { hint?: string } }).recovery?.hint).toMatch(/\w/);
+    });
+
+    it('keeps the tighter caller deadline when it ends before the call deadline', async () => {
+      const c = new BrapiClient({ ...baseConfig, requestTimeoutMs: 30_000 }, fetcher);
+      fetcher.mockImplementation(stalled());
+
+      await expect(
+        c.get(BASE_URL, '/observations', withRemaining(20_000), { deadlineMs: 50 }),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { reason: 'retry_deadline_exceeded', deadlineMs: 50 },
+      });
+    });
+
+    it('clips a longer caller deadline to the call deadline', async () => {
+      const c = new BrapiClient({ ...baseConfig, requestTimeoutMs: 30_000 }, fetcher);
+      fetcher.mockImplementation(stalled());
+
+      await expectCallDeadline(
+        c.get(BASE_URL, '/observations', withRemaining(80), { deadlineMs: 20_000 }),
+      );
+    });
+
+    const methods: Array<{
+      name: string;
+      call: (c: BrapiClient, ctx: ReturnType<typeof createMockContext>) => Promise<unknown>;
+    }> = [
+      { name: 'get', call: (c, ctx) => c.get(BASE_URL, '/studies', ctx) },
+      {
+        name: 'getBinary',
+        call: (c, ctx) => c.getBinary(BASE_URL, '/images/i1/imagecontent', ctx),
+      },
+      {
+        name: 'fetchBinaryUrl',
+        call: (c, ctx) => c.fetchBinaryUrl('https://cdn.example.org/i1.jpg', ctx),
+      },
+      { name: 'postSearch', call: (c, ctx) => c.postSearch(BASE_URL, 'studies', {}, ctx) },
+      {
+        name: 'getSearchResults',
+        call: (c, ctx) => c.getSearchResults(BASE_URL, 'studies', 'abc', ctx),
+      },
+      { name: 'post', call: (c, ctx) => c.post(BASE_URL, '/observations', [], ctx) },
+      { name: 'put', call: (c, ctx) => c.put(BASE_URL, '/observations', {}, ctx) },
+    ];
+
+    for (const { name, call } of methods) {
+      it(`${name} sends nothing once the call deadline has passed`, async () => {
+        fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] })));
+        const error = await expectCallDeadline(call(client, callStartedAgo(CALL_DEADLINE_MS + 1)));
+        expect(error.message).toMatch(/not sent/);
+        expect(fetcher).not.toHaveBeenCalled();
+      });
+
+      it(`${name} ends a stalled request at the call deadline, not after its retries`, async () => {
+        const c = new BrapiClient(
+          { ...baseConfig, requestTimeoutMs: 30_000, retryMaxAttempts: 3 },
+          fetcher,
+        );
+        fetcher.mockImplementation(stalled());
+        const startedAt = Date.now();
+        await expectCallDeadline(call(c, withRemaining(120)));
+        expect(Date.now() - startedAt).toBeLessThan(1_000);
+        expect(fetcher).toHaveBeenCalledTimes(1);
+      });
+    }
+
+    it('getSearchResults stops polling at the call deadline', async () => {
+      const c = new BrapiClient(
+        { ...baseConfig, searchPollTimeoutMs: 5_000, searchPollIntervalMs: 5 },
+        fetcher,
+      );
+      fetcher.mockResolvedValue(new Response('', { status: 202 }));
+      const startedAt = Date.now();
+
+      await expectCallDeadline(c.getSearchResults(BASE_URL, 'studies', 'abc', withRemaining(60)));
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect(fetcher.mock.calls.length).toBeGreaterThan(1);
+    });
+
+    describe('over a real socket that never answers', () => {
+      let server: Server;
+      let origin: string;
+      let hits: number;
+
+      beforeEach(async () => {
+        hits = 0;
+        server = createServer(() => {
+          hits += 1;
+        });
+        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+        origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        vi.stubGlobal(
+          'fetch',
+          vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+            String(input instanceof Request ? input.url : input).startsWith(origin)
+              ? realFetch(input, init)
+              : Promise.reject(new Error(`Unmocked global fetch: ${String(input)}`)),
+          ),
+        );
+      });
+
+      afterEach(async () => {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      });
+
+      it('rejects with the call-deadline Timeout once the budget runs out', async () => {
+        const realClient = new BrapiClient({
+          ...baseConfig,
+          allowPrivateIps: true,
+          requestTimeoutMs: 30_000,
+          retryMaxAttempts: 3,
+        });
+        const startedAt = Date.now();
+        await expectCallDeadline(realClient.get(origin, '/brapi/v2/studies', withRemaining(300)));
+        expect(Date.now() - startedAt).toBeLessThan(2_000);
+        expect(hits).toBe(1);
+      });
     });
   });
 });

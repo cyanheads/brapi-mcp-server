@@ -18,6 +18,8 @@ import {
   type MockFetcher,
   pathnameOf,
   resetTestServices,
+  stalledResponse,
+  withCallRemaining,
 } from './_tool-test-helpers.js';
 
 async function connect(fetcher: MockFetcher, serverName = 'Test') {
@@ -185,8 +187,9 @@ describe('brapi_get_study tool', () => {
   // record (cassavabase row 1911 instead of the requested 7526 trial) and
   // burned ~50s per call against a slow upstream. With the fix, the dialect
   // is threaded through the BrapiClient and translates plurals to singular
-  // at the wire edge for every companion call.
-  it('routes companion probes as singular keys when the dialect is cassavabase', async () => {
+  // at the wire edge for every companion call — except /locations, which SGN
+  // servers filter only by the plural keys, so the dialect leaves it plural.
+  it('routes companion probes through the dialect when the dialect is cassavabase', async () => {
     const ctx = await connect(fetcher, 'Cassavabase');
     fetcher.mockImplementation(async (url: string) => {
       const u = new URL(String(url));
@@ -252,8 +255,8 @@ describe('brapi_get_study tool', () => {
     expect(programsCall.searchParams.getAll('programDbId')).toEqual(['prog-1']);
     expect(programsCall.searchParams.has('programDbIds')).toBe(false);
 
-    expect(locationsCall.searchParams.getAll('locationDbId')).toEqual(['loc-1']);
-    expect(locationsCall.searchParams.has('locationDbIds')).toBe(false);
+    expect(locationsCall.searchParams.getAll('locationDbIds')).toEqual(['loc-1']);
+    expect(locationsCall.searchParams.has('locationDbId')).toBe(false);
 
     expect(observationsCall.searchParams.getAll('studyDbId')).toEqual(['s1']);
     expect(observationsCall.searchParams.has('studyDbIds')).toBe(false);
@@ -343,5 +346,25 @@ describe('brapi_get_study tool', () => {
     // The dialect drop short-circuits the /observations count probe — it never
     // fires a request, so no global total can leak through.
     expect(observationsCalls).toEqual([]);
+  });
+
+  it('a stalled study record ends at the call deadline with a Timeout', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(
+      (_url: string, timeoutMs: number, _ctx: unknown, init?: { signal?: AbortSignal }) =>
+        stalledResponse(timeoutMs, init?.signal),
+    );
+    const startedAt = Date.now();
+
+    await expect(
+      brapiGetStudy.handler(
+        brapiGetStudy.input.parse({ studyDbId: 's1' }),
+        withCallRemaining(ctx, 300),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'call_deadline_exceeded', recovery: { hint: expect.any(String) } },
+    });
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 });

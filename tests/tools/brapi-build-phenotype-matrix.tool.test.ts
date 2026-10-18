@@ -6,10 +6,15 @@
  * @module tests/tools/brapi-build-phenotype-matrix.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError, timeout } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiBuildPhenotypeMatrix } from '@/mcp-server/tools/definitions/brapi-build-phenotype-matrix.tool.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
+import { UPSTREAM_TIMEOUT_HINT } from '@/services/brapi-client/index.js';
+import { registerDialect, specDialect } from '@/services/brapi-dialect/index.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import {
   BASE_URL,
   envelope,
@@ -18,6 +23,7 @@ import {
   type MockFetcher,
   pathnameOf,
   resetTestServices,
+  TEST_CONFIG,
 } from './_tool-test-helpers.js';
 
 /**
@@ -88,348 +94,166 @@ describe('brapi_build_phenotype_matrix tool', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     resetTestServices();
   });
 
-  // -------------------------------------------------------------------------
-  // Wide / mean aggregation
-  // -------------------------------------------------------------------------
-  it('wide + mean: builds matrix and materializes dataframe', async () => {
+  /** Serve `rows` on /observations (empty elsewhere), build study1's matrix, and capture the rows it stages. */
+  async function build(
+    ctx: Awaited<ReturnType<typeof connect>>,
+    rows: Record<string, unknown>[],
+    input: Record<string, unknown>,
+  ) {
+    fetcher.mockImplementation(async (url: string) =>
+      pathnameOf(url).endsWith('/observations')
+        ? jsonResponse(envelope({ data: rows }, { totalCount: rows.length }))
+        : jsonResponse(envelope({ data: [] }, { totalCount: 0 })),
+    );
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    const result = await brapiBuildPhenotypeMatrix.handler(
+      brapiBuildPhenotypeMatrix.input.parse({ studies: ['study1'], ...input }),
+      ctx,
+    );
+    const staged = (register.mock.calls[0]?.[1].rows ?? []) as Record<string, unknown>[];
+    return { result, staged };
+  }
+
+  /** Variable v1 ('Height') observations, one per [germplasmDbId, value] pair. */
+  const heights = (pairs: readonly (readonly [string, string])[]) =>
+    pairs.map(([g, value]) => obsRow(g, g.toUpperCase(), 'v1', 'Height', value));
+
+  it.each([
+    {
+      label: 'mean averages each germplasm’s replicates',
+      aggregate: 'mean',
+      pairs: [
+        ['g1', '10'],
+        ['g1', '20'],
+        ['g2', '30'],
+        ['g2', '40'],
+      ],
+      cells: [
+        ['g1', 15],
+        ['g2', 35],
+      ],
+    },
+    {
+      label: 'median of an odd-length set is its middle value',
+      aggregate: 'median',
+      pairs: [
+        ['g1', '10'],
+        ['g1', '30'],
+        ['g1', '20'],
+      ],
+      cells: [['g1', 20]],
+    },
+    {
+      label: 'first keeps the first value, categorical or not',
+      aggregate: 'first',
+      pairs: [
+        ['g1', 'red'],
+        ['g1', 'blue'],
+      ],
+      cells: [['g1', 'red']],
+    },
+    {
+      label: 'mean over a categorical trait leaves the cell null and warns',
+      aggregate: 'mean',
+      pairs: [
+        ['g1', 'red'],
+        ['g1', 'blue'],
+      ],
+      cells: [['g1', null]],
+      nonNumeric: true,
+    },
+  ] as const)('wide + $aggregate: $label', async ({ aggregate, pairs, cells, ...rest }) => {
     const ctx = await connect(fetcher);
-    const rows = [
-      obsRow('germplasm1', 'Germ1', 'variable1', 'Corn Stalk Height', '10'),
-      obsRow('germplasm1', 'Germ1', 'variable1', 'Corn Stalk Height', '20'),
-      obsRow('germplasm2', 'Germ2', 'variable1', 'Corn Stalk Height', '30'),
-      obsRow('germplasm2', 'Germ2', 'variable1', 'Corn Stalk Height', '40'),
-    ];
-    fetcher.mockImplementation(async (url: string) => {
-      const path = pathnameOf(url);
-      if (path.endsWith('/observations')) {
-        return jsonResponse(envelope({ data: rows }, { totalCount: rows.length }));
-      }
-      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    const nonNumeric = 'nonNumeric' in rest;
+
+    const { result, staged } = await build(ctx, heights(pairs), { shape: 'wide', aggregate });
+
+    expect(staged).toEqual(
+      cells.map(([g, v1]) => ({ germplasmDbId: g, germplasmName: g.toUpperCase(), v1 })),
+    );
+    expect(result).toMatchObject({
+      observationCount: pairs.length,
+      germplasmCount: cells.length,
+      variableCount: 1,
+      variableLegend: { v1: 'Height' },
+      dataframe: { rowCount: cells.length },
     });
-
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({
-        studies: ['study1'],
-        shape: 'wide',
-        aggregate: 'mean',
-      }),
-      ctx,
+    expect(result.dataframe?.columns).toEqual(['germplasmDbId', 'germplasmName', 'v1']);
+    expect(result.warnings.some((w) => /^Variable 'v1': all values are non-numeric/.test(w))).toBe(
+      nonNumeric,
     );
-
-    expect(result.germplasmCount).toBe(2);
-    expect(result.variableCount).toBe(1);
-    expect(result.observationCount).toBe(4);
-    expect(result.variableLegend).toEqual({ variable1: 'Corn Stalk Height' });
-    expect(result.dataframe.rowCount).toBe(2);
-
-    // Wide columns: germplasmDbId, germplasmName, variable1
-    expect(result.dataframe.columns).toContain('germplasmDbId');
-    expect(result.dataframe.columns).toContain('variable1');
   });
 
-  it('wide + mean: aggregate values are correct (germplasm1=15, germplasm2=35)', async () => {
+  it.each([
+    ['long', { shape: 'long' }, false],
+    ['wide + all falls back to long form', { shape: 'wide', aggregate: 'all' }, true],
+  ] as const)('%s: one row per observation with a replicateIndex', async (_label, input, warns) => {
     const ctx = await connect(fetcher);
-    const rows = [
-      obsRow('germplasm1', 'Germ1', 'variable1', 'Corn Stalk Height', '10'),
-      obsRow('germplasm1', 'Germ1', 'variable1', 'Corn Stalk Height', '20'),
-      obsRow('germplasm2', 'Germ2', 'variable1', 'Corn Stalk Height', '30'),
-      obsRow('germplasm2', 'Germ2', 'variable1', 'Corn Stalk Height', '40'),
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
 
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({
-        studies: ['study1'],
-        shape: 'wide',
-        aggregate: 'mean',
-      }),
+    const { result, staged } = await build(
       ctx,
+      heights([
+        ['g1', '10'],
+        ['g1', '20'],
+        ['g2', '30'],
+      ]),
+      input,
     );
 
-    // Verify via format() output (which includes the dataframe handle)
-    const formatted = brapiBuildPhenotypeMatrix.format(result);
-    expect(formatted[0]?.text).toMatch(/variable1.*Corn Stalk Height/i);
-    expect(result.observationCount).toBe(4);
-    expect(result.germplasmCount).toBe(2);
-  });
-
-  // -------------------------------------------------------------------------
-  // Wide / median aggregation
-  // -------------------------------------------------------------------------
-  it('wide + median: odd-length returns middle value', async () => {
-    const ctx = await connect(fetcher);
-    const rows = [
-      obsRow('g1', 'G1', 'v1', 'Height', '10'),
-      obsRow('g1', 'G1', 'v1', 'Height', '20'),
-      obsRow('g1', 'G1', 'v1', 'Height', '30'),
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
-
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({
-        studies: ['s1'],
-        shape: 'wide',
-        aggregate: 'median',
-      }),
-      ctx,
-    );
-
+    const long = (g: string, value: string, replicateIndex: number) => ({
+      germplasmDbId: g,
+      observationVariableDbId: 'v1',
+      studyDbId: 'study1',
+      value,
+      replicateIndex,
+    });
+    expect(staged).toEqual([long('g1', '10', 0), long('g1', '20', 1), long('g2', '30', 0)]);
     expect(result.observationCount).toBe(3);
-    expect(result.dataframe.rowCount).toBe(1);
+    expect(result.dataframe?.rowCount).toBe(3);
+    expect(result.warnings.some((w) => /aggregate.*all.*long/i.test(w))).toBe(warns);
   });
 
-  // -------------------------------------------------------------------------
-  // Wide / first aggregation
-  // -------------------------------------------------------------------------
-  it('wide + first: keeps first value (string or numeric)', async () => {
-    const ctx = await connect(fetcher);
-    const rows = [
-      obsRow('g1', 'G1', 'v1', 'Color', 'red'),
-      obsRow('g1', 'G1', 'v1', 'Color', 'blue'),
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+  it.each([
+    ['variables', { variables: ['v1'] }, ['g1:v1', 'g2:v1', 'g3:v1'], 3, 1],
+    ['germplasm', { germplasm: ['g1', 'g2'] }, ['g1:v1', 'g1:v2', 'g2:v1'], 2, 2],
+  ] as const)(
+    'keeps only the requested %s',
+    async (_label, subset, kept, germplasmCount, variableCount) => {
+      const ctx = await connect(fetcher);
+      const rows = [
+        obsRow('g1', 'G1', 'v1', 'Height', '10'),
+        obsRow('g1', 'G1', 'v2', 'Color', 'red'),
+        obsRow('g2', 'G2', 'v1', 'Height', '20'),
+        obsRow('g3', 'G3', 'v1', 'Height', '30'),
+      ];
 
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({ studies: ['s1'], shape: 'wide', aggregate: 'first' }),
-      ctx,
-    );
+      const { result, staged } = await build(ctx, rows, { shape: 'long', ...subset });
 
-    expect(result.dataframe.rowCount).toBe(1);
-    expect(result.warnings).not.toContain(expect.stringMatching(/non-numeric/));
-  });
+      expect(staged.map((r) => `${r.germplasmDbId}:${r.observationVariableDbId}`)).toEqual(kept);
+      expect(result).toMatchObject({
+        observationCount: kept.length,
+        germplasmCount,
+        variableCount,
+      });
+    },
+  );
 
-  // -------------------------------------------------------------------------
-  // Long shape
-  // -------------------------------------------------------------------------
-  it('long shape: one row per observation with correct columns', async () => {
-    const ctx = await connect(fetcher);
-    const rows = [
-      obsRow('g1', 'G1', 'v1', 'Height', '10'),
-      obsRow('g1', 'G1', 'v1', 'Height', '20'),
-      obsRow('g2', 'G2', 'v1', 'Height', '30'),
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
-
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({ studies: ['s1'], shape: 'long' }),
-      ctx,
-    );
-
-    expect(result.dataframe.rowCount).toBe(3);
-    expect(result.dataframe.columns).toContain('germplasmDbId');
-    expect(result.dataframe.columns).toContain('observationVariableDbId');
-    expect(result.dataframe.columns).toContain('studyDbId');
-    expect(result.dataframe.columns).toContain('value');
-    expect(result.dataframe.columns).toContain('replicateIndex');
-    expect(result.observationCount).toBe(3);
-  });
-
-  it('wide + all: produces long form with replicateIndex and warns', async () => {
-    const ctx = await connect(fetcher);
-    const rows = [
-      obsRow('g1', 'G1', 'v1', 'Height', '10'),
-      obsRow('g1', 'G1', 'v1', 'Height', '20'),
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
-
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({ studies: ['s1'], shape: 'wide', aggregate: 'all' }),
-      ctx,
-    );
-
-    expect(result.dataframe.columns).toContain('replicateIndex');
-    expect(result.warnings.some((w) => /aggregate.*all.*long/i.test(w))).toBe(true);
-  });
-
-  // -------------------------------------------------------------------------
-  // Variable / germplasm filter
-  // -------------------------------------------------------------------------
-  it('filters to requested variables only', async () => {
-    const ctx = await connect(fetcher);
-    const rows = [
-      obsRow('g1', 'G1', 'v1', 'Height', '10'),
-      obsRow('g1', 'G1', 'v2', 'Color', 'red'),
-      obsRow('g2', 'G2', 'v1', 'Height', '20'),
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
-
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({
-        studies: ['s1'],
-        variables: ['v1'],
-        shape: 'long',
-      }),
-      ctx,
-    );
-
-    expect(result.variableCount).toBe(1);
-    expect(result.observationCount).toBe(2);
-    expect(result.dataframe.rowCount).toBe(2);
-  });
-
-  it('filters to requested germplasm only', async () => {
-    const ctx = await connect(fetcher);
-    const rows = [
-      obsRow('g1', 'G1', 'v1', 'Height', '10'),
-      obsRow('g2', 'G2', 'v1', 'Height', '20'),
-      obsRow('g3', 'G3', 'v1', 'Height', '30'),
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
-
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({
-        studies: ['s1'],
-        germplasm: ['g1', 'g2'],
-        shape: 'long',
-      }),
-      ctx,
-    );
-
-    expect(result.germplasmCount).toBe(2);
-    expect(result.observationCount).toBe(2);
-  });
-
-  // -------------------------------------------------------------------------
-  // Non-numeric aggregation warning (categorical trait)
-  // -------------------------------------------------------------------------
-  it('warns when mean applied to categorical trait and sets cell to null', async () => {
-    const ctx = await connect(fetcher);
-    const rows = [
-      obsRow('g1', 'G1', 'v1', 'Color', 'red'),
-      obsRow('g1', 'G1', 'v1', 'Color', 'blue'),
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
-
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({ studies: ['s1'], shape: 'wide', aggregate: 'mean' }),
-      ctx,
-    );
-
-    expect(result.warnings.some((w) => /non-numeric/i.test(w))).toBe(true);
-    // The cell is null, so the wide row still has one germplasm row
-    expect(result.dataframe.rowCount).toBe(1);
-  });
-
-  // -------------------------------------------------------------------------
-  // /observationunits fallback
-  // -------------------------------------------------------------------------
-  it('falls back to /observationunits when /observations returns empty', async () => {
+  it('stages no dataframe, and warns, when no observations are found', async () => {
     const ctx = await connect(fetcher);
 
-    fetcher.mockImplementation(async (url: string) => {
-      const path = pathnameOf(url);
-      if (path.endsWith('/observations')) {
-        // Empty — triggers fallback
-        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
-      }
-      if (path.endsWith('/observationunits')) {
-        return jsonResponse(
-          envelope(
-            {
-              data: [
-                {
-                  observationUnitDbId: 'unit1',
-                  germplasmDbId: 'g1',
-                  germplasmName: 'G1',
-                  studyDbId: 'study1',
-                  observations: [
-                    {
-                      observationVariableDbId: 'v1',
-                      observationVariableName: 'Height',
-                      value: '42',
-                    },
-                  ],
-                },
-              ],
-            },
-            { totalCount: 1 },
-          ),
-        );
-      }
-      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
-    });
+    // /observations and then /observationunits both answer empty.
+    const { result, staged } = await build(ctx, [], { shape: 'wide' });
 
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({ studies: ['study1'], shape: 'long' }),
-      ctx,
-    );
-
-    expect(result.observationCount).toBe(1);
-    expect(result.dataframe.rowCount).toBe(1);
-    expect(result.warnings.some((w) => /observationunits fallback/i.test(w))).toBe(true);
-  });
-
-  // -------------------------------------------------------------------------
-  // Multi-study
-  // -------------------------------------------------------------------------
-  it('collects observations from multiple studies', async () => {
-    const ctx = await connect(fetcher);
-
-    fetcher.mockImplementation(async (url: string) => {
-      const u = new URL(String(url));
-      const studyId =
-        u.searchParams.get('studyDbIds') ?? u.searchParams.get('studyDbId') ?? 'unknown';
-      if (pathnameOf(url).endsWith('/observations')) {
-        const studyRows = [
-          obsRow('g1', 'G1', 'v1', 'Height', studyId === 'study1' ? '10' : '20', studyId),
-        ];
-        return jsonResponse(envelope({ data: studyRows }, { totalCount: studyRows.length }));
-      }
-      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
-    });
-
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({ studies: ['study1', 'study2'], shape: 'long' }),
-      ctx,
-    );
-
-    // 2 studies × 1 observation each = 2 observations
-    expect(result.observationCount).toBe(2);
-    expect(result.dataframe.rowCount).toBe(2);
-  });
-
-  // -------------------------------------------------------------------------
-  // Empty result
-  // -------------------------------------------------------------------------
-  it('materializes an empty dataframe when no observations found', async () => {
-    const ctx = await connect(fetcher);
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
-
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({ studies: ['s1'], shape: 'wide' }),
-      ctx,
-    );
-
+    expect(staged).toEqual([]);
     expect(result.observationCount).toBe(0);
     expect(result.germplasmCount).toBe(0);
     expect(result.variableCount).toBe(0);
     expect(result.warnings.some((w) => /empty/i.test(w))).toBe(true);
     expect(result.dataframe).toBeUndefined();
-  });
-
-  // -------------------------------------------------------------------------
-  // Variable legend
-  // -------------------------------------------------------------------------
-  it('builds variableLegend mapping variableDbId → display name', async () => {
-    const ctx = await connect(fetcher);
-    const rows = [
-      obsRow('g1', 'G1', 'variable1', 'Corn Stalk Height', '10'),
-      obsRow('g1', 'G1', 'variable2', 'Leaf Width', '5'),
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
-
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({ studies: ['s1'], shape: 'wide', aggregate: 'first' }),
-      ctx,
-    );
-
-    expect(result.variableLegend).toMatchObject({
-      variable1: 'Corn Stalk Height',
-      variable2: 'Leaf Width',
-    });
   });
 
   it('sanitizes numeric and reserved-word variable DbIds into safe wide columns', async () => {
@@ -438,12 +262,8 @@ describe('brapi_build_phenotype_matrix tool', () => {
       obsRow('g1', 'G1', '42', 'Plant Height', '10'), // numeric → v_42
       obsRow('g1', 'G1', 'end', 'End Date Trait', '20'), // reserved SQL word → end_
     ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
 
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({ studies: ['s1'], shape: 'wide', aggregate: 'first' }),
-      ctx,
-    );
+    const { result } = await build(ctx, rows, { shape: 'wide', aggregate: 'first' });
 
     const cols = result.dataframe?.columns ?? [];
     // Raw numeric / reserved names must NOT reach the dataframe (they fail the
@@ -453,8 +273,7 @@ describe('brapi_build_phenotype_matrix tool', () => {
     expect(cols).toContain('v_42');
     expect(cols).toContain('end_');
     // Legend resolves the safe column back to the display name.
-    expect(result.variableLegend['v_42']).toBe('Plant Height');
-    expect(result.variableLegend['end_']).toBe('End Date Trait');
+    expect(result.variableLegend).toMatchObject({ v_42: 'Plant Height', end_: 'End Date Trait' });
   });
 
   // -------------------------------------------------------------------------
@@ -462,13 +281,8 @@ describe('brapi_build_phenotype_matrix tool', () => {
   // -------------------------------------------------------------------------
   it('format() renders header with germplasm × variable counts', async () => {
     const ctx = await connect(fetcher);
-    const rows = [obsRow('g1', 'G1', 'v1', 'Height', '10')];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
 
-    const result = await brapiBuildPhenotypeMatrix.handler(
-      brapiBuildPhenotypeMatrix.input.parse({ studies: ['s1'], shape: 'wide' }),
-      ctx,
-    );
+    const { result } = await build(ctx, heights([['g1', '10']]), { shape: 'wide' });
 
     const formatted = brapiBuildPhenotypeMatrix.format(result);
     expect(formatted[0]?.text).toMatch(/1 germplasm × 1 variables/);
@@ -528,6 +342,7 @@ describe('brapi_build_phenotype_matrix tool', () => {
     // Columns follow study input order: v1 (study1) before v2 (study2), even
     // though study2's fetch resolves first. A completion-order reassembly would
     // yield ['v2', 'v1'] here.
+    expect(a.observationCount).toBe(2);
     const varCols = (a.dataframe?.columns ?? []).filter((c) => c === 'v1' || c === 'v2');
     expect(varCols).toEqual(['v1', 'v2']);
     // Identical across identical runs.
@@ -551,5 +366,387 @@ describe('brapi_build_phenotype_matrix tool', () => {
         ctx,
       ),
     ).rejects.toMatchObject({ data: { reason: 'no_observation_path' } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Observation pull — page walk (#61) and failure contract (#62)
+// ---------------------------------------------------------------------------
+
+const HOST = 'brapi.example.org';
+const enrichmentSchema = z.object(brapiBuildPhenotypeMatrix.enrichment);
+
+/** Rejects any request that is not to the test upstream host. */
+function assertHost(url: string): URL {
+  const u = new URL(String(url));
+  if (u.hostname !== HOST) throw new Error(`Unmocked request: ${u.toString()}`);
+  return u;
+}
+
+/** The fetcher-level shape of an HTTP error, as `fetchWithTimeout` throws it. */
+function httpError(url: string, status: number): McpError {
+  return new McpError(
+    JsonRpcErrorCode.ServiceUnavailable,
+    `Fetch failed for ${url}. Status: ${status}`,
+    { status, errorSource: 'FetchHttpError' },
+  );
+}
+
+/** The fetcher-level shape of a per-request timeout, as `fetchWithTimeout` throws it. */
+function fetchTimeout(url: string): McpError {
+  return timeout(`Fetch GET ${url} timed out.`, { errorSource: 'FetchTimeout' });
+}
+
+/** Serve one BrAPI page of `rows` honoring `page` / `pageSize` (and nothing else). */
+function pageOf(u: URL, rows: Record<string, unknown>[]): Response {
+  const pageSize = Number(u.searchParams.get('pageSize'));
+  const page = Number(u.searchParams.get('page') ?? '0');
+  return jsonResponse(
+    envelope(
+      { data: rows.slice(page * pageSize, (page + 1) * pageSize) },
+      { totalCount: rows.length },
+    ),
+  );
+}
+
+/**
+ * Study 139 as Breedbase serves it: 1,427 observations, germplasm 38884's three
+ * rows at 1-based positions 1,392–1,394 (the second 1,000-row page).
+ */
+function study139Rows() {
+  const target = [
+    ['70666', 'dry matter content percentage', '28.2'],
+    ['70773', 'fresh shoot weight', '1.5'],
+    ['70741', 'fresh root weight', '1.94'],
+  ] as const;
+  return Array.from({ length: 1427 }, (_, i) => {
+    const t = target[i + 1 - 1392];
+    if (t) return obsRow('38884', 'TMEB419', t[0], t[1], t[2], '139');
+    return obsRow(
+      `g${i % 300}`,
+      `G${i % 300}`,
+      '70666',
+      'dry matter content percentage',
+      '1',
+      '139',
+    );
+  });
+}
+
+/** `/observations` requests the fetcher received, with the timeout each was given. */
+function observationRequests(fetcher: MockFetcher): { url: URL; timeoutMs: number }[] {
+  return fetcher.mock.calls
+    .map((c) => ({ url: new URL(String(c[0])), timeoutMs: c[1] as number }))
+    .filter((r) => r.url.pathname.endsWith('/observations'));
+}
+
+describe('brapi_build_phenotype_matrix observation pull', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices({ ...TEST_CONFIG, pageSize: 1000 });
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  it('an upstream ignoring every filter: pages past the first page to the germplasm’s rows, keeping only the requested study’s', async () => {
+    const ctx = await connect(fetcher);
+    // The global set: another study's row for the same germplasm sits first.
+    const rows = [
+      obsRow('38884', 'TMEB419', '70666', 'dry matter content percentage', '99', 'sOther'),
+      ...study139Rows(),
+    ];
+    fetcher.mockImplementation(async (url: string) => {
+      const u = assertHost(url);
+      if (u.pathname.endsWith('/observations')) return pageOf(u, rows);
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const result = await brapiBuildPhenotypeMatrix.handler(
+      brapiBuildPhenotypeMatrix.input.parse({
+        studies: ['139'],
+        germplasm: ['38884'],
+        shape: 'long',
+      }),
+      ctx,
+    );
+
+    const parsed = brapiBuildPhenotypeMatrix.output.parse(result);
+    expect(parsed.observationCount).toBe(3);
+    expect(parsed.germplasmCount).toBe(1);
+    expect(parsed.variableCount).toBe(3);
+    expect(observationRequests(fetcher).map((r) => r.url.searchParams.get('page'))).toEqual([
+      '0',
+      '1',
+    ]);
+    expect(parsed.warnings.join('\n')).toMatch(
+      /Study '139': \/observations returned 1 rows from other studies/,
+    );
+    const enrichment = enrichmentSchema.parse(getEnrichment(ctx));
+    expect(enrichment.truncated).toBeUndefined();
+    const text = brapiBuildPhenotypeMatrix.format(result)[0]?.text;
+    expect(text).toMatch(/1 germplasm × 3 variables/);
+    expect(text).toMatch(/from other studies/);
+  });
+
+  it('a later-page failure keeps the rows already collected and sets truncated naming the study', async () => {
+    const ctx = await connect(fetcher);
+    const rows = study139Rows();
+    fetcher.mockImplementation(async (url: string) => {
+      const u = assertHost(url);
+      if (u.pathname.endsWith('/observations')) {
+        if (u.searchParams.get('page') === '1') throw httpError(u.toString(), 502);
+        return pageOf(u, rows);
+      }
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const result = await brapiBuildPhenotypeMatrix.handler(
+      brapiBuildPhenotypeMatrix.input.parse({ studies: ['139'], shape: 'long' }),
+      ctx,
+    );
+
+    expect(result.observationCount).toBe(1000);
+    const enrichment = enrichmentSchema.parse(getEnrichment(ctx));
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.shown).toBe(1000);
+    expect(enrichment.notice).toMatch(/139/);
+    expect(enrichment.notice).toMatch(/1000 of 1427/);
+    expect(result.warnings.join('\n')).toMatch(/Study '139'.*1000 of 1427/);
+  });
+
+  it('a loadLimit stop sets truncated, cap, and one notice: the scan guidance, then the dataframe pointer', async () => {
+    const ctx = await connect(fetcher);
+    const rows = study139Rows();
+    fetcher.mockImplementation(async (url: string) => {
+      const u = assertHost(url);
+      if (u.pathname.endsWith('/observations')) return pageOf(u, rows);
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const result = await brapiBuildPhenotypeMatrix.handler(
+      brapiBuildPhenotypeMatrix.input.parse({ studies: ['139'], shape: 'long', loadLimit: 50 }),
+      ctx,
+    );
+
+    expect(result.observationCount).toBe(50);
+    expect(observationRequests(fetcher)).toHaveLength(1);
+    const enrichment = enrichmentSchema.parse(getEnrichment(ctx));
+    expect(enrichment).toMatchObject({ truncated: true, shown: 50, cap: 50 });
+    const notice = enrichment.notice ?? '';
+    expect(notice).toMatch(
+      /^Observation scans stopped early for 139 \(stopped after 51 of 1427 rows: reached loadLimit \(50\) matching rows\)/,
+    );
+    expect(notice).toContain(
+      `Staged dataframe \`${result.dataframe?.tableName}\` (50 rows): list its columns with brapi_dataframe_describe, then query it with brapi_dataframe_query (SQL).`,
+    );
+  });
+
+  it('points at the matrix dataframe when no scan stopped early', async () => {
+    const ctx = await connect(fetcher);
+    const rows = [
+      obsRow('g1', 'G1', 'v1', 'Height', '10'),
+      obsRow('g2', 'G2', 'v1', 'Height', '20'),
+    ];
+    fetcher.mockImplementation(async (url: string) => {
+      const u = assertHost(url);
+      if (u.pathname.endsWith('/observations')) return pageOf(u, rows);
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const result = await brapiBuildPhenotypeMatrix.handler(
+      brapiBuildPhenotypeMatrix.input.parse({ studies: ['study1'] }),
+      ctx,
+    );
+
+    const enrichment = enrichmentSchema.parse(getEnrichment(ctx));
+    expect(enrichment.truncated).toBeUndefined();
+    expect(enrichment.notice).toBe(
+      `Staged dataframe \`${result.dataframe?.tableName}\` (2 rows): list its columns with brapi_dataframe_describe, then query it with brapi_dataframe_query (SQL).`,
+    );
+  });
+
+  describe('extraFilters verification', () => {
+    /** Rows of study1, each on its own observation unit. */
+    const unitRows = () => [
+      { ...obsRow('g1', 'G1', 'v1', 'Height', '10'), observationUnitDbId: 'u1' },
+      { ...obsRow('g2', 'G2', 'v1', 'Height', '20'), observationUnitDbId: 'u2' },
+    ];
+
+    async function build(rows: Record<string, unknown>[], extraFilters: Record<string, unknown>) {
+      const ctx = await connect(fetcher);
+      fetcher.mockImplementation(async (url: string) => {
+        const u = assertHost(url);
+        if (u.pathname.endsWith('/observations')) return pageOf(u, rows);
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      });
+      const result = await brapiBuildPhenotypeMatrix.handler(
+        brapiBuildPhenotypeMatrix.input.parse({ studies: ['study1'], shape: 'long', extraFilters }),
+        ctx,
+      );
+      return { result: brapiBuildPhenotypeMatrix.output.parse(result), ctx };
+    }
+
+    it('forwards the key and warns when the returned rows contradict it', async () => {
+      const { result } = await build(unitRows(), { observationUnitDbIds: ['u1'] });
+
+      expect(
+        observationRequests(fetcher)[0]?.url.searchParams.getAll('observationUnitDbIds'),
+      ).toEqual(['u1']);
+      expect(result.observationCount).toBe(2);
+      const warning = result.warnings.find((w) => w.includes('extraFilters.observationUnitDbIds'));
+      expect(warning).toMatch(
+        /requested \["u1"\] but 1 returned row\(s\) carried other values \(u2\)/,
+      );
+      expect(brapiBuildPhenotypeMatrix.format(result)[0]?.text).toContain(
+        'extraFilters.observationUnitDbIds',
+      );
+    });
+
+    it('a key every returned row satisfies adds no warning', async () => {
+      const { result } = await build(unitRows().slice(0, 1), { observationUnitDbIds: ['u1'] });
+
+      expect(result.observationCount).toBe(1);
+      expect(result.warnings.some((w) => /extraFilters|Could not verify/.test(w))).toBe(false);
+    });
+
+    it('checks across every study, once, naming a key no returned row can speak to as unverified', async () => {
+      const ctx = await connect(fetcher);
+      fetcher.mockImplementation(async (url: string) => {
+        const u = assertHost(url);
+        if (!u.pathname.endsWith('/observations')) {
+          return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+        }
+        const study = u.searchParams.getAll('studyDbIds')[0] ?? '';
+        return pageOf(u, [
+          { ...obsRow('g1', 'G1', 'v1', 'Height', '1', study), observationUnitDbId: `u-${study}` },
+        ]);
+      });
+
+      const result = await brapiBuildPhenotypeMatrix.handler(
+        brapiBuildPhenotypeMatrix.input.parse({
+          studies: ['study1', 'study2'],
+          shape: 'long',
+          extraFilters: { observationUnitDbIds: ['u-study1'], noSuchKey: 'x' },
+        }),
+        ctx,
+      );
+
+      expect(result.observationCount).toBe(2);
+      expect(result.warnings.filter((w) => w.startsWith('Could not verify'))).toEqual([
+        expect.stringMatching(
+          /^Could not verify these extraFilters keys against returned rows: 'noSuchKey'/,
+        ),
+      ]);
+      expect(result.warnings.filter((w) => /requested \["u-study1"\]/.test(w))).toHaveLength(1);
+    });
+  });
+
+  it('a failed study among several is a warning; the other study still builds the matrix', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const u = assertHost(url);
+      const studyId = u.searchParams.get('studyDbIds') ?? u.searchParams.get('studyDbId');
+      if (u.pathname.endsWith('/observations')) {
+        if (studyId === 'bad') throw fetchTimeout(u.toString());
+        return pageOf(u, [obsRow('g1', 'G1', 'v1', 'Height', '10', 'good')]);
+      }
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const result = await brapiBuildPhenotypeMatrix.handler(
+      brapiBuildPhenotypeMatrix.input.parse({ studies: ['good', 'bad'], shape: 'long' }),
+      ctx,
+    );
+
+    expect(result.observationCount).toBe(1);
+    expect(result.warnings.some((w) => /^Study 'bad'.*failed/.test(w))).toBe(true);
+  });
+
+  it('fails only when every requested study failed, naming each — first-page timeouts at the request timeout, with no fallback', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const u = assertHost(url);
+      if (u.pathname.endsWith('/observations')) throw fetchTimeout(u.toString());
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const err = await brapiBuildPhenotypeMatrix
+      .handler(brapiBuildPhenotypeMatrix.input.parse({ studies: ['s1', 's2'] }), ctx)
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(McpError);
+    expect((err as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+    expect((err as McpError).message).toMatch(/s1/);
+    expect((err as McpError).message).toMatch(/s2/);
+    // The first study's Timeout hint survives the rebuild.
+    expect((err as McpError).data).toMatchObject({
+      recovery: { hint: UPSTREAM_TIMEOUT_HINT },
+      studyDbIds: ['s1', 's2'],
+    });
+    const obsRequests = observationRequests(fetcher);
+    expect(obsRequests.map((r) => r.timeoutMs)).toEqual([
+      TEST_CONFIG.requestTimeoutMs,
+      TEST_CONFIG.requestTimeoutMs,
+    ]);
+    expect(fetcher.mock.calls.some((c) => pathnameOf(c[0]).endsWith('/observationunits'))).toBe(
+      false,
+    );
+  });
+
+  it('every study failing on a dialect that drops the observation-unit study filter fails dialect_all_filters_dropped with its declared hint', async () => {
+    registerDialect({
+      ...specDialect,
+      id: 'drops-unit-filters',
+      adaptGetFilters: (endpoint, filters) =>
+        endpoint === 'observationunits'
+          ? { filters: {}, dropped: Object.keys(filters), warnings: [] }
+          : specDialect.adaptGetFilters(endpoint, filters),
+    });
+    vi.stubEnv('BRAPI_DEFAULT_DIALECT', 'drops-unit-filters');
+    try {
+      const ctx = await connect(fetcher);
+      fetcher.mockImplementation(async (url: string) => {
+        const u = assertHost(url);
+        if (u.pathname.endsWith('/observations')) return pageOf(u, []);
+        throw new Error(`Unexpected request: ${u.toString()}`);
+      });
+      const definition = {
+        ...brapiBuildPhenotypeMatrix,
+        handler: (parsed, contractCtx) =>
+          brapiBuildPhenotypeMatrix.handler(parsed, { ...contractCtx, state: ctx.state }),
+      } satisfies typeof brapiBuildPhenotypeMatrix;
+
+      const result = await runToolContract(
+        definition,
+        { studies: ['s1', 's2'] },
+        { context: { tenantId: 't1' } },
+      );
+
+      const declared = brapiBuildPhenotypeMatrix.errors.find(
+        (e) => e.reason === 'dialect_all_filters_dropped',
+      );
+      expect(declared).toBeDefined();
+      expect(brapiBuildPhenotypeMatrix.errors.map((e) => e.reason)).not.toContain(
+        'all_filters_dropped',
+      );
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'dialect_all_filters_dropped',
+            recovery: { hint: declared?.recovery },
+            studyDbIds: ['s1', 's2'],
+          },
+        },
+      });
+      const text = result.content.map((c) => ('text' in c ? c.text : '')).join('\n');
+      expect(text).toContain(`Recovery: ${declared?.recovery}`);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

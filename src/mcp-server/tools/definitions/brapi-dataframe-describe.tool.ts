@@ -62,29 +62,33 @@ const InputSchema = z.object({
 
 export const brapiDataframeDescribe = tool('brapi_dataframe_describe', {
   description:
-    'Start here after a spillover. Lists dataframes (or describes one) with columns, row counts, and originating-source provenance. The dataframe name appears inline on every find_* response that spilled (`result.dataframe.tableName`) — pass it as `dataframe` to inspect schema and provenance before writing the first brapi_dataframe_query. Listing without a name is unavailable when this server runs as a shared HTTP endpoint without per-caller auth; pass a known name instead.',
+    'Start here after a spillover. Lists dataframes (or describes one) with columns, row counts, and originating-source provenance. The dataframe name appears inline on every find_* response that spilled (`result.dataframe.tableName`) — pass it as `dataframe` to inspect schema and provenance before writing the first brapi_dataframe_query. On a shared HTTP endpoint without per-caller auth, listing without a name is available only where each MCP session has its own workspace, and never to a request without a session; pass a known name instead.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   errors: [
     {
       reason: 'list_all_disabled_on_shared_http',
       code: JsonRpcErrorCode.Forbidden,
-      when: "This server is running as a shared HTTP endpoint without per-caller auth — listing every dataframe would expose other concurrent clients' workspaces, since all callers resolve to one shared tenant.",
+      when: "Listing was requested on a shared HTTP endpoint without per-caller auth, from a request with no session-scoped workspace — the listing would expose other clients' dataframes, since those requests all share one tenant workspace",
       recovery:
-        'Pass `dataframe` with a specific name — either from a prior find_* spillover result (`result.dataframe.tableName`) or one you registered via `brapi_dataframe_query` with `registerAs`. Listing all dataframes is not available on this deployment.',
+        'Pass `dataframe` with a specific name — either from a prior find_* spillover result (`result.dataframe.tableName`) or one you registered via `brapi_dataframe_query` with `registerAs`. Listing all dataframes is not available to this request.',
     },
   ] as const,
   input: InputSchema,
   output: OutputSchema,
 
   async handler(input, ctx) {
+    const bridge = getCanvasBridge();
+    // A session-scoped canvas holds only this session's dataframes, so listing
+    // it is safe; a session-less request (or isolation off) resolves the
+    // tenant-wide canvas every shared-tenant caller writes to.
     if (
       input.dataframe === undefined &&
       ctx.tenantId === 'default' &&
-      config.mcpTransportType === 'http'
+      config.mcpTransportType === 'http' &&
+      !bridge.isSessionScoped(ctx)
     ) {
       throw ctx.fail('list_all_disabled_on_shared_http');
     }
-    const bridge = getCanvasBridge();
     const describeOpts: { tableName?: string } = {};
     if (input.dataframe !== undefined) describeOpts.tableName = input.dataframe;
     const tables = await bridge.describe(ctx, describeOpts);
@@ -100,7 +104,7 @@ function renderDescribe(tables: z.infer<typeof DescribedTableSchema>[]): string 
   if (tables.length === 0) {
     lines.push('');
     lines.push(
-      '_No dataframes. Run a find_* tool whose result exceeds loadLimit, or use brapi_dataframe_query with `registerAs` to materialize one._',
+      '_No dataframes. Run a find_* tool whose results[] holds fewer rows than it matched, or use brapi_dataframe_query with `registerAs` to materialize one._',
     );
     return lines.join('\n');
   }

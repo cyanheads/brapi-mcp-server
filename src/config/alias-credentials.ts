@@ -13,7 +13,11 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 import { configurationError, forbidden, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { findBuiltinAlias, listBuiltinAliases } from '@/config/builtin-aliases.js';
-import type { AuthMode, ConnectAuth } from '@/services/server-registry/index.js';
+import {
+  type AuthMode,
+  type ConnectAuth,
+  validateBaseUrl,
+} from '@/services/server-registry/index.js';
 
 /**
  * Per-alias credential bundle read from env vars. All fields optional —
@@ -137,6 +141,19 @@ export interface ResolvedConnectInput {
   baseUrl: string;
 }
 
+/**
+ * The server URL configured for an alias itself: its `BRAPI_<ALIAS>_BASE_URL`
+ * (for `default`, `BRAPI_DEFAULT_BASE_URL`), else its enabled builtin URL.
+ * `undefined` when the alias has neither — `resolveConnectInput` would then
+ * fall back to the default URL, which this deliberately does not.
+ */
+export function configuredBaseUrl(
+  alias: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  return readAliasCredentials(alias, env).baseUrl ?? findBuiltinAlias(alias, env)?.baseUrl;
+}
+
 /** Recovery hint for the `auth_base_url_mismatch` refusal; shared with the `brapi_connect` contract. */
 export const AUTH_BASE_URL_MISMATCH_RECOVERY =
   'Omit `baseUrl` to connect to the server configured for this alias, or register the other server under a different alias.';
@@ -166,6 +183,10 @@ export const AUTH_BASE_URL_MISMATCH_RECOVERY =
  *
  * URLs compare after normalization (host case, default port, trailing
  * slashes). Caller-supplied `auth` bypasses env credentials entirely.
+ *
+ * With no caller `baseUrl`, a configured URL that is not an absolute http(s)
+ * URL without userinfo is refused with `alias_base_url_invalid`, naming the
+ * variable that holds it (never its value), before any request.
  */
 export function resolveConnectInput(
   alias: string,
@@ -176,7 +197,7 @@ export function resolveConnectInput(
   const defaultCreds =
     alias === DEFAULT_ALIAS ? aliasCreds : readAliasCredentials(DEFAULT_ALIAS, env);
 
-  const ownBaseUrl = aliasCreds.baseUrl ?? findBuiltinAlias(alias, env)?.baseUrl;
+  const ownBaseUrl = configuredBaseUrl(alias, env);
   const aliasAuth = agent.auth ? undefined : deriveAuthFromCredentials(aliasCreds, alias);
   if (aliasAuth && ownBaseUrl === undefined) {
     const envVar = `${aliasEnvPrefix(alias)}BASE_URL`;
@@ -200,6 +221,27 @@ export function resolveConnectInput(
       `No baseUrl provided. Pass \`baseUrl\` explicitly, or set ${aliasEnvPrefix(alias)}BASE_URL${alias === DEFAULT_ALIAS ? '' : ` or ${aliasEnvPrefix(DEFAULT_ALIAS)}BASE_URL`}.`,
       { alias },
     );
+  }
+  // A configured URL is checked here, where the variable holding it is known;
+  // a caller-supplied one is left to the registry's validation.
+  if (agent.baseUrl === undefined) {
+    const envVar = `${aliasEnvPrefix(ownBaseUrl === undefined ? DEFAULT_ALIAS : alias)}BASE_URL`;
+    try {
+      validateBaseUrl(baseUrl);
+    } catch {
+      throw configurationError(
+        `${envVar} is not a usable BrAPI base URL (an absolute http or https URL without credentials), so alias '${alias}' cannot connect. No request was made.`,
+        {
+          reason: 'alias_base_url_invalid',
+          alias,
+          envVar,
+          retryable: false,
+          recovery: {
+            hint: `Set ${envVar} on the server to an absolute http(s) URL without credentials, then retry.`,
+          },
+        },
+      );
+    }
   }
   if (agent.auth) return { baseUrl, auth: agent.auth };
 

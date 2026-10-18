@@ -9,15 +9,26 @@
  */
 
 import { type Context, type HandlerContext, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { config as frameworkConfig } from '@cyanheads/mcp-ts-core/config';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  requestCancelled,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
+import { DEFAULT_OUTLINE_BUDGET_BYTES } from '@cyanheads/mcp-ts-core/utils';
+import { configuredBaseUrl, resolveConnectInput } from '@/config/alias-credentials.js';
 import type { ServerConfig } from '@/config/server-config.js';
-import { getServerConfig } from '@/config/server-config.js';
-import type {
-  BrapiClient,
-  BrapiEnvelope,
-  BrapiPagination,
-  BrapiRequestOptions,
-  ResolvedAuth,
+import { getServerConfig, isDataframeExportRegistered } from '@/config/server-config.js';
+import {
+  type BrapiClient,
+  type BrapiEnvelope,
+  type BrapiPagination,
+  type BrapiRequestOptions,
+  CALL_DEADLINE_MS,
+  CALL_DEADLINE_REASON,
+  callDeadlineAt,
+  type ResolvedAuth,
 } from '@/services/brapi-client/index.js';
 import type { BrapiDialect, DialectAdaptation } from '@/services/brapi-dialect/index.js';
 import type {
@@ -25,6 +36,10 @@ import type {
   RegisterDataframeInput,
   RegisterDataframeResult,
 } from '@/services/canvas-bridge/index.js';
+import {
+  type CapabilityLookupOptions,
+  getCapabilityRegistry,
+} from '@/services/capability-registry/index.js';
 import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
@@ -35,15 +50,22 @@ export function isUpstreamNotFound(err: unknown): boolean {
 }
 
 /**
- * Resolve a registered BrAPI connection by alias, throwing the calling tool's
- * `'unknown_alias'` contract on miss so the framework fills
- * `data.recovery.hint` from the tool's `errors[]` entry. Use this instead of
- * `registry.get(...)` whenever the calling tool/resource declares the
- * `unknown_alias` reason — `registry.get` throws a bare `notFound()` factory
- * with no `data.reason` for the fill to match.
+ * Resolve the BrAPI connection for an alias in the caller's scope. An alias
+ * with no registration there but a server URL configured for it — a
+ * `BRAPI_<ALIAS>_BASE_URL` (`BRAPI_DEFAULT_BASE_URL` for `default`) or an
+ * enabled builtin — is registered on first use, as an argument-free
+ * `brapi_connect` would register it. Any other alias throws the calling
+ * tool's `'unknown_alias'` contract so the framework fills
+ * `data.recovery.hint` from its `errors[]` entry.
  *
  * Every caller MUST declare an `errors[]` entry whose `reason` is
- * `'unknown_alias'`; the type signature enforces this at compile time.
+ * `'unknown_alias'`; the type signature enforces this at compile time. A
+ * first-use registration can also fail `alias_base_url_invalid`,
+ * `private_address_blocked`, `auth_token_exchange_failed`,
+ * `auth_no_access_token`, `capability_discovery_unavailable`,
+ * `upstream_unauthorized`, or `upstream_forbidden` (the last three also on a
+ * later call whose cached capability profile expired), which each caller
+ * declares too. A token exchange that stalls fails as a `Timeout`.
  */
 export async function requireRegisteredConnection(
   ctx: HandlerContext<'unknown_alias'>,
@@ -52,14 +74,82 @@ export async function requireRegisteredConnection(
   const resolved = alias ?? DEFAULT_ALIAS;
   const registry = getServerRegistry();
   const connection = await registry.getOptional(ctx, resolved);
-  if (!connection) {
+  if (connection) return connection;
+  // Not `resolveConnectInput`: it sends an alias with no URL of its own to the
+  // default server, so a mistyped alias would silently query it.
+  if (configuredBaseUrl(resolved) === undefined) {
     throw ctx.fail(
       'unknown_alias',
-      `No BrAPI connection registered under alias '${resolved}'. Call brapi_connect first.`,
+      `No BrAPI connection is registered under alias '${resolved}', and the server has no base URL configured for it. Call brapi_connect with this alias and a baseUrl first.`,
       { alias: resolved },
     );
   }
+  return await registry.registerOnce(ctx, resolved, () => registerConfiguredAlias(ctx, resolved));
+}
+
+/**
+ * Register a server-configured alias the way an argument-free `brapi_connect`
+ * does — token exchange, capability profile, then save, so a failure persists
+ * nothing — except that a cached profile is reused. A registration that
+ * landed under the alias meanwhile (an explicit `brapi_connect`) is kept.
+ */
+async function registerConfiguredAlias(ctx: Context, alias: string): Promise<RegisteredServer> {
+  const registry = getServerRegistry();
+  const resolved = resolveConnectInput(alias, {});
+  const connection = await registry.resolve(ctx, {
+    alias,
+    baseUrl: resolved.baseUrl,
+    auth: resolved.auth,
+  });
+  const lookup: CapabilityLookupOptions = {};
+  if (connection.resolvedAuth) lookup.auth = connection.resolvedAuth;
+  await getCapabilityRegistry().profile(connection.baseUrl, ctx, lookup);
+  const registered = await registry.getOptional(ctx, alias);
+  if (registered) return registered;
+  await registry.save(ctx, connection);
+  logConnectionRegistered(ctx, connection, { authSource: 'env', firstUse: true });
   return connection;
+}
+
+/**
+ * True when the server is running over HTTP without per-client auth, in which
+ * case `ctx.state` collapses every caller into the shared `default` tenant —
+ * including the bearer token resolved by SGN/OAuth at connection time.
+ */
+export function isSharedTenantHttp(): boolean {
+  return frameworkConfig.mcpTransportType === 'http' && frameworkConfig.mcpAuthMode === 'none';
+}
+
+/**
+ * Log a saved connection, plus a notice when the upstream credentials it
+ * carries persist in the tenant namespace every HTTP client shares.
+ */
+export function logConnectionRegistered(
+  ctx: Context,
+  connection: RegisteredServer,
+  details: { authSource: 'agent' | 'env'; firstUse?: boolean },
+): void {
+  ctx.log.info(
+    details.firstUse ? 'BrAPI connection registered on first use' : 'BrAPI connection registered',
+    {
+      alias: connection.alias,
+      baseUrl: connection.baseUrl,
+      authMode: connection.authMode,
+      authSource: details.authSource,
+    },
+  );
+  if (isSharedTenantHttp() && connection.authMode !== 'none') {
+    ctx.log.notice(
+      'Connection credentials persisted under shared `default` tenant — set MCP_AUTH_MODE=jwt|oauth for per-client isolation.',
+      {
+        alias: connection.alias,
+        baseUrl: connection.baseUrl,
+        authMode: connection.authMode,
+        mcpTransport: frameworkConfig.mcpTransportType,
+        mcpAuthMode: frameworkConfig.mcpAuthMode,
+      },
+    );
+  }
 }
 
 /** Upper cap on how many rows we'll pull for canvas dataframe spillover per call. */
@@ -68,13 +158,223 @@ export const MAX_SPILLOVER_ROWS = 50_000;
 /** Hard cap on how many BrAPI pages we'll traverse when building a dataframe. */
 export const MAX_SPILLOVER_PAGES = 50;
 
+/**
+ * Most upstream rows one spill walk can examine: the row cap, or the page cap
+ * at the configured spill page size, whichever is lower. A client-side row
+ * filter sees every upstream row only when the upstream total fits under it.
+ */
+export function spillWalkCeiling(): number {
+  return Math.min(MAX_SPILLOVER_ROWS, getServerConfig().pageSize * MAX_SPILLOVER_PAGES);
+}
+
+/**
+ * Wall-clock budget for one spill walk — every page, retry, and backoff after
+ * the first page — inside the call deadline every upstream request shares
+ * (`CALL_DEADLINE_MS`); the walk stops at whichever ends first. Leaves the
+ * dataframe registration room under the MCP SDK client's 60 s default request
+ * timeout; rows the budget cuts off leave the dataframe marked truncated.
+ */
+export const SPILL_WALK_DEADLINE_MS = 40_000;
+
+/**
+ * Byte budget for a find_* tool's inline `results[]`: the UTF-8 length of the
+ * array's JSON — the structuredContent copy, the larger of the two surfaces.
+ */
+export const INLINE_RESULTS_BUDGET_BYTES = DEFAULT_OUTLINE_BUDGET_BYTES;
+
+/** The bound that cut `results[]` short of the rows in memory. */
+export type InlineBound = 'budget' | 'loadLimit';
+
+export interface InlineSelection<T> {
+  /** Absent when every row fit both bounds. */
+  bound?: InlineBound;
+  rows: T[];
+}
+
+/**
+ * The leading rows that fit both `loadLimit` and {@link INLINE_RESULTS_BUDGET_BYTES},
+ * whichever binds first. Keeps the first row even when it alone overruns the
+ * budget, so a non-empty match never renders an empty `results[]`.
+ */
+export function selectInlineRows<T>(rows: readonly T[], loadLimit: number): InlineSelection<T> {
+  const limit = Math.min(rows.length, loadLimit);
+  let bytes = 2; // the array's brackets
+  let count = 0;
+  for (; count < limit; count++) {
+    const rowBytes = Buffer.byteLength(JSON.stringify(rows[count]), 'utf8') + (count > 0 ? 1 : 0); // + comma
+    if (count > 0 && bytes + rowBytes > INLINE_RESULTS_BUDGET_BYTES) break;
+    bytes += rowBytes;
+  }
+  const selection: InlineSelection<T> = { rows: rows.slice(0, count) };
+  if (count < rows.length) selection.bound = count < limit ? 'budget' : 'loadLimit';
+  return selection;
+}
+
+/**
+ * Disclose a `results[]` that {@link maybeSpill} cut short: `truncated`,
+ * `shown` (`results.length`), `cap` (the effective loadLimit, whichever bound
+ * fired), and one notice naming the bound and the staged dataframe with the
+ * tools that read it. A finder stages a dataframe exactly when a bound fires,
+ * so this is the whole staging disclosure. Writes nothing when no bound fired.
+ * The notice shares its key with `ctx.enrich.notice` — last write wins.
+ */
+export function discloseInlineTrim(
+  ctx: Context,
+  spill: { dataframe?: DataframeHandle | undefined; inlineBound?: InlineBound; results: unknown[] },
+  loadLimit: number,
+): void {
+  if (!spill.inlineBound) return;
+  const shown = spill.results.length;
+  ctx.enrich.truncated({
+    shown,
+    cap: loadLimit,
+    guidance: inlineTrimNotice(spill.inlineBound, shown, loadLimit, spill.dataframe),
+  });
+}
+
+/**
+ * The notice for a `results[]` cut short by `bound`: which bound fired, then
+ * the {@link stagedDataframeNotice} pointer to the dataframe holding the rest.
+ * Shared by {@link discloseInlineTrim} and the one finder whose output already
+ * owns the `truncated` key.
+ */
+export function inlineTrimNotice(
+  bound: InlineBound,
+  shown: number,
+  loadLimit: number,
+  dataframe: DataframeHandle | undefined,
+): string {
+  const fired =
+    bound === 'budget'
+      ? `the ${INLINE_RESULTS_BUDGET_BYTES.toLocaleString('en-US')}-byte inline budget bound before loadLimit (${loadLimit})`
+      : `loadLimit (${loadLimit}) bound`;
+  const staged = dataframe ? ` ${stagedDataframeNotice([dataframe])}` : '';
+  return `results[] holds the first ${shown} matched row(s): ${fired}.${staged}`;
+}
+
+/**
+ * The pointer every response that staged dataframes carries in its `notice`:
+ * each table with its row count (and whether it is truncated), then
+ * `brapi_dataframe_describe` and `brapi_dataframe_query` — plus
+ * `brapi_dataframe_export` only where that tool is registered. `join` names how
+ * two staged tables relate.
+ */
+export function stagedDataframeNotice(
+  tables: readonly DataframeHandle[],
+  options: { join?: string } = {},
+): string {
+  const named = tables.map(
+    (t) =>
+      `\`${t.tableName}\` (${t.rowCount} row${t.rowCount === 1 ? '' : 's'}${t.truncated ? ', truncated — warnings says why' : ''})`,
+  );
+  const one = named.length === 1;
+  const list = one ? named[0] : `${named.slice(0, -1).join(', ')} and ${named.at(-1)}`;
+  const [it, its] = one ? ['it', 'its'] : ['them', 'their'];
+  const exportClause = isDataframeExportRegistered()
+    ? `, or write ${it} to a file with brapi_dataframe_export`
+    : '';
+  const join = options.join ? ` — ${options.join}` : '';
+  return `Staged dataframe${one ? '' : 's'} ${list}: list ${its} columns with brapi_dataframe_describe, then query ${it} with brapi_dataframe_query (SQL)${exportClause}${join}.`;
+}
+
+/**
+ * Trailer render for a `warnings` enrichment field: the bullets under their own
+ * `**Warnings:**` heading, so they never run on from the Applied Filters list
+ * above them, and nothing at all when there are none.
+ */
+export function renderWarningsTrailer(warnings: readonly string[] | undefined): string {
+  if (!warnings || warnings.length === 0) return '';
+  return `**Warnings:**\n${warnings.map((w) => `- ${w}`).join('\n')}`;
+}
+
+/**
+ * Trailer render for a finder's `appliedFilters` enrichment field: one bullet
+ * per filter, with server-side keys shown under the user-facing parameter
+ * names in `serverToUser`.
+ */
+export function renderAppliedFiltersTrailer(
+  serverToUser: Readonly<Record<string, string>>,
+  emptyText = 'none',
+): (filters: Record<string, unknown>) => string {
+  return (filters) => {
+    const entries = Object.entries(filters);
+    if (entries.length === 0) return `**Applied Filters:** ${emptyText}`;
+    const lines = entries.map(([k, v]) => {
+      const display = serverToUser[k] ?? k;
+      return `- **${display}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`;
+    });
+    return `**Applied Filters:**\n${lines.join('\n')}`;
+  };
+}
+
+/**
+ * The enrichment fields a finder fills through {@link discloseInlineTrim} when
+ * `results[]` holds fewer rows than matched.
+ */
+export const InlineTrimEnrichment = {
+  notice: z
+    .string()
+    .optional()
+    .describe(
+      'Why results[] is empty, or which bound cut it short and the dataframe holding the matched rows.',
+    ),
+  truncated: z
+    .boolean()
+    .optional()
+    .describe(
+      'True when results[] holds fewer rows than matched because loadLimit or the inline byte budget bound.',
+    ),
+  shown: z.number().int().positive().optional().describe('Length of results[] when truncated.'),
+  cap: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      'The effective loadLimit when truncated; shown is below it when the 24,000-byte inline budget bound first (notice says which).',
+    ),
+};
+
+/**
+ * The `format()` line a finder prints when rows exist beyond `results[]`:
+ * where they are — a complete dataframe, a truncated one, or upstream rows the
+ * scan never reached. The tools that read the dataframe are named once, in the
+ * notice; `undefined` when `results[]` holds everything.
+ */
+export function renderMoreRowsLine(result: {
+  dataframe?: DataframeHandle | undefined;
+  hasMore: boolean;
+}): string | undefined {
+  if (!result.hasMore) return;
+  const df = result.dataframe;
+  if (!df) {
+    return '⚠ More rows may exist upstream: the scan stopped before the upstream total (see warnings). Narrow the filters to cover the whole set.';
+  }
+  return df.truncated
+    ? `⚠ More rows exist beyond results[]: dataframe \`${df.tableName}\` holds the ${df.rowCount} matched row(s) fetched and is truncated — the walk stopped before the upstream total (see warnings).`
+    : `⚠ More rows exist beyond results[]: all ${df.rowCount} matched rows are in dataframe \`${df.tableName}\`.`;
+}
+
 export const AliasInput = z
   .string()
   .regex(/^[a-zA-Z0-9_-]+$/)
   .optional()
   .describe(
-    'Connection alias registered via brapi_connect. Omit to read the connection registered under alias `default` — i.e. a prior brapi_connect call that did not specify an alias. Calls that used a non-default alias must pass that same alias here.',
+    'Connection alias. Omit to use alias `default`. An alias registered via brapi_connect works, and so does one the server has a URL configured for (a built-in alias, an operator-configured alias, or `default` on a deployment with a default server), which connects on first use. Calls that used a non-default alias must pass that same alias here.',
   );
+
+/**
+ * An ID or filter value. An empty or whitespace-only string is rejected at the
+ * schema: sent upstream it widens a filter (an ignored blank value) or
+ * malforms a path (`/germplasm/%20/pedigree`).
+ */
+export const NonBlankString = z.string().regex(/\S/, 'Must contain a non-whitespace character.');
+
+/**
+ * A free-text match. Whitespace-only text is rejected like {@link NonBlankString};
+ * an empty string stays the no-op it always was (no text filter).
+ */
+export const FreeTextInput = z.string().regex(/^$|\S/, 'Must not be whitespace-only.');
 
 export const LoadLimitInput = z
   .number()
@@ -82,7 +382,7 @@ export const LoadLimitInput = z
   .positive()
   .optional()
   .describe(
-    'Cap on rows returned inline. Omit for the deployment default. Rows beyond the cap land in a dataframe; query with brapi_dataframe_query (SQL) instead of paging row-by-row.',
+    'Cap on rows returned inline in results[]. Omit for the deployment default. results[] also stops at a 24,000-byte budget, whichever bound comes first, and keeps at least one row when any matched. When results[] holds fewer rows than matched, the matched rows are staged in a dataframe (marked truncated if the upstream walk stopped short); query it with brapi_dataframe_query (SQL) instead of paging row-by-row.',
   );
 
 export const ExtraFiltersInput = z
@@ -532,30 +832,6 @@ export function renderFindHeader(opts: {
 }
 
 /**
- * Render the filters-sent-to-server block, optionally translating
- * server-side keys to the user-facing parameter names declared by the
- * tool. Server keys without a user-facing alias (e.g. anything from
- * `extraFilters`) are rendered as-is. The label deliberately says "sent
- * to server" rather than "applied" — this is the wire-shape payload, not
- * a verified honor list. Drift between requested and honored values
- * surfaces in the warnings produced by `checkFilterMatchRates`.
- */
-export function renderAppliedFilters(
-  filters: Record<string, unknown>,
-  serverToUser: Record<string, string> = {},
-): string {
-  const entries = Object.entries(filters);
-  if (entries.length === 0) return 'Filters sent to server: `{}`';
-  const lines: string[] = ['Filters sent to server:'];
-  for (const [serverKey, value] of entries) {
-    const userKey = serverToUser[serverKey];
-    const label = userKey ? `${userKey} → ${serverKey}` : serverKey;
-    lines.push(`- \`${label}\`: ${JSON.stringify(value)}`);
-  }
-  return lines.join('\n');
-}
-
-/**
  * Character budget for one rendered comma-joined list line before it caps.
  *
  * Sized by rendered width rather than a fixed entry count so a line adapts to
@@ -627,8 +903,10 @@ export function renderDistributions(
 ): string {
   const lines: string[] = [];
   if (dataframe?.truncated) {
+    const upstream =
+      dataframe.totalCount === undefined ? '' : ` (the upstream reports ${dataframe.totalCount})`;
     lines.push(
-      `_Computed over ${dataframe.rowCount} of ${dataframe.totalCount ?? dataframe.rowCount} upstream rows — narrow filters or raise loadLimit for a representative sample._`,
+      `_Computed over the ${dataframe.rowCount} row(s) in the truncated dataframe${upstream} — narrow the filters for a representative sample._`,
     );
   }
   for (const [field, counts] of Object.entries(distributions)) {
@@ -645,7 +923,10 @@ export function renderDistributions(
 }
 
 export interface LoadedRows<T> {
-  /** True when we pulled a single page and the server has more. */
+  /**
+   * True when the server has rows past this page: its totalCount exceeds them,
+   * or, with no totalCount, the page came back full ({@link isFullPage}).
+   */
   hasMore: boolean;
   /** Pages actually consumed — useful for telemetry. */
   pagesFetched: number;
@@ -670,28 +951,6 @@ export function dialectRowMapper<T extends Record<string, unknown>>(
 }
 
 /**
- * Pull rows up to `loadLimit` on a single page. If the server reports more
- * rows than the limit, leave the rest behind — callers decide whether to
- * spill via `spillToCanvas`.
- */
-export async function loadInitialPage<T>(
-  client: BrapiClient,
-  connection: RegisteredServer,
-  path: string,
-  filters: Record<string, unknown>,
-  loadLimit: number,
-  ctx: Context,
-): Promise<LoadedRows<T>> {
-  return await loadInitialFindPage<T>(
-    client,
-    connection,
-    getRouteForPath(path, filters),
-    loadLimit,
-    ctx,
-  );
-}
-
-/**
  * Pull the first page for either a GET list endpoint or POST /search route.
  * Optionally applies a per-row normalizer (typically built via
  * `dialectRowMapper`) to each row before returning so the caller sees the
@@ -713,10 +972,24 @@ export async function loadInitialFindPage<T>(
   }
   const pagination = envelope.metadata?.pagination;
   const totalCount = pagination?.totalCount;
-  const hasMore = typeof totalCount === 'number' && totalCount > rows.length && totalCount > 0;
+  const hasMore =
+    typeof totalCount === 'number'
+      ? totalCount > rows.length && totalCount > 0
+      : isFullPage(rows.length, loadLimit, pagination);
   const result: LoadedRows<T> = { rows, hasMore, pagesFetched: 1 };
   if (totalCount !== undefined) result.totalCount = totalCount;
   return result;
+}
+
+/**
+ * Whether a page may have rows after it when the upstream reports no total: it
+ * filled the pageSize requested, or the smaller pageSize the upstream reports
+ * serving. Anything shorter is the last page.
+ */
+function isFullPage(rowCount: number, requested: number, pagination?: BrapiPagination): boolean {
+  if (rowCount === 0) return false;
+  const served = pagination?.pageSize;
+  return rowCount >= requested || (typeof served === 'number' && served > 0 && rowCount >= served);
 }
 
 async function fetchFindRoutePage<T>(
@@ -745,6 +1018,8 @@ async function fetchFindRoutePage<T>(
     );
   }
 
+  const deadlineAt =
+    requestOptions.deadlineMs === undefined ? undefined : Date.now() + requestOptions.deadlineMs;
   const body = { ...route.searchBody, pageSize, page };
   const response = await client.postSearch<BrapiListResult<T> | T[]>(
     connection.baseUrl,
@@ -754,12 +1029,17 @@ async function fetchFindRoutePage<T>(
     buildRequestOptions(connection, undefined, requestOptions),
   );
   if (response.kind === 'sync') return response.envelope;
+  // The poll gets what the POST left of the page's deadline, not a fresh one.
+  const pollOptions =
+    deadlineAt === undefined
+      ? requestOptions
+      : { ...requestOptions, deadlineMs: Math.max(0, deadlineAt - Date.now()) };
   return await client.getSearchResults<BrapiListResult<T> | T[]>(
     connection.baseUrl,
     route.noun,
     response.searchResultsDbId,
     ctx,
-    buildRequestOptions(connection, { pageSize, page }, requestOptions),
+    buildRequestOptions(connection, { pageSize, page }, pollOptions),
   );
 }
 
@@ -781,7 +1061,11 @@ export interface SpillInput<T> {
    * page walk.
    */
   normalizeRow?: (row: T) => T;
-  /** Optional request overrides for spillover page pulls. */
+  /**
+   * Optional request overrides for spillover page pulls. The walk clips their
+   * timeout to what remains of {@link SPILL_WALK_DEADLINE_MS} or the call
+   * deadline, whichever ends first.
+   */
   pageRequestOptions?: BrapiRequestOptions;
   path: string;
   /** Optional route selected by resolveFindRoute; defaults to GET path + filters. */
@@ -803,65 +1087,84 @@ export interface SpillInput<T> {
    */
   rowMapper?: (row: T) => T;
   source: string;
-  /** Total reported by the server on the first page. */
-  totalCount: number;
+  /**
+   * Total reported by the server on the first page; `undefined` when it
+   * reported none, in which case the walk runs to an empty or short page.
+   * When `firstPage` already holds the total, it is staged as-is with no page
+   * request.
+   */
+  totalCount: number | undefined;
 }
 
-export interface SpillResult<T> {
-  dataframe: RegisterDataframeResult;
-  /** Rows that were registered (post-filter when `rowFilter` was supplied). */
+/** What a spill walk fetched, before any registration. */
+interface SpillWalk<T> {
+  /** Rows kept after `rowMapper` and `rowFilter`. */
   fullRows: T[];
   pagesFetched: number;
+  /** The row cap ended the walk — the bound a truncated dataframe reports as `maxRows`. */
+  reachedRowCap: boolean;
+  /** Upstream rows the walk examined, before `rowFilter`. */
+  rowsScanned: number;
+  /** The walk examined every upstream row: it reached the total, or an empty or short page. */
+  scanComplete: boolean;
+  /**
+   * Why the walk ended before the upstream total — a failed page, the time
+   * budget, a page repeating the previous one, the row or page cap, or an
+   * empty page short of the reported total.
+   */
+  stopReason?: string;
+}
+
+export interface SpillResult<T> extends SpillWalk<T> {
+  /**
+   * Absent when no row survived `rowFilter` (or the walk returned none) —
+   * nothing to register. Marked truncated when the scan was incomplete.
+   */
+  dataframe?: RegisterDataframeResult;
 }
 
 /**
  * Shape of the dataframe handle returned inline by `find_*` tools. The
- * dataframe is the canvas table holding every row beyond `loadLimit`; query
+ * dataframe is the canvas table holding the matched rows `results[]` leaves out; query
  * it with `brapi_dataframe_query` for SQL access or describe it with
  * `brapi_dataframe_describe` for schema + provenance.
  */
 export const DataframeHandleSchema = z.object({
   tableName: z
     .string()
-    .describe(
-      'Dataframe name. Use with brapi_dataframe_describe (schema + provenance) and brapi_dataframe_query (SQL).',
-    ),
-  rowCount: z
-    .number()
-    .int()
-    .nonnegative()
-    .describe('Number of rows materialized in the dataframe.'),
-  columns: z
-    .array(z.string().describe('Column name from the materialized rows.'))
-    .describe('Full column list of the dataframe.'),
+    .describe('Table name for brapi_dataframe_describe and brapi_dataframe_query.'),
+  rowCount: z.number().int().nonnegative().describe('Rows in the dataframe.'),
+  columns: z.array(z.string().describe('Column name.')).describe('Every column name.'),
   columnLegend: z
     .record(z.string(), z.string())
     .optional()
     .describe(
-      'Maps a sanitized column name back to its original upstream key, for columns renamed to clear the SQL-safe-identifier gate (e.g. `end` → `end_`). Present only when a column was renamed — write SQL against the sanitized (left-hand) names.',
+      'Sanitized column name → original upstream key, present only when a column was renamed to be SQL-safe (e.g. `end` → `end_`). SQL uses the sanitized names.',
     ),
-  createdAt: z.string().describe('ISO 8601 timestamp the dataframe was created.'),
+  createdAt: z.string().describe('ISO 8601 creation time.'),
   expiresAt: z
     .string()
     .describe(
-      'ISO 8601 timestamp after which the dataframe metadata will be purged. Re-run the find_* tool to refresh, or copy results out before expiry.',
+      'ISO 8601 time the dataframe metadata is purged; copy rows out before, or re-run the producing tool.',
     ),
   truncated: z
     .boolean()
     .optional()
-    .describe('True when the dataframe hit a row cap before exhausting upstream.'),
+    .describe(
+      'True when the dataframe holds less than the upstream reports: a cap, failed page, deadline, or short upstream ended the pull, or it was skipped. warnings says which. Absent otherwise.',
+    ),
   maxRows: z
     .number()
     .int()
     .positive()
     .optional()
-    .describe('Cap that was applied at create time, when truncation occurred.'),
+    .describe('Row cap that ended the pull, present only when that cap fired.'),
   totalCount: z
     .number()
     .int()
     .nonnegative()
     .optional()
-    .describe('Total rows reported by the upstream server (may exceed rowCount when truncated).'),
+    .describe('Upstream-reported row total, when known; can exceed rowCount.'),
 });
 
 export type DataframeHandle = z.infer<typeof DataframeHandleSchema>;
@@ -894,7 +1197,7 @@ export function renderDataframeHandle(handle: DataframeHandle): string[] {
       ? `, …+${omitted} more — list all columns via brapi_dataframe_query: \`SELECT * FROM ${handle.tableName} LIMIT 0\``
       : '';
   const lines = [
-    `- tableName: \`${handle.tableName}\` (query via brapi_dataframe_query)`,
+    `- tableName: \`${handle.tableName}\` (columns via brapi_dataframe_describe, rows via brapi_dataframe_query)`,
     `- rowCount: ${handle.rowCount}`,
     `- columns: ${columns}${columnsSuffix}`,
     `- createdAt: ${handle.createdAt}`,
@@ -959,6 +1262,14 @@ export interface MaybeSpillInput<T> {
   ctx: Context;
   filters: Record<string, unknown>;
   firstPage: LoadedRows<T>;
+  /**
+   * Optional reorder and projection of the matched rows before `results` is
+   * cut from them — e.g. rank free-text matches first, strip empty containers.
+   * Must return one row per input row. The inline bounds measure the rows it
+   * returns, so a projection that shrinks rows stages nothing when the
+   * projected set fits. The dataframe always holds the unprojected rows.
+   */
+  inlineView?: (rows: T[]) => T[];
   loadLimit: number;
   /**
    * Optional dialect-level per-row normalizer applied to each spilled page's
@@ -984,37 +1295,60 @@ export interface MaybeSpillInput<T> {
   /**
    * Optional request overrides for spillover page pulls. Useful when a tool
    * wants dataframe materialization to run under a tighter latency budget
-   * than the first page.
+   * than the first page. The walk clips their timeout to what remains of
+   * {@link SPILL_WALK_DEADLINE_MS}.
    */
   spillRequestOptions?: BrapiRequestOptions;
-  /** Optional warning sink. When supplied, spillover failures degrade to rows-only output. */
+  /** Receives the warning when the spill walk stops before the upstream total. */
   warnings?: string[];
 }
 
 export interface MaybeSpillResult<T> {
+  /** Present whenever `results` is shorter than `fullRows`. */
   dataframe?: DataframeHandle;
   /** Row set after `rowFilter` (when supplied), spilled or first-page only. */
   fullRows: T[];
+  /**
+   * True when rows exist beyond `results`: matched rows the inline bounds cut,
+   * or upstream rows the scan never examined.
+   */
+  hasMore: boolean;
+  /** The bound that cut `results` short of `fullRows`; absent when every row fit. */
+  inlineBound?: InlineBound;
+  /**
+   * Leading rows of `fullRows` — through `inlineView` when supplied — within
+   * loadLimit and the inline byte budget.
+   */
+  results: T[];
+  /**
+   * Upstream rows examined before `rowFilter` — the spill walk's rows, or the
+   * first page when no walk ran. Short of the upstream total (`scanComplete`
+   * false), the scan was bounded and unexamined rows may still match.
+   */
+  rowsScanned: number;
+  /**
+   * Every upstream row was examined: the walk reached the reported total or,
+   * with none reported, an empty or short page. A first page the caller kept
+   * from walking is complete only when it holds the reported total.
+   */
+  scanComplete: boolean;
 }
 
 /**
- * Wrap `spillToCanvas` with the "only spill when hasMore and totalCount >
- * loadLimit" guard that every `find_*` tool replicates. When no spillover is
- * needed, returns the first-page rows untouched. When it is, materializes
- * the union as a canvas dataframe and returns both the full set and the
- * handle.
+ * Resolve a find_* call's full row set, its inline `results`, and its
+ * dataframe. Walks the remaining pages when the first page shows more exist
+ * (`firstPage.hasMore`); otherwise works from the first page alone. Stages a
+ * dataframe only when the inline bounds cut `results` short of the kept rows,
+ * so every kept row is inline or staged, never both in full. A walk that
+ * stopped short of the upstream total adds a warning naming why; a dataframe
+ * holding fewer rows than the upstream total is marked truncated.
  */
 export async function maybeSpill<T extends Record<string, unknown>>(
   input: MaybeSpillInput<T>,
 ): Promise<MaybeSpillResult<T>> {
   const { firstPage, rowMapper, rowFilter } = input;
-  if (
-    !firstPage.hasMore ||
-    firstPage.totalCount === undefined ||
-    firstPage.totalCount <= input.loadLimit
-  ) {
-    return { fullRows: applyRowTransforms(firstPage.rows, rowMapper, rowFilter) };
-  }
+  const selectInline = (rows: T[]) =>
+    selectInlineRows(input.inlineView ? input.inlineView(rows) : rows, input.loadLimit);
   const spillInput: SpillInput<T> = {
     bridge: input.bridge,
     client: input.client,
@@ -1032,19 +1366,67 @@ export async function maybeSpill<T extends Record<string, unknown>>(
   if (input.normalizeRow) spillInput.normalizeRow = input.normalizeRow;
   if (input.route) spillInput.route = input.route;
   if (input.spillRequestOptions) spillInput.pageRequestOptions = input.spillRequestOptions;
-  try {
-    const spill = await spillToCanvas(spillInput);
-    return {
-      fullRows: spill.fullRows,
-      dataframe: toDataframeHandle(spill.dataframe, firstPage.totalCount),
-    };
-  } catch (err) {
-    if (!input.warnings || !(err instanceof SpillPageFetchError)) throw err;
-    input.warnings.push(
-      `Dataframe spillover skipped after returning the first ${firstPage.rows.length} row(s): ${formatSpillError(err)}. Narrow filters, raise loadLimit enough to fit the result in one page, or retry when the upstream server is responsive.`,
-    );
-    return { fullRows: applyRowTransforms(firstPage.rows, rowMapper, rowFilter) };
-  }
+
+  const walk: SpillWalk<T> = firstPage.hasMore
+    ? await walkSpillPages(spillInput)
+    : {
+        fullRows: applyRowTransforms(firstPage.rows, rowMapper, rowFilter),
+        pagesFetched: 1,
+        reachedRowCap: false,
+        rowsScanned: firstPage.rows.length,
+        scanComplete:
+          firstPage.totalCount === undefined || firstPage.rows.length >= firstPage.totalCount,
+      };
+
+  const inline = selectInline(walk.fullRows);
+  const dataframe = inline.bound ? await registerSpillRows(spillInput, walk) : undefined;
+  const warning = noteSpillStop(
+    input.ctx,
+    input.source,
+    { ...walk, ...(dataframe ? { dataframe } : {}) },
+    firstPage.totalCount,
+  );
+  if (warning) input.warnings?.push(warning);
+
+  const result: MaybeSpillResult<T> = {
+    fullRows: walk.fullRows,
+    results: inline.rows,
+    hasMore: inline.rows.length < walk.fullRows.length || !walk.scanComplete,
+    rowsScanned: walk.rowsScanned,
+    scanComplete: walk.scanComplete,
+  };
+  if (inline.bound) result.inlineBound = inline.bound;
+  if (dataframe) result.dataframe = toDataframeHandle(dataframe, firstPage.totalCount);
+  return result;
+}
+
+/**
+ * Log a spill walk that ended before the upstream total and return the
+ * caller-facing warning for it; `undefined` when the walk ran to the end.
+ */
+export function noteSpillStop(
+  ctx: Context,
+  source: string,
+  spill: Pick<SpillResult<unknown>, 'dataframe' | 'fullRows' | 'rowsScanned' | 'stopReason'>,
+  upstreamTotal: number | undefined,
+): string | undefined {
+  if (!spill.stopReason) return;
+  ctx.log.warning('Spill walk stopped before the upstream total', {
+    source,
+    rowsScanned: spill.rowsScanned,
+    totalCount: upstreamTotal,
+    stopReason: spill.stopReason,
+  });
+  const scanned =
+    upstreamTotal === undefined
+      ? `${spill.rowsScanned} upstream row(s) (the upstream reported no total)`
+      : `${spill.rowsScanned} of ${upstreamTotal} upstream row(s)`;
+  const staged = spill.dataframe
+    ? 'The dataframe holds the rows fetched so far and is marked truncated'
+    : spill.fullRows.length > 0
+      ? 'results[] holds every row fetched'
+      : 'No dataframe was staged: no fetched row matched';
+  return `Dataframe walk stopped after ${scanned}: ${spill.stopReason}. ${staged}; narrow the filters or retry the call.`;
 }
 
 /**
@@ -1063,30 +1445,100 @@ function applyRowTransforms<T>(
 }
 
 /**
- * Pull every remaining page up to MAX_SPILLOVER_* caps, then materialize the
- * union as a canvas dataframe. Returns the dataframe metadata plus the full
- * row set (so callers can compute honest distributions from the whole result).
+ * Pull every remaining page up to the MAX_SPILLOVER_* caps and
+ * {@link SPILL_WALK_DEADLINE_MS} (or the call deadline, when it ends first),
+ * then materialize the union as a canvas dataframe. Returns the dataframe
+ * metadata plus the full row set (so callers can compute honest distributions
+ * from the whole result) and the pre-filter scanned count. Registers nothing
+ * when no row survives. See {@link walkSpillPages} for when the walk stops.
  */
 export async function spillToCanvas<T extends Record<string, unknown>>(
   input: SpillInput<T>,
 ): Promise<SpillResult<T>> {
-  const remainingTarget = Math.min(input.totalCount, MAX_SPILLOVER_ROWS);
-  const pageSize = getServerConfig().pageSize;
-  const totalPages = Math.min(Math.ceil(remainingTarget / pageSize), MAX_SPILLOVER_PAGES);
+  const walk = await walkSpillPages(input);
+  const dataframe = await registerSpillRows(input, walk);
+  return dataframe ? { ...walk, dataframe } : walk;
+}
+
+/**
+ * Register a walk's kept rows as a dataframe, marked truncated when the scan
+ * stopped short of the upstream total (`maxRows` only when the row cap did).
+ * Returns `undefined` for an empty row set: it has no columns, and the canvas
+ * cannot create a zero-column table.
+ */
+async function registerSpillRows<T extends Record<string, unknown>>(
+  input: SpillInput<T>,
+  walk: SpillWalk<T>,
+): Promise<RegisterDataframeResult | undefined> {
+  if (walk.fullRows.length === 0) return;
+  const registerInput: RegisterDataframeInput = {
+    source: input.source,
+    baseUrl: input.connection.baseUrl,
+    query: input.filters,
+    rows: walk.fullRows,
+  };
+  if (!walk.scanComplete) {
+    registerInput.truncated = true;
+    // The page cap stops a small-pageSize walk well below the row cap, so
+    // `maxRows` is set only when the row cap is the bound that fired.
+    if (walk.reachedRowCap) registerInput.maxRows = MAX_SPILLOVER_ROWS;
+  }
+  return await input.bridge.registerDataframe(input.ctx, registerInput);
+}
+
+/**
+ * Walk the pages after the first. With a reported total, the walk keeps
+ * requesting pages while they return rows and the total is unreached, so an
+ * upstream that caps pageSize below the requested one is walked to the end;
+ * with none reported, it stops at the first empty or short page
+ * ({@link isFullPage}). A failed page, the time budget, a page repeating the
+ * previous one, the row or page cap, or an empty page short of the reported
+ * total ends it early: the rows fetched so far are kept and `stopReason` says
+ * why. Caller cancellation rejects instead.
+ */
+async function walkSpillPages<T extends Record<string, unknown>>(
+  input: SpillInput<T>,
+): Promise<SpillWalk<T>> {
+  const config = getServerConfig();
+  const total = input.totalCount;
+  const target = Math.min(total ?? Number.POSITIVE_INFINITY, MAX_SPILLOVER_ROWS);
+  const pageSize = config.pageSize;
+  const holdsAll = total !== undefined && input.firstPage.length >= total;
 
   // When pageSize differs from the first-page fetch size (loadLimit), the
   // BrAPI page=1 offset jumps to pageSize rows in — skipping rows loadLimit..pageSize-1.
-  // Re-fetch from page 0 at pageSize to keep offsets consistent.
-  // Reuse firstPage only when loadLimit === pageSize (offsets already aligned).
-  const reuseFirstPage = input.loadLimit === pageSize;
-  const rows: T[] = reuseFirstPage ? [...input.firstPage] : [];
+  // Re-fetch from page 0 at pageSize to keep offsets consistent. Reuse
+  // firstPage when it already holds every row, or when loadLimit === pageSize
+  // (offsets already aligned).
+  const reuseFirstPage = holdsAll || input.loadLimit === pageSize;
+  let rows: T[] = reuseFirstPage ? [...input.firstPage] : [];
   let pagesFetched = reuseFirstPage ? 1 : 0;
-  const startPage = reuseFirstPage ? 1 : 0;
+  let stopReason: string | undefined;
+  const route = input.route ?? getRouteForPath(input.path, input.filters);
+  const walkDeadlineAt = Date.now() + SPILL_WALK_DEADLINE_MS;
+  const callAt = callDeadlineAt(input.ctx);
+  const deadlineAt = Math.min(walkDeadlineAt, callAt);
+  const baseTimeoutMs = input.pageRequestOptions?.timeoutMs ?? config.requestTimeoutMs;
+  const budgetLabel =
+    callAt < walkDeadlineAt
+      ? `this call's ${CALL_DEADLINE_MS / 1000} s deadline for upstream requests`
+      : `the ${SPILL_WALK_DEADLINE_MS / 1000} s dataframe walk time budget`;
+  let previousFirstRow = reuseFirstPage ? firstRowKey(input.firstPage) : undefined;
+  /** An empty page, or with no reported total a short one: the upstream has no rows past it. */
+  let reachedEnd = holdsAll;
+  let page = pagesFetched;
 
-  for (let page = startPage; page < totalPages; page++) {
-    if (rows.length >= remainingTarget) break;
-    if (input.ctx.signal.aborted) break;
-    const route = input.route ?? getRouteForPath(input.path, input.filters);
+  for (; !holdsAll && rows.length < target; page++) {
+    if (page >= MAX_SPILLOVER_PAGES) break;
+    if (input.ctx.signal.aborted) {
+      throw requestCancelled('Dataframe walk cancelled by the caller.', { source: input.source });
+    }
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      stopReason = `${budgetLabel} ran out before page ${page}`;
+      break;
+    }
+    const clippedByBudget = remainingMs < baseTimeoutMs;
     let envelope: BrapiEnvelope<BrapiListResult<T> | T[]>;
     try {
       envelope = await fetchFindRoutePage<T>(
@@ -1096,58 +1548,84 @@ export async function spillToCanvas<T extends Record<string, unknown>>(
         pageSize,
         page,
         input.ctx,
-        input.pageRequestOptions,
+        {
+          ...input.pageRequestOptions,
+          timeoutMs: Math.min(baseTimeoutMs, remainingMs),
+          deadlineMs: remainingMs,
+          retryOnTimeout: false,
+        },
       );
     } catch (err) {
-      throw new SpillPageFetchError(formatSpillError(err), { cause: err });
+      if (input.ctx.signal.aborted) throw err;
+      stopReason = isBudgetTimeout(err, clippedByBudget)
+        ? `${budgetLabel} ran out during page ${page}`
+        : `page ${page} failed (${formatSpillError(err)})`;
+      break;
     }
     let pageRows = extractRows<T>(envelope.result);
+    if (pageRows.length === 0) {
+      reachedEnd = true;
+      break;
+    }
     if (input.normalizeRow) pageRows = pageRows.map(input.normalizeRow);
+    const firstRow = firstRowKey(pageRows);
+    if (firstRow === previousFirstRow) {
+      stopReason = `page ${page} repeated the previous page, so the upstream server is not paging this route`;
+      break;
+    }
+    previousFirstRow = firstRow;
     rows.push(...pageRows);
     pagesFetched += 1;
-    if (pageRows.length < pageSize) break;
-  }
-
-  const reachedRowCap = rows.length >= remainingTarget && input.totalCount > rows.length;
-  const reachedPageCap = pagesFetched >= MAX_SPILLOVER_PAGES && input.totalCount > rows.length;
-  const truncated = reachedRowCap || reachedPageCap;
-
-  const persistedRows = applyRowTransforms(rows, input.rowMapper, input.rowFilter);
-
-  const registerInput: RegisterDataframeInput = {
-    source: input.source,
-    baseUrl: input.connection.baseUrl,
-    query: input.filters,
-    rows: persistedRows,
-  };
-  if (truncated) {
-    registerInput.truncated = true;
-    // `maxRows` only carries meaning when the row cap fired — it's the upper
-    // bound the spillover honored. When the page cap fired first (small
-    // `loadLimit` × `MAX_SPILLOVER_PAGES` < upstream total), reporting
-    // `maxRows = MAX_SPILLOVER_ROWS` is misleading: the dataframe stopped at
-    // `loadLimit × MAX_SPILLOVER_PAGES`, well below the row cap. Log the
-    // page-cap event for operators; the agent sees only `truncated: true`
-    // without the false 50k bound and can raise `loadLimit` to push past it.
-    if (reachedRowCap) {
-      registerInput.maxRows = MAX_SPILLOVER_ROWS;
-    } else if (reachedPageCap) {
-      input.ctx.log.warning('Spillover hit page cap before exhausting upstream', {
-        source: input.source,
-        pagesFetched,
-        maxPages: MAX_SPILLOVER_PAGES,
-        rowsFetched: rows.length,
-        totalCount: input.totalCount,
-      });
+    if (
+      total === undefined &&
+      !isFullPage(pageRows.length, pageSize, envelope.metadata?.pagination)
+    ) {
+      reachedEnd = true;
+      break;
     }
   }
-  const dataframe = await input.bridge.registerDataframe(input.ctx, registerInput);
 
-  return { dataframe, fullRows: persistedRows, pagesFetched };
+  // A walk that stopped before passing the in-memory first page stages that page:
+  // both are prefixes of the same upstream order.
+  if (rows.length < input.firstPage.length) rows = [...input.firstPage];
+
+  const scanComplete = total === undefined ? reachedEnd : rows.length >= total;
+  const reachedRowCap = !scanComplete && rows.length >= MAX_SPILLOVER_ROWS;
+  if (!scanComplete && !stopReason) {
+    if (reachedRowCap) {
+      stopReason = `the ${MAX_SPILLOVER_ROWS.toLocaleString('en-US')}-row dataframe cap was reached`;
+    } else if (reachedEnd) {
+      stopReason = `page ${page} came back empty, short of the reported totalCount`;
+    } else {
+      stopReason = `the ${MAX_SPILLOVER_PAGES}-page walk cap was reached`;
+    }
+  }
+
+  const walk: SpillWalk<T> = {
+    fullRows: applyRowTransforms(rows, input.rowMapper, input.rowFilter),
+    pagesFetched,
+    reachedRowCap,
+    rowsScanned: rows.length,
+    scanComplete,
+  };
+  if (stopReason) walk.stopReason = stopReason;
+  return walk;
 }
 
-class SpillPageFetchError extends Error {
-  override readonly name = 'SpillPageFetchError';
+/** Identity of a page by its first row — equal keys on consecutive pages mean `page` was ignored. */
+function firstRowKey(rows: readonly unknown[]): string | undefined {
+  return rows.length > 0 ? JSON.stringify(rows[0]) : undefined;
+}
+
+/**
+ * A page timeout the walk's own budget caused: its timeout was clipped to the
+ * budget, or a deadline (the walk's, as `retry_deadline_exceeded`, or the
+ * call's) expired across its retries or async-search polls.
+ */
+function isBudgetTimeout(err: unknown, clippedByBudget: boolean): boolean {
+  if (!(err instanceof McpError) || err.code !== JsonRpcErrorCode.Timeout) return false;
+  const reason = err.data?.reason;
+  return clippedByBudget || reason === 'retry_deadline_exceeded' || reason === CALL_DEADLINE_REASON;
 }
 
 function formatSpillError(err: unknown): string {
@@ -1503,19 +1981,22 @@ export interface RefinementHintOptions {
 }
 
 /**
- * Compose a refinement hint for a too-large result set. Picks the highest-
- * cardinality non-empty distribution to suggest as a narrower. Returns
- * undefined when the result set fits under `loadLimit`. When distributions
- * are too sparse to surface a specific value, falls back to suggesting
- * the tool's available filter parameters by name.
+ * Compose a refinement hint from where a `find_*` call's matched rows ended up.
+ * With every matched row in a complete dataframe, the hint points there: SQL
+ * narrows the set without a re-pull. With a truncated dataframe, or a scan that
+ * stopped short of the upstream total, it suggests narrowing the filters — the
+ * highest-cardinality distribution's top value, else the tool's filter names.
+ * Returns undefined when `results[]` holds every matched row of a complete
+ * scan, a zero-match scan included. Never suggests raising `loadLimit`: it
+ * bounds `results[]`, not how much of the upstream set is scanned or staged.
  */
 export function buildRefinementHint(
-  totalCount: number,
-  loadLimit: number,
+  spill: Pick<MaybeSpillResult<unknown>, 'dataframe' | 'fullRows' | 'scanComplete'>,
   distributions: Record<string, Record<string, number>>,
   options: RefinementHintOptions = {},
 ): string | undefined {
-  if (totalCount <= loadLimit) return;
+  const { dataframe } = spill;
+  if (!dataframe && spill.scanComplete) return;
   let best: { field: string; topValue: string; count: number; cardinality: number } | undefined;
   for (const [field, counts] of Object.entries(distributions)) {
     const entries = Object.entries(counts);
@@ -1527,14 +2008,23 @@ export function buildRefinementHint(
       best = { field, topValue, count, cardinality: entries.length };
     }
   }
+  if (dataframe && !dataframe.truncated) {
+    const example = best
+      ? ` — the ${best.field} distribution spans ${best.cardinality} values, and \`${best.topValue}\` covers ${best.count} row(s)`
+      : '';
+    return `All ${spill.fullRows.length} matched rows are in dataframe \`${dataframe.tableName}\`: narrow them there with brapi_dataframe_query rather than re-pulling${example}.`;
+  }
+  const where = dataframe
+    ? `Dataframe \`${dataframe.tableName}\` is partial`
+    : 'Unscanned upstream rows may still match';
+  const lead = `${where}: the scan stopped before the upstream total (see warnings). Narrow the filters`;
   if (best) {
-    return `${totalCount} rows exceed loadLimit=${loadLimit}. The ${best.field} distribution spans ${best.cardinality} values — narrowing to \`${best.topValue}\` would cut to ~${best.count} rows.`;
+    return `${lead} — the ${best.field} distribution spans ${best.cardinality} values, and narrowing to \`${best.topValue}\` would cut to ~${best.count} row(s).`;
   }
   if (options.availableFilters && options.availableFilters.length > 0) {
-    const suggestions = options.availableFilters.map((f) => `\`${f}\``).join(', ');
-    return `${totalCount} rows exceed loadLimit=${loadLimit}. Distributions are too sparse to surface a specific narrower — try filtering on ${suggestions}, or raise loadLimit.`;
+    return `${lead} — try ${options.availableFilters.map((f) => `\`${f}\``).join(', ')}.`;
   }
-  return `${totalCount} rows exceed loadLimit=${loadLimit}. Add more specific filters or raise loadLimit.`;
+  return `${lead}.`;
 }
 
 /**

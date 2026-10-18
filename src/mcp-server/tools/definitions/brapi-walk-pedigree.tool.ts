@@ -1,10 +1,12 @@
 /**
  * @fileoverview `brapi_walk_pedigree` — walk germplasm ancestry or
  * descendancy as a DAG. BrAPI only exposes direct parents / direct progeny
- * per call, so we BFS outward from each root up to `maxDepth`, deduplicate
- * nodes (cultivars may appear on multiple paths), and break cycles.
- * Response includes traversal stats so the agent can see how the walk
- * terminated without re-running the tool.
+ * per call, so we BFS outward from each root up to `maxDepth`: ancestors are
+ * walked only upward (/pedigree) and descendants only downward (/progeny), so
+ * `both` is the union of the two walks. Each parent–child pair is one edge;
+ * an edge that makes a germplasm its own ancestor is kept, marked `isCycle`,
+ * and not walked further. Response includes traversal stats so the agent can
+ * see how the walk terminated without re-running the tool.
  *
  * @module mcp-server/tools/definitions/brapi-walk-pedigree.tool
  */
@@ -12,7 +14,11 @@
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
-import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
+import {
+  type BrapiClient,
+  type BrapiEnvelope,
+  getBrapiClient,
+} from '@/services/brapi-client/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
@@ -23,13 +29,23 @@ import {
   DataframeHandleSchema,
   isUpstreamNotFound,
   LoadLimitInput,
+  NonBlankString,
   renderDataframeHandle,
   requireRegisteredConnection,
+  stagedDataframeNotice,
   toDataframeHandle,
 } from '../shared/find-helpers.js';
+import { renderPedigreeDiagram } from '../shared/pedigree-diagram.js';
 
 const DEFAULT_MAX_DEPTH = 3;
 const MAX_NODES = 1_000;
+/**
+ * Edge ceiling. Loop detection walks the recorded edges for every pair that
+ * reconnects two known germplasm, so the edge count bounds that work as well
+ * as the payload. Real pedigrees stay far below it: each germplasm has a
+ * handful of parents.
+ */
+const MAX_EDGES = 10 * MAX_NODES;
 
 const NodeSchema = z
   .object({
@@ -44,7 +60,7 @@ const NodeSchema = z
     direction: z
       .enum(['root', 'ancestor', 'descendant', 'both'])
       .describe(
-        'Side of the root this node was reached from. `root` = the starting germplasm itself. `ancestor` = reached via /pedigree (a parent of the root or one of its parents). `descendant` = reached via /progeny. `both` = encountered as both an ancestor and a descendant in a bidirectional walk (rare — backcross or selfing chain).',
+        '`root` = a starting germplasm; `ancestor` = reached upward via /pedigree; `descendant` = reached downward via /progeny; `both` = reached from both sides (a descendant of one root and an ancestor of another, or a node on a pedigree loop).',
       ),
   })
   .describe('One germplasm reached during the walk.');
@@ -55,16 +71,26 @@ const EdgeSchema = z
     to: z.string().describe('germplasmDbId of the target.'),
     relationship: z
       .enum(['parent', 'child'])
-      .describe('Direction: parent = from is a parent of to; child = from is a descendant of to.'),
+      .describe(
+        'Which lookup found the pair. parent = from is a parent of to (found via /pedigree); child = from is a child of to (found via /progeny). A pair found both ways is listed once, as parent.',
+      ),
     parentType: z
       .string()
       .optional()
-      .describe('E.g. MALE, FEMALE, SELF, when the upstream response supplies it.'),
+      .describe(
+        "The parent's role in the cross (e.g. MALE, FEMALE, SELF), when the upstream response supplies it.",
+      ),
+    isCycle: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when this edge closes a loop (the parent is already a descendant of the child); the walk does not continue past it. Absent on other edges.',
+      ),
   })
-  .describe('One deduplicated pedigree edge between two nodes.');
+  .describe('One parent–child pair, recorded once whichever side found it.');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   direction: z
     .enum(['ancestors', 'descendants', 'both'])
     .describe('The direction the walk expanded (echoed from the input).'),
@@ -78,11 +104,7 @@ const OutputSchema = z.object({
     .describe(
       'Deduplicated node list — every germplasm reached by the walk, sorted by depth then DbId.',
     ),
-  edges: z
-    .array(EdgeSchema)
-    .describe(
-      'Deduplicated edge list. `relationship: "parent"` means `from` is a parent of `to`; `relationship: "child"` means `from` is a descendant of `to`.',
-    ),
+  edges: z.array(EdgeSchema).describe('One edge per parent–child pair.'),
   depthReached: z
     .number()
     .int()
@@ -95,12 +117,16 @@ const OutputSchema = z.object({
     .number()
     .int()
     .nonnegative()
-    .describe('Nodes that have no outgoing edges in the walked direction — terminal in the DAG.'),
+    .describe(
+      'Non-root nodes with nothing recorded beyond them: ancestors with no parents, descendants with no progeny (a node on both sides needs neither). Includes nodes the depth limit stopped at.',
+    ),
   cycleCount: z
     .number()
     .int()
     .nonnegative()
-    .describe('Number of times the walk revisited an already-registered node (cycles broken).'),
+    .describe(
+      'Number of edges with isCycle: true. Paths that reconverge on one germplasm (shared ancestors, siblings, a parent shared by two roots) are not cycles.',
+    ),
   deadEndCount: z
     .number()
     .int()
@@ -108,15 +134,25 @@ const OutputSchema = z.object({
     .describe('Nodes whose upstream pedigree/progeny lookup failed.'),
   truncated: z
     .boolean()
-    .describe(`True when the walk hit the ${MAX_NODES}-node safety cap before exhausting depth.`),
+    .describe(
+      `True when the walk hit its safety cap (${MAX_NODES} nodes or ${MAX_EDGES} edges) before exhausting depth.`,
+    ),
   warnings: z
     .array(z.string())
-    .describe('Advisory messages (capability gaps, per-node expansion failures).'),
+    .describe(
+      'Advisory messages (capability gaps, per-node expansion failures, an omitted diagram).',
+    ),
+  diagram: z
+    .string()
+    .optional()
+    .describe(
+      'Mermaid (`flowchart …`) or DOT (`digraph …`) source for the whole walk, nodes and edges past loadLimit included; present when `diagram` was requested. A diagram past 50,000 characters, or a Mermaid one past 500 edges, is omitted with a warning.',
+    ),
   nodesDataframe: DataframeHandleSchema.optional().describe(
-    'Canvas dataframe holding the full node set, present when the walk exceeds loadLimit — nodes[] is then a bounded preview. Query with brapi_dataframe_query (SQL); JOIN to the edges dataframe on germplasmDbId.',
+    'The full node set, staged when the walk exceeds loadLimit; nodes[] is then a bounded preview. JOIN its germplasmDbId to the edges dataframe on from_ or to.',
   ),
   edgesDataframe: DataframeHandleSchema.optional().describe(
-    'Canvas dataframe holding the full edge set, present when the walk exceeds loadLimit — edges[] is then a bounded preview. Any edge field that is a reserved SQL word (e.g. `from` → `from_`) is renamed to a SQL-safe identifier; columnLegend maps it back. Query with brapi_dataframe_query (SQL).',
+    'The full edge set, staged when the walk exceeds loadLimit; edges[] is then a bounded preview. Reserved-word columns are renamed (`from` → `from_`; see columnLegend).',
   ),
 });
 
@@ -124,28 +160,89 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
   description:
-    'Walk germplasm ancestry or descendancy as a deduplicated DAG, with multi-generation traversal, cycle detection, and depth limits. Returns nodes + edges plus traversal stats (depthReached, rootCount, leafCount, cycleCount, deadEndCount).',
+    'Walk germplasm ancestry or descendancy as a deduplicated DAG, with multi-generation traversal, cycle detection, and depth limits. Returns one edge per parent–child pair plus traversal stats (depthReached, rootCount, leafCount, cycleCount, deadEndCount), and optionally the walk as a Mermaid or Graphviz diagram. A walk larger than loadLimit stages its nodes and edges as two dataframes — read them with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_walk_pedigree.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_walk_pedigree.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_walk_pedigree in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_walk_pedigree.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_walk_pedigree.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_walk_pedigree.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_walk_pedigree.',
+      retryable: false,
       thrownBy: 'service',
     },
   ] as const,
   input: z.object({
     germplasmDbIds: z
-      .array(z.string().min(1))
+      .array(NonBlankString)
       .min(1)
       .max(20)
       .describe('Starting germplasm (1–20 roots). All roots are walked concurrently.'),
     direction: z
       .enum(['ancestors', 'descendants', 'both'])
       .default('ancestors')
-      .describe('Which direction to walk: ancestors (parents), descendants (progeny), or both.'),
+      .describe(
+        "Which direction to walk: ancestors (parents), descendants (progeny), or both — the union of the two walks. Ancestors are walked only upward and descendants only downward, so a descendant's other parent is not included.",
+      ),
     maxDepth: z
       .number()
       .int()
@@ -153,10 +250,25 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       .max(10)
       .default(DEFAULT_MAX_DEPTH)
       .describe(`Max generations to walk per direction (default ${DEFAULT_MAX_DEPTH}, cap 10).`),
-    loadLimit: LoadLimitInput,
+    diagram: z
+      .enum(['mermaid', 'dot'])
+      .optional()
+      .describe(
+        'Also return the walk as diagram source: `mermaid` (flowchart) or `dot` (Graphviz). Edges point parent → child, roots are bold, loop-closing edges are dashed. Omit for no diagram.',
+      ),
+    loadLimit: LoadLimitInput.describe(
+      'Cap on rows returned inline. Omit for the deployment default. Rows beyond the cap land in a dataframe; query with brapi_dataframe_query (SQL) instead of paging row-by-row.',
+    ),
     alias: AliasInput,
   }),
+  inputAliases: { germplasmDbId: 'germplasmDbIds' },
   output: OutputSchema,
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe('When the walk was staged, the node and edge dataframes and how to read them.'),
+  },
 
   async handler(input, ctx) {
     const capabilities = getCapabilityRegistry();
@@ -192,41 +304,59 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       );
     }
 
+    /*
+     * Each root's /pedigree is requested once: the response answers the
+     * existence check, names the root, and is the root's depth-1 ancestor
+     * expansion.
+     */
+    const rootPedigree = new Map<string, Promise<LookupEnvelope>>();
+    const rootNames = new Map<string, string>();
     if (hasPedigree) {
-      const missing = await Promise.all(
-        input.germplasmDbIds.map(async (id) =>
-          (await rootExists(id, client, connection, ctx)) ? null : id,
-        ),
+      for (const id of input.germplasmDbIds) {
+        if (!rootPedigree.has(id)) {
+          rootPedigree.set(id, requestLookup(client, connection, id, 'pedigree', ctx));
+        }
+      }
+      const checks = await Promise.all(
+        Array.from(rootPedigree, async ([id, pending]) => ({ id, ...(await checkRoot(pending)) })),
       );
-      for (const id of missing) {
-        if (id) warnings.push(`Root germplasm '${id}' was not found in /germplasm/{id}/pedigree.`);
+      for (const check of checks) {
+        if (!check.found) {
+          warnings.push(`Root germplasm '${check.id}' was not found in /germplasm/{id}/pedigree.`);
+        }
+        if (check.germplasmName) rootNames.set(check.id, check.germplasmName);
       }
     }
 
-    const state = createWalkState(input.germplasmDbIds);
+    const state = createWalkState(input.germplasmDbIds, rootNames, {
+      ancestor: wantsAncestors && hasPedigree,
+      descendant: wantsDescendants && hasProgeny,
+    });
     let truncated = false;
-    let cycleCount = 0;
     let deadEndCount = 0;
     let depthReached = 0;
 
     depthLoop: for (let depth = 1; depth <= input.maxDepth; depth++) {
-      if (state.nodes.size >= MAX_NODES) {
+      const upward = state.frontier.ancestor;
+      const downward = state.frontier.descendant;
+      state.frontier = { ancestor: new Set(), descendant: new Set() };
+      const ids = new Set([...upward, ...downward]);
+      if (ids.size === 0) break;
+      if (atCap(state)) {
         // Already at the cap from a prior depth — skip fetching another round.
         truncated = true;
         break;
       }
-      const previousFrontier = state.frontier;
-      state.frontier = new Set();
-      if (previousFrontier.size === 0) break;
 
       const exp = await Promise.all(
-        Array.from(previousFrontier).map(async (id) =>
+        Array.from(ids, async (id) =>
           expandNode(id, {
             client,
             connection,
             ctx,
-            walkAncestors: wantsAncestors && hasPedigree,
-            walkDescendants: wantsDescendants && hasProgeny,
+            walkAncestors: upward.has(id),
+            walkDescendants: downward.has(id),
+            pedigree: rootPedigree.get(id),
           }),
         ),
       );
@@ -237,64 +367,40 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
           warnings.push(`Expansion failed for ${result.id}: ${result.error}`);
           continue;
         }
+        const expanded = state.nodes.get(result.id);
+        if (expanded && !expanded.germplasmName && result.germplasmName) {
+          expanded.germplasmName = result.germplasmName;
+        }
 
         for (const parent of result.parents) {
           // Hard ceiling: one high-fertility germplasm can enumerate thousands
           // of parents/children within a single depth, so enforce the cap
           // per-registration — a depth-boundary check alone lets nodes.size
           // overshoot MAX_NODES before the next iteration runs.
-          if (state.nodes.size >= MAX_NODES) {
+          if (atCap(state)) {
             truncated = true;
             break depthLoop;
           }
-          const already = state.nodes.has(parent.germplasmDbId);
-          registerNode(state, parent.germplasmDbId, parent.germplasmName, depth, 'ancestor');
-          const edge: z.infer<typeof EdgeSchema> = {
-            from: parent.germplasmDbId,
-            to: result.id,
-            relationship: 'parent',
-          };
-          if (parent.parentType) edge.parentType = parent.parentType;
-          const inverseKnown = isInverseEdgeKnown(state, edge);
-          if (addEdge(state, edge)) depthReached = depth;
-          if (already) {
-            // direction='both' walks BFS in two directions concurrently — we
-            // expect to re-encounter nodes via the inverse relationship as the
-            // expansions meet. That's a structural symmetry, not a cycle.
-            if (!inverseKnown) cycleCount++;
-          } else {
-            state.frontier.add(parent.germplasmDbId);
+          if (link(state, 'ancestor', parent.germplasmDbId, result.id, parent, depth)) {
+            depthReached = depth;
           }
         }
 
         for (const child of result.children) {
-          if (state.nodes.size >= MAX_NODES) {
+          if (atCap(state)) {
             truncated = true;
             break depthLoop;
           }
-          const already = state.nodes.has(child.germplasmDbId);
-          registerNode(state, child.germplasmDbId, child.germplasmName, depth, 'descendant');
-          const edge: z.infer<typeof EdgeSchema> = {
-            from: child.germplasmDbId,
-            to: result.id,
-            relationship: 'child',
-          };
-          const inverseKnown = isInverseEdgeKnown(state, edge);
-          if (addEdge(state, edge)) depthReached = depth;
-          if (already) {
-            if (!inverseKnown) cycleCount++;
-          } else {
-            state.frontier.add(child.germplasmDbId);
+          if (link(state, 'descendant', result.id, child.germplasmDbId, child, depth)) {
+            depthReached = depth;
           }
         }
       }
-
-      if (state.frontier.size === 0) break;
     }
 
     if (truncated) {
       warnings.push(
-        `Walk stopped at the ${MAX_NODES}-node safety cap; the returned DAG is partial. Re-run with fewer roots or a lower maxDepth to stay within the cap.`,
+        `Walk stopped at its safety cap (${MAX_NODES} nodes or ${MAX_EDGES} edges); the returned DAG is partial. Re-run with fewer roots or a lower maxDepth to stay within the cap.`,
       );
     }
 
@@ -302,8 +408,15 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       (a, b) => a.depth - b.depth || a.germplasmDbId.localeCompare(b.germplasmDbId),
     );
     const edges = Array.from(state.edges.values());
+    const cycleCount = edges.filter((edge) => edge.isCycle).length;
+    const leafCount = computeLeafCount(nodes, edges);
 
-    const leafCount = computeLeafCount(nodes, edges, input.direction);
+    let diagram: string | undefined;
+    if (input.diagram) {
+      const rendered = renderPedigreeDiagram(input.diagram, nodes, edges);
+      if (rendered.ok) diagram = rendered.source;
+      else warnings.push(rendered.reason);
+    }
 
     // Spillover: when the full graph exceeds loadLimit, materialize the node
     // and edge sets as two canvas dataframes (JOINable on germplasmDbId) and
@@ -340,10 +453,24 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
           source: 'walk_pedigree_edges',
           baseUrl: connection.baseUrl,
           query,
-          rows: edges,
+          // isCycle is a column on every row, so SQL can filter on it.
+          rows: edges.map((edge) => ({ ...edge, isCycle: edge.isCycle === true })),
         });
         edgesDataframe = toDataframeHandle(reg, edges.length);
         previewEdges = edges.slice(0, loadLimit);
+      }
+      const staged = [nodesDataframe, edgesDataframe].filter(
+        (df): df is DataframeHandle => df !== undefined,
+      );
+      if (staged.length > 0) {
+        ctx.enrich.notice(
+          stagedDataframeNotice(
+            staged,
+            nodesDataframe && edgesDataframe
+              ? { join: pedigreeJoinHint(nodesDataframe, edgesDataframe) }
+              : {},
+          ),
+        );
       }
     }
 
@@ -363,6 +490,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     };
     if (nodesDataframe) result.nodesDataframe = nodesDataframe;
     if (edgesDataframe) result.edgesDataframe = edgesDataframe;
+    if (diagram !== undefined) result.diagram = diagram;
     return result;
   },
 
@@ -407,7 +535,10 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       for (const edge of result.edges) {
         const suffix = edge.parentType ? ` (${edge.parentType})` : '';
         const arrow = edge.relationship === 'parent' ? '→' : '←';
-        lines.push(`- \`${edge.from}\` ${arrow} \`${edge.to}\` · ${edge.relationship}${suffix}`);
+        const cycle = edge.isCycle ? ' · isCycle' : '';
+        lines.push(
+          `- \`${edge.from}\` ${arrow} \`${edge.to}\` · ${edge.relationship}${suffix}${cycle}`,
+        );
       }
     }
 
@@ -423,6 +554,12 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       lines.push(...renderDataframeHandle(result.edgesDataframe));
     }
 
+    if (result.diagram !== undefined) {
+      // Every source line starts with renderer syntax, so the fence can't close early.
+      const fence = result.diagram.startsWith('digraph') ? 'dot' : 'mermaid';
+      lines.push('', '## Diagram', `\`\`\`${fence}`, result.diagram, '```');
+    }
+
     if (result.warnings.length > 0) {
       lines.push('');
       lines.push('## Warnings');
@@ -433,20 +570,133 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
   },
 });
 
+type PedigreeNode = z.infer<typeof NodeSchema>;
+type PedigreeEdge = z.infer<typeof EdgeSchema>;
+type Side = 'ancestor' | 'descendant';
+
 interface WalkState {
-  edges: Map<string, z.infer<typeof EdgeSchema>>;
-  frontier: Set<string>;
-  nodes: Map<string, z.infer<typeof NodeSchema>>;
+  /** Parent → children over every recorded pair, for loop detection. */
+  childrenOf: Map<string, Set<string>>;
+  /** One edge per parent–child pair, keyed by {@link pairKey}. */
+  edges: Map<string, PedigreeEdge>;
+  /** Nodes to expand at the next depth, per side. */
+  frontier: Record<Side, Set<string>>;
+  nodes: Map<string, PedigreeNode>;
+  /** Nodes ever queued on each side — each side expands a node at most once. */
+  queued: Record<Side, Set<string>>;
 }
 
-function createWalkState(rootIds: readonly string[]): WalkState {
-  const nodes = new Map<string, z.infer<typeof NodeSchema>>();
-  const frontier = new Set<string>();
+function createWalkState(
+  rootIds: readonly string[],
+  rootNames: ReadonlyMap<string, string>,
+  sides: Record<Side, boolean>,
+): WalkState {
+  const state: WalkState = {
+    nodes: new Map(),
+    edges: new Map(),
+    childrenOf: new Map(),
+    frontier: { ancestor: new Set(), descendant: new Set() },
+    queued: { ancestor: new Set(), descendant: new Set() },
+  };
   for (const id of rootIds) {
-    nodes.set(id, { germplasmDbId: id, depth: 0, isRoot: true, direction: 'root' });
-    frontier.add(id);
+    const node: PedigreeNode = { germplasmDbId: id, depth: 0, isRoot: true, direction: 'root' };
+    const name = rootNames.get(id);
+    if (name) node.germplasmName = name;
+    state.nodes.set(id, node);
+    if (sides.ancestor) enqueue(state, 'ancestor', id);
+    if (sides.descendant) enqueue(state, 'descendant', id);
   }
-  return { nodes, edges: new Map(), frontier };
+  return state;
+}
+
+function enqueue(state: WalkState, side: Side, id: string): void {
+  if (state.queued[side].has(id)) return;
+  state.queued[side].add(id);
+  state.frontier[side].add(id);
+}
+
+function atCap(state: WalkState): boolean {
+  return state.nodes.size >= MAX_NODES || state.edges.size >= MAX_EDGES;
+}
+
+function pairKey(parentId: string, childId: string): string {
+  return JSON.stringify([parentId, childId]);
+}
+
+/**
+ * Record that `parentId` is a parent of `childId`, found from `side` (via
+ * /pedigree for `ancestor`, /progeny for `descendant`). The pair gets one
+ * edge whichever side finds it, labelled `parent` once /pedigree has seen it.
+ * The newly reached end is registered and queued on `side` unless the edge
+ * closes a loop. Returns true when the pair is new.
+ */
+function link(
+  state: WalkState,
+  side: Side,
+  parentId: string,
+  childId: string,
+  entry: Relative,
+  depth: number,
+): boolean {
+  const reachedId = side === 'ancestor' ? parentId : childId;
+  const key = pairKey(parentId, childId);
+  const existing = state.edges.get(key);
+  const isNew = existing === undefined;
+  let isCycle: boolean;
+  if (existing) {
+    isCycle = existing.isCycle === true;
+    if (side === 'ancestor' && existing.relationship === 'child') {
+      const parentType = entry.parentType ?? existing.parentType;
+      state.edges.set(key, toEdge(side, parentId, childId, parentType, isCycle));
+    }
+  } else {
+    isCycle =
+      parentId === childId ||
+      (state.nodes.has(reachedId) && reaches(state.childrenOf, childId, parentId));
+    state.edges.set(key, toEdge(side, parentId, childId, entry.parentType, isCycle));
+    const children = state.childrenOf.get(parentId);
+    if (children) children.add(childId);
+    else state.childrenOf.set(parentId, new Set([childId]));
+  }
+  registerNode(state, reachedId, entry.germplasmName, depth, side);
+  if (!isCycle) enqueue(state, side, reachedId);
+  return isNew;
+}
+
+function toEdge(
+  side: Side,
+  parentId: string,
+  childId: string,
+  parentType: string | undefined,
+  isCycle: boolean,
+): PedigreeEdge {
+  const edge: PedigreeEdge =
+    side === 'ancestor'
+      ? { from: parentId, to: childId, relationship: 'parent' }
+      : { from: childId, to: parentId, relationship: 'child' };
+  if (parentType) edge.parentType = parentType;
+  if (isCycle) edge.isCycle = true;
+  return edge;
+}
+
+/** True when `target` is reachable from `start` along parent → child edges. */
+function reaches(
+  childrenOf: ReadonlyMap<string, ReadonlySet<string>>,
+  start: string,
+  target: string,
+): boolean {
+  const seen = new Set<string>([start]);
+  const stack = [start];
+  for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
+    for (const next of childrenOf.get(id) ?? []) {
+      if (next === target) return true;
+      if (!seen.has(next)) {
+        seen.add(next);
+        stack.push(next);
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -460,7 +710,7 @@ function registerNode(
   id: string,
   name: string | undefined,
   depth: number,
-  side: 'ancestor' | 'descendant',
+  side: Side,
 ): void {
   const existing = state.nodes.get(id);
   if (existing) {
@@ -471,7 +721,7 @@ function registerNode(
     }
     return;
   }
-  const node: z.infer<typeof NodeSchema> = {
+  const node: PedigreeNode = {
     germplasmDbId: id,
     depth,
     isRoot: false,
@@ -481,29 +731,24 @@ function registerNode(
   state.nodes.set(id, node);
 }
 
-function addEdge(state: WalkState, edge: z.infer<typeof EdgeSchema>): boolean {
-  const key = `${edge.relationship}:${edge.from}→${edge.to}`;
-  if (state.edges.has(key)) return false;
-  state.edges.set(key, edge);
-  return true;
+/** A parent (from /pedigree) or child (from /progeny) entry of the expanded germplasm. */
+interface Relative {
+  germplasmDbId: string;
+  germplasmName?: string;
+  /** The parent's role in the cross — on a /progeny entry, the expanded germplasm's role. */
+  parentType?: string;
 }
 
-/**
- * `parent: A→B` and `child: B→A` describe the same biological relationship
- * from opposite ends. When direction='both', BFS will discover both —
- * detecting the inverse lets us avoid double-counting it as a cycle.
- */
-function isInverseEdgeKnown(state: WalkState, edge: z.infer<typeof EdgeSchema>): boolean {
-  const inverseRel = edge.relationship === 'parent' ? 'child' : 'parent';
-  return state.edges.has(`${inverseRel}:${edge.to}→${edge.from}`);
-}
+type LookupEnvelope = BrapiEnvelope<Record<string, unknown> | null>;
 
 type Expansion =
   | {
       kind: 'ok';
       id: string;
-      parents: Array<{ germplasmDbId: string; germplasmName?: string; parentType?: string }>;
-      children: Array<{ germplasmDbId: string; germplasmName?: string }>;
+      /** The expanded germplasm's own name, from its /pedigree or /progeny response. */
+      germplasmName?: string;
+      parents: Relative[];
+      children: Relative[];
     }
   | { kind: 'deadEnd'; id: string; error: string };
 
@@ -511,22 +756,32 @@ interface ExpandInput {
   client: BrapiClient;
   connection: RegisteredServer;
   ctx: Context;
+  /** A /pedigree response already requested for this germplasm (roots only). */
+  pedigree: Promise<LookupEnvelope> | undefined;
   walkAncestors: boolean;
   walkDescendants: boolean;
 }
 
 async function expandNode(id: string, input: ExpandInput): Promise<Expansion> {
   try {
-    const encoded = encodeURIComponent(id);
     const [pedigree, progeny] = await Promise.all([
       input.walkAncestors
-        ? fetchPedigree(input.client, input.connection, encoded, input.ctx)
-        : Promise.resolve([]),
+        ? (input.pedigree ??
+          requestLookup(input.client, input.connection, id, 'pedigree', input.ctx))
+        : undefined,
       input.walkDescendants
-        ? fetchProgeny(input.client, input.connection, encoded, input.ctx)
-        : Promise.resolve([]),
+        ? requestLookup(input.client, input.connection, id, 'progeny', input.ctx)
+        : undefined,
     ]);
-    return { kind: 'ok', id, parents: pedigree, children: progeny };
+    const expansion: Expansion = {
+      kind: 'ok',
+      id,
+      parents: pedigree ? readRelatives(pedigree.result?.parents) : [],
+      children: progeny ? readProgeny(progeny.result) : [],
+    };
+    const name = selfName(pedigree) ?? selfName(progeny);
+    if (name) expansion.germplasmName = name;
+    return expansion;
   } catch (err) {
     return {
       kind: 'deadEnd',
@@ -536,125 +791,98 @@ async function expandNode(id: string, input: ExpandInput): Promise<Expansion> {
   }
 }
 
-async function rootExists(
-  id: string,
+function requestLookup(
   client: BrapiClient,
   connection: RegisteredServer,
+  id: string,
+  lookup: 'pedigree' | 'progeny',
   ctx: Context,
-): Promise<boolean> {
+): Promise<LookupEnvelope> {
+  return client.get<Record<string, unknown> | null>(
+    connection.baseUrl,
+    `/germplasm/${encodeURIComponent(id)}/${lookup}`,
+    ctx,
+    buildRequestOptions(connection, undefined, { singleton: true }),
+  );
+}
+
+/** Settle a root's /pedigree lookup into "does it exist" and its own name. */
+async function checkRoot(
+  pending: Promise<LookupEnvelope>,
+): Promise<{ found: boolean; germplasmName?: string }> {
   try {
-    const env = await client.get<Record<string, unknown> | null>(
-      connection.baseUrl,
-      `/germplasm/${encodeURIComponent(id)}/pedigree`,
-      ctx,
-      buildRequestOptions(connection, undefined, { singleton: true }),
-    );
+    const env = await pending;
     // Some servers (e.g. test-server.brapi.org) reply 200 with `result: null`
     // for unknown germplasm instead of 404.
-    return env.result != null;
+    if (env.result == null) return { found: false };
+    const name = selfName(env);
+    return name ? { found: true, germplasmName: name } : { found: true };
   } catch (err) {
-    if (isUpstreamNotFound(err)) return false;
-    // Non-404 errors get surfaced when the BFS later expands the node.
-    return true;
+    if (isUpstreamNotFound(err)) return { found: false };
+    // Non-404 errors get surfaced when the BFS expands the root.
+    return { found: true };
   }
 }
 
-async function fetchPedigree(
-  client: BrapiClient,
-  connection: RegisteredServer,
-  encodedId: string,
-  ctx: Context,
-): Promise<Array<{ germplasmDbId: string; germplasmName?: string; parentType?: string }>> {
-  const env = await client.get<Record<string, unknown>>(
-    connection.baseUrl,
-    `/germplasm/${encodedId}/pedigree`,
-    ctx,
-    buildRequestOptions(connection, undefined, { singleton: true }),
-  );
-  const rawParents = (env.result as { parents?: unknown })?.parents;
-  if (!Array.isArray(rawParents)) return [];
-  const parents: Array<{ germplasmDbId: string; germplasmName?: string; parentType?: string }> = [];
-  for (const entry of rawParents) {
+function selfName(env: LookupEnvelope | undefined): string | undefined {
+  const name = env?.result?.germplasmName;
+  return typeof name === 'string' && name.length > 0 ? name : undefined;
+}
+
+function readProgeny(result: Record<string, unknown> | null): Relative[] {
+  return readRelatives(Array.isArray(result?.progeny) ? result.progeny : result?.data);
+}
+
+function readRelatives(raw: unknown): Relative[] {
+  if (!Array.isArray(raw)) return [];
+  const relatives: Relative[] = [];
+  for (const entry of raw) {
     if (typeof entry !== 'object' || entry === null) continue;
     const record = entry as Record<string, unknown>;
     const dbId = record.germplasmDbId;
     if (typeof dbId !== 'string' || dbId.length === 0) continue;
-    const item: { germplasmDbId: string; germplasmName?: string; parentType?: string } = {
-      germplasmDbId: dbId,
-    };
+    const item: Relative = { germplasmDbId: dbId };
     if (typeof record.germplasmName === 'string') item.germplasmName = record.germplasmName;
     if (typeof record.parentType === 'string') item.parentType = record.parentType;
-    parents.push(item);
+    relatives.push(item);
   }
-  return parents;
+  return relatives;
 }
 
-async function fetchProgeny(
-  client: BrapiClient,
-  connection: RegisteredServer,
-  encodedId: string,
-  ctx: Context,
-): Promise<Array<{ germplasmDbId: string; germplasmName?: string }>> {
-  const env = await client.get<Record<string, unknown> | null>(
-    connection.baseUrl,
-    `/germplasm/${encodedId}/progeny`,
-    ctx,
-    buildRequestOptions(connection, undefined, { singleton: true }),
-  );
-  const result = env.result as { progeny?: unknown; data?: unknown } | null;
-  const rawProgeny = result?.progeny;
-  const fallback = Array.isArray(rawProgeny)
-    ? rawProgeny
-    : Array.isArray(result?.data)
-      ? (result.data as unknown[])
-      : [];
-  const children: Array<{ germplasmDbId: string; germplasmName?: string }> = [];
-  for (const entry of fallback) {
-    if (typeof entry !== 'object' || entry === null) continue;
-    const record = entry as Record<string, unknown>;
-    const dbId = record.germplasmDbId;
-    if (typeof dbId !== 'string' || dbId.length === 0) continue;
-    const item: { germplasmDbId: string; germplasmName?: string } = { germplasmDbId: dbId };
-    if (typeof record.germplasmName === 'string') item.germplasmName = record.germplasmName;
-    children.push(item);
-  }
-  return children;
+/**
+ * How the staged node and edge tables join: a node's germplasmDbId matches an
+ * edge's `from` or `to` column, under the SQL-safe names the edge table was
+ * registered with (`from` is a reserved word, so it lands as `from_`).
+ */
+function pedigreeJoinHint(nodes: DataframeHandle, edges: DataframeHandle): string {
+  const column = (key: string) =>
+    Object.entries(edges.columnLegend ?? {}).find(([, original]) => original === key)?.[0] ?? key;
+  return `join germplasmDbId in \`${nodes.tableName}\` to ${column('from')} or ${column('to')} in \`${edges.tableName}\``;
 }
 
-function computeLeafCount(
-  nodes: z.infer<typeof NodeSchema>[],
-  edges: z.infer<typeof EdgeSchema>[],
-  direction: 'ancestors' | 'descendants' | 'both',
-): number {
-  /*
-   * A leaf is a node where the walk terminated in the requested direction —
-   * the BFS visited it but found no further nodes to expand to. In edge
-   * terms: ancestors are recorded as `parent: <ancestor>→<descendant>`, so
-   * a node is an ancestor leaf when nothing points TO it as a child (it's
-   * never the `to` of any parent edge). Descendant edges are mirror image:
-   * `child: <descendant>→<ancestor>`, so a descendant leaf is never the
-   * `to` of any child edge.
-   *
-   * Roots are excluded — they're the seed of the walk, not a terminal.
-   */
+/**
+ * A leaf is a non-root node with nothing recorded beyond it on the side it
+ * was reached from: an ancestor with no parents, a descendant with no
+ * progeny, a node on both sides with neither. Roots seed the walk and are
+ * never leaves.
+ */
+function computeLeafCount(nodes: readonly PedigreeNode[], edges: readonly PedigreeEdge[]): number {
   const hasParent = new Set<string>();
   const hasChild = new Set<string>();
   for (const edge of edges) {
-    if (edge.relationship === 'parent') hasParent.add(edge.to);
-    else hasChild.add(edge.to);
+    const [parentId, childId] =
+      edge.relationship === 'parent' ? [edge.from, edge.to] : [edge.to, edge.from];
+    hasChild.add(parentId);
+    hasParent.add(childId);
   }
   let leaves = 0;
   for (const node of nodes) {
-    if (node.isRoot) continue;
-    if (direction === 'ancestors' && !hasParent.has(node.germplasmDbId)) leaves++;
-    else if (direction === 'descendants' && !hasChild.has(node.germplasmDbId)) leaves++;
-    else if (
-      direction === 'both' &&
-      !hasParent.has(node.germplasmDbId) &&
-      !hasChild.has(node.germplasmDbId)
-    ) {
-      leaves++;
-    }
+    const id = node.germplasmDbId;
+    const terminal =
+      (node.direction === 'ancestor' && !hasParent.has(id)) ||
+      (node.direction === 'descendant' && !hasChild.has(id)) ||
+      (node.direction === 'both' && !hasParent.has(id) && !hasChild.has(id));
+    if (terminal) leaves++;
   }
   return leaves;
 }

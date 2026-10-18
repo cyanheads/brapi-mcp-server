@@ -106,7 +106,7 @@ export const OrientationCapabilitiesSchema = z
       .number()
       .int()
       .nonnegative()
-      .describe('Total distinct services the server advertises in /calls.'),
+      .describe('Total distinct services the server advertises in /serverinfo or /calls.'),
     supported: z
       .array(z.string().describe('BrAPI service name (e.g. "studies", "search/germplasm").'))
       .describe('Sorted list of supported service names.'),
@@ -118,11 +118,7 @@ export const OrientationCapabilitiesSchema = z
 
 export const OrientationDialectSchema = z
   .object({
-    id: z
-      .string()
-      .describe(
-        'Active dialect id (e.g. "spec", "cassavabase"). Names a registered adapter that translates outbound filters and declares known-dead routes.',
-      ),
+    id: z.string().describe('Active dialect id (e.g. "spec", "cassavabase").'),
     source: z
       .enum(['env-override', 'url-pattern', 'server-name', 'organization-name', 'fallback'])
       .describe(
@@ -147,7 +143,7 @@ export const OrientationDialectSchema = z
       .nonnegative()
       .optional()
       .describe(
-        'Number of filter translations the dialect has empirically verified against a live server. Higher means more confidence in the translation table.',
+        'Filter translations verified against a live server. Absent when the dialect publishes no mapping summary.',
       ),
     inferredMappingCount: z
       .number()
@@ -155,7 +151,7 @@ export const OrientationDialectSchema = z
       .nonnegative()
       .optional()
       .describe(
-        'Number of filter translations inferred from naming conventions but not independently verified. A non-zero count means some result narrowing on this server may not fire as expected.',
+        'Filter translations inferred from naming conventions, unverified; when non-zero, some narrowing on this server may not fire.',
       ),
   })
   .describe('Active dialect summary — declares known quirks for this server family.');
@@ -220,9 +216,7 @@ export const NextToolSuggestionSchema = z
       .object({
         alias: z.string().describe('Connection alias to pass to the suggested tool.'),
       })
-      .describe(
-        'Arguments to call the tool with. Alias only — narrow further with the tool filters.',
-      ),
+      .describe('Arguments to start the tool with (alias only).'),
   })
   .describe('A finder the connected server supports, with the arguments to start it.');
 
@@ -232,14 +226,14 @@ export const OrientationEnvelopeSchema = z.object({
   server: ServerIdentitySchema.describe('Normalized server identity block.'),
   auth: OrientationAuthSchema.describe('Auth summary for the active connection.'),
   capabilities: OrientationCapabilitiesSchema.describe(
-    'Capability profile derived from /serverinfo.',
+    'Capability profile derived from /serverinfo or /calls.',
   ),
   dialect: OrientationDialectSchema.describe(
     'Active dialect adapter — translates outbound filters and declares known-dead routes for this server.',
   ),
   content: OrientationContentSchema.describe('Content summary (crops + optional totals).'),
   attribution: OrientationAttributionSchema.optional().describe(
-    'Attribution metadata for built-in known-server connections. Absent for custom (env-only) connections.',
+    'Attribution metadata for built-in known-server connections. Absent when the alias is not built-in or points away from its built-in base URL.',
   ),
   nextToolSuggestions: z
     .array(NextToolSuggestionSchema)
@@ -289,7 +283,7 @@ export async function buildOrientationEnvelope(
   }
   if (supportedServices.length === 0) {
     notes.push(
-      'Server did not advertise any calls via /serverinfo or /calls — downstream tools will fail until the capability profile populates.',
+      'Server did not advertise any calls via /serverinfo or /calls — downstream tools will fail until the cached profile is refreshed (brapi_connect forces it).',
     );
   }
   if (!profile.server.brapiVersion) {
@@ -517,7 +511,7 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
       `- **Crops (${envelope.content.crops.length}):** ${envelope.content.crops.join(', ')}`,
     );
   } else {
-    lines.push('- Crops: — (server did not expose /commoncropnames)');
+    lines.push('- Crops: — (none reported by /commoncropnames)');
   }
   if (envelope.content.studyCount !== undefined)
     lines.push(`- Studies: ${envelope.content.studyCount}`);

@@ -5,9 +5,9 @@
  * @module tests/resources/brapi-calls.resource.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, serviceUnavailable, unauthorized } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiCallsResource } from '@/mcp-server/resources/definitions/brapi-calls.resource.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import {
@@ -49,6 +49,8 @@ describe('brapi://calls resource', () => {
 
   beforeEach(() => {
     fetcher = initTestServices();
+    // A developer-set default server would connect `default` on first use.
+    vi.stubEnv('BRAPI_DEFAULT_BASE_URL', '');
   });
 
   afterEach(() => {
@@ -70,22 +72,81 @@ describe('brapi://calls resource', () => {
     expect(result.supported.germplasm).toBeDefined();
   });
 
-  it('throws NotFound with unknown_alias when no connection is registered', async () => {
-    const ctx = createMockContext({ tenantId: 't1', errors: brapiCallsResource.errors });
-    await expect(brapiCallsResource.handler({}, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'unknown_alias' },
+  it('connects the configured default server on first read, with no brapi_connect', async () => {
+    vi.stubEnv('BRAPI_DEFAULT_BASE_URL', BASE_URL);
+    fetcher.mockImplementation(async (url: string) => {
+      const { hostname, pathname } = new URL(String(url));
+      if (hostname !== new URL(BASE_URL).hostname) throw new Error(`Unmocked fetcher call: ${url}`);
+      if (pathname.endsWith('/serverinfo')) {
+        return jsonResponse(
+          envelope({ calls: [{ service: 'studies', methods: ['GET'], versions: ['2.1'] }] }),
+        );
+      }
+      if (pathname.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: ['Yam'] }));
+      throw new Error(`Unexpected path: ${url}`);
     });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiCallsResource.errors });
+
+    const result = (await brapiCallsResource.handler({}, ctx)) as {
+      alias: string;
+      baseUrl: string;
+      supported: Record<string, unknown>;
+    };
+
+    expect(result).toMatchObject({ alias: 'default', baseUrl: BASE_URL });
+    expect(Object.keys(result.supported)).toEqual(['studies']);
+    expect(await ctx.state.get('brapi/conn/default')).toMatchObject({ baseUrl: BASE_URL });
   });
 
-  it('fills the unknown_alias recovery hint on the wire', async () => {
-    await expect(readResourceError(brapiCallsResource, 'brapi://calls')).resolves.toMatchObject({
+  /*
+   * First-use registration itself is tabled at its seam (find-helpers'
+   * requireRegisteredConnection tests); these pin the hint this resource's
+   * own contract fills for each failure.
+   */
+  it.each([
+    {
+      reason: 'unknown_alias',
+      defaultBaseUrl: '',
+      upstream: undefined,
       code: JsonRpcErrorCode.NotFound,
-      data: {
-        reason: 'unknown_alias',
-        recovery: { hint: expect.stringContaining('brapi_connect') },
-      },
+      hint: 'brapi_connect',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      defaultBaseUrl: BASE_URL,
+      upstream: () => serviceUnavailable('Fetch failed. Status: 503', { status: 503 }),
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      hint: 'Read this resource again in a minute',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      defaultBaseUrl: BASE_URL,
+      upstream: () => unauthorized('Fetch failed. Status: 401', { status: 401 }),
+      code: JsonRpcErrorCode.Unauthorized,
+      hint: 'then read this resource again',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      defaultBaseUrl: 'ftp://brapi.example/v2',
+      upstream: undefined,
+      code: JsonRpcErrorCode.ConfigurationError,
+      hint: 'BRAPI_DEFAULT_BASE_URL',
+    },
+  ])('fills the $reason recovery hint on the wire', async (c) => {
+    vi.stubEnv('BRAPI_DEFAULT_BASE_URL', c.defaultBaseUrl);
+    fetcher.mockImplementation(async (url: string) => {
+      if (!c.upstream || new URL(String(url)).hostname !== new URL(BASE_URL).hostname) {
+        throw new Error(`Unmocked fetcher call: ${url}`);
+      }
+      throw c.upstream();
     });
+
+    await expect(readResourceError(brapiCallsResource, 'brapi://calls')).resolves.toMatchObject({
+      code: c.code,
+      data: { reason: c.reason, recovery: { hint: expect.stringContaining(c.hint) } },
+    });
+    // Without an upstream failure to reach, the read fails before any request.
+    if (!c.upstream) expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('list() advertises the resource for discovery', async () => {

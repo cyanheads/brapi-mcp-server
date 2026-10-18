@@ -197,17 +197,24 @@ describe('cassavabaseDialect', () => {
   });
 
   describe('locations / variables / images / variants', () => {
-    it('translates CassavaBase locations plurals', () => {
+    it('keeps CassavaBase location filters plural — SGN /locations ignores the singular keys', () => {
       const result = cassavabaseDialect.adaptGetFilters('locations', {
         locationDbIds: ['3'],
-        countryCodes: ['NGA'],
-        locationTypes: ['Field'],
+        locationNames: ['Ibadan'],
+        countryCodes: ['UGA', 'NGA'],
+        locationTypes: ['Farm'],
+        abbreviations: ['UB'],
       });
       expect(result.filters).toEqual({
-        locationDbId: '3',
-        countryCode: 'NGA',
-        locationType: 'Field',
+        locationDbIds: ['3'],
+        locationNames: ['Ibadan'],
+        countryCodes: ['UGA', 'NGA'],
+        locationTypes: ['Farm'],
+        abbreviations: ['UB'],
       });
+      // A multi-value filter is no longer downcast to its first value.
+      expect(result.warnings).toEqual([]);
+      expect(result.requiresEscalation).toBeUndefined();
     });
 
     it('leaves Breedbase location filters plural for Sweetpotatobase compatibility', () => {
@@ -314,6 +321,10 @@ describe('cassavabaseDialect', () => {
       // Inferred set is large by design: most v2.1 plurals follow the same
       // naming pattern but only a handful have been live-narrowed.
       expect(summary?.inferred).toBeGreaterThan(summary?.verified ?? 0);
+    });
+
+    it('counts the same mappings for both SGN dialects — neither maps /locations', () => {
+      expect(cassavabaseDialect.mappingSummary).toEqual(breedbaseDialect.mappingSummary);
     });
 
     it('emits a softened warning when an inferred mapping downcasts', () => {

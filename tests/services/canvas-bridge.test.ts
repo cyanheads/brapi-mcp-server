@@ -363,6 +363,20 @@ describe('CanvasBridge.registerDataframe', () => {
     });
   });
 
+  it('rejects a zero-row set the way DuckDB does — an empty row set has no columns to create', async () => {
+    const ctx = createMockContext({ tenantId: 't1' });
+    await expect(
+      bridge.registerDataframe(ctx, {
+        source: 'find_locations',
+        baseUrl: 'https://b/v2',
+        query: {},
+        rows: [],
+      }),
+    ).rejects.toThrow('Table schema must contain at least one column.');
+    const instance = await bridge.getInstance(ctx);
+    expect(await instance.describe()).toEqual([]);
+  });
+
   it('propagates truncated + maxRows when the spillover hit a cap', async () => {
     const ctx = createMockContext({ tenantId: 't1' });
     const result = await bridge.registerDataframe(ctx, {
@@ -438,17 +452,37 @@ describe('CanvasBridge.registerDataframe', () => {
 });
 
 describe('CanvasBridge.query', () => {
-  it('caps rowLimit to canvasMaxRows', async () => {
+  /** Record the options the bridge forwards to the canvas instance's `query`. */
+  function captureForwardedOptions(canvas: FakeDataCanvas): Array<Record<string, unknown>> {
+    const forwarded: Array<Record<string, unknown>> = [];
+    const acquire = canvas.acquire.bind(canvas);
+    vi.spyOn(canvas, 'acquire').mockImplementation(async (id, ctx) => {
+      const instance = await acquire(id, ctx);
+      const query = instance.query.bind(instance);
+      (instance as { query: typeof instance.query }).query = async (sql, opts) => {
+        forwarded.push({ ...opts });
+        return await query(sql, opts);
+      };
+      return instance;
+    });
+    return forwarded;
+  }
+
+  it.each([
+    ['no rowLimit', {}, { rowLimit: 100 }],
+    ['a rowLimit above canvasMaxRows', { rowLimit: 10_000_000 }, { rowLimit: 100 }],
+    ['a rowLimit under canvasMaxRows', { rowLimit: 40 }, { rowLimit: 40 }],
+    ['a preview above the cap', { preview: 5_000 }, { preview: 100, rowLimit: 100 }],
+    ['a preview above rowLimit', { preview: 800, rowLimit: 50 }, { preview: 50, rowLimit: 50 }],
+    ['a preview under rowLimit', { preview: 20, rowLimit: 50 }, { preview: 20, rowLimit: 50 }],
+  ])('forwards %s within the canvasMaxRows ceiling', async (_label, options, expected) => {
     const canvas = new FakeDataCanvas();
+    const forwarded = captureForwardedOptions(canvas);
     const bridge = new CanvasBridge(asCanvas(canvas), baseConfig);
-    const ctx = createMockContext({ tenantId: 't1' });
-    const acquireSpy = vi.spyOn(canvas, 'acquire');
-    await bridge.query(ctx, 'SELECT 1', { rowLimit: 10_000_000 });
-    // Ensure the bridge acquired (canvas must be alive); the rowLimit cap is
-    // applied inside the bridge before the call to instance.query — covered
-    // here by the absence of a thrown error and by the unit-level check below
-    // that `Math.min(rowLimit, cap)` is the cap when input exceeds it.
-    expect(acquireSpy).toHaveBeenCalled();
+    await bridge.query(createMockContext({ tenantId: 't1' }), 'SELECT 1', options);
+    expect(forwarded).toHaveLength(1);
+    expect(forwarded[0]).toMatchObject(expected);
+    if (!('preview' in expected)) expect(forwarded[0]).not.toHaveProperty('preview');
   });
 
   it('passes preview and registerAs through', async () => {

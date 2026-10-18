@@ -1,8 +1,8 @@
 /**
  * @fileoverview `brapi_find_images` — filter images by observation unit,
  * study, observation, descriptive ontology, file name, or MIME type. Returns
- * metadata only; pull bytes via `brapi_get_image`. Materializes the full set
- * as a dataframe when the upstream total exceeds loadLimit.
+ * metadata only; pull bytes via `brapi_get_image`. Materializes the matched
+ * set as a dataframe when results[] holds fewer rows than matched.
  *
  * @module mcp-server/tools/definitions/brapi-find-images.tool
  */
@@ -25,15 +25,21 @@ import {
   computeDistribution,
   DataframeHandleSchema,
   dialectRowMapper,
+  discloseInlineTrim,
   ExtraFiltersInput,
   fkMatchCheck,
+  InlineTrimEnrichment,
   LoadLimitInput,
   loadInitialFindPage,
   maybeSpill,
   mergeFilters,
+  NonBlankString,
+  renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  renderMoreRowsLine,
+  renderWarningsTrailer,
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
@@ -85,10 +91,12 @@ const ImageRowSchema = z
   .describe('One BrAPI image metadata record.');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   results: z
     .array(ImageRowSchema)
-    .describe('Image metadata rows returned in-context (up to loadLimit).'),
+    .describe(
+      'Leading matched image metadata rows, up to loadLimit and a 24,000-byte budget, whichever binds first.',
+    ),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
@@ -105,9 +113,9 @@ const OutputSchema = z.object({
         .record(z.string(), z.number())
         .describe('Ontology term → count of images tagged with that term.'),
     })
-    .describe('Value frequency per field across the full result set.'),
+    .describe('Value frequency per field across every matched row fetched.'),
   dataframe: DataframeHandleSchema.optional().describe(
-    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
+    'The matched rows, staged as a dataframe when results[] holds fewer.',
   ),
 });
 
@@ -134,15 +142,74 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindImages = tool('brapi_find_images', {
   description:
-    'Filter images by observation unit, observation, study, descriptive ontology term, file name, or MIME type. Returns metadata only — use brapi_get_image to fetch bytes inline. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
+    'Filter images by observation unit, observation, study, descriptive ontology term, file name, or MIME type. Returns metadata only — use brapi_get_image to fetch bytes inline. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_images.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_find_images.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_find_images in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_find_images.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_find_images.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_find_images.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_find_images.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -156,17 +223,20 @@ export const brapiFindImages = tool('brapi_find_images', {
   ] as const,
   input: z.object({
     alias: AliasInput,
-    images: z.array(z.string()).optional().describe('Filter by imageDbIds.'),
-    observationUnits: z.array(z.string()).optional().describe('Filter by observationUnitDbIds.'),
-    observations: z.array(z.string()).optional().describe('Filter by observationDbIds.'),
-    studies: z.array(z.string()).optional().describe('Filter by studyDbIds.'),
-    imageFileNames: z.array(z.string()).optional().describe('Filter by uploaded file name.'),
+    images: z.array(NonBlankString).optional().describe('Filter by imageDbIds.'),
+    observationUnits: z
+      .array(NonBlankString)
+      .optional()
+      .describe('Filter by observationUnitDbIds.'),
+    observations: z.array(NonBlankString).optional().describe('Filter by observationDbIds.'),
+    studies: z.array(NonBlankString).optional().describe('Filter by studyDbIds.'),
+    imageFileNames: z.array(NonBlankString).optional().describe('Filter by uploaded file name.'),
     mimeTypes: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe('Filter by MIME type — e.g. "image/jpeg", "image/png".'),
     descriptiveOntologyTerms: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe('Filter by ontology tags (e.g. "CO_334:plot").'),
     loadLimit: LoadLimitInput,
@@ -179,40 +249,28 @@ export const brapiFindImages = tool('brapi_find_images', {
   // notices. Populated via ctx.enrich() so it reaches both structuredContent
   // and the content[] trailer without living in the domain return.
   enrichment: {
-    totalCount: z.number().int().nonnegative().describe('Total rows reported by the server.'),
+    totalCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe('Total rows reported by the server, else the rows scanned.'),
     returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
       .record(z.string(), z.unknown())
-      .describe('The final filter map sent to the server (named + extraFilters).'),
+      .describe('Filter map sent upstream (named filters plus extraFilters).'),
     refinementHint: z
       .string()
       .optional()
-      .describe('Suggested next-step query refinement when the result set is large.'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Guidance when no rows were returned — how to broaden filters or retry.'),
+      .describe('Suggested refinement when the result set is large.'),
+    ...InlineTrimEnrichment,
     warnings: z
       .array(z.string())
       .describe('Advisory messages (filter overrides, partial data, capability gaps).'),
   },
 
   enrichmentTrailer: {
-    appliedFilters: {
-      render: (filters) => {
-        const entries = Object.entries(filters);
-        if (entries.length === 0) return '**Applied Filters:** none';
-        const lines = entries.map(([k, v]) => {
-          const display = SERVER_TO_USER[k] ?? k;
-          return `- **${display}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`;
-        });
-        return `**Applied Filters:**\n${lines.join('\n')}`;
-      },
-    },
-    warnings: {
-      render: (ws) => (ws.length > 0 ? ws.map((w) => `- ${w}`).join('\n') : '_none_'),
-      label: 'Warnings',
-    },
+    appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
+    warnings: { render: renderWarningsTrailer },
   },
 
   async handler(input, ctx) {
@@ -267,7 +325,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       normalizeRow ? { normalizeRow } : {},
     );
 
-    const { fullRows, dataframe } = await maybeSpill({
+    const spill = await maybeSpill({
       firstPage,
       client,
       connection,
@@ -278,8 +336,10 @@ export const brapiFindImages = tool('brapi_find_images', {
       loadLimit,
       ctx,
       bridge,
+      warnings,
       ...(normalizeRow ? { normalizeRow } : {}),
     });
+    const { fullRows, dataframe, results, hasMore, rowsScanned } = spill;
 
     const distributions = {
       mimeType: computeDistribution(fullRows, (r) => asString(r.mimeType)),
@@ -309,8 +369,8 @@ export const brapiFindImages = tool('brapi_find_images', {
       ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
-    const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+    const totalCount = firstPage.totalCount ?? rowsScanned;
+    const refinementHint = buildRefinementHint(spill, distributions, {
       availableFilters: [
         'images',
         'observationUnits',
@@ -325,22 +385,23 @@ export const brapiFindImages = tool('brapi_find_images', {
     const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
     ctx.enrich({
       totalCount,
-      returnedCount: firstPage.rows.length,
+      returnedCount: results.length,
       appliedFilters,
       warnings,
       ...(refinementHint ? { refinementHint } : {}),
     });
-    if (firstPage.rows.length === 0)
+    if (results.length === 0)
       ctx.enrich.notice(
         warnings.length > 0
           ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
           : 'No images matched the applied filters. Try broadening observationUnits, studies, mimeTypes, or descriptiveOntologyTerms.',
       );
+    discloseInlineTrim(ctx, spill, loadLimit);
 
     const result: Output = {
       alias: connection.alias,
-      results: firstPage.rows as z.infer<typeof ImageRowSchema>[],
-      hasMore: firstPage.hasMore,
+      results: results as z.infer<typeof ImageRowSchema>[],
+      hasMore,
       distributions,
     };
     if (dataframe) result.dataframe = dataframe;
@@ -358,12 +419,8 @@ export const brapiFindImages = tool('brapi_find_images', {
       }),
     );
     lines.push('');
-    if (result.hasMore) {
-      lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
-      );
-      lines.push('');
-    }
+    const moreRows = renderMoreRowsLine(result);
+    if (moreRows) lines.push(moreRows, '');
     lines.push('## Distributions');
     lines.push(
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',

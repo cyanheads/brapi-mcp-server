@@ -5,22 +5,35 @@
  * consult this before routing requests — if a required endpoint isn't in the
  * server's capability set, the service surfaces a clear `ValidationError`
  * instead of letting the call fail downstream. Discovery degrades softly on
- * missing or broken endpoints, but an HTTP 401/403 on `/serverinfo` or
- * `/calls` propagates uncached — an auth wall needs credentials, not an
- * empty profile.
+ * missing or broken endpoints, but four failures propagate uncached: an HTTP
+ * 401/403 on `/serverinfo` or `/calls` (an auth wall needs credentials, not
+ * an empty profile), a base URL the fetch guard refuses as a private or
+ * reserved address (`private_address_blocked`), no call list because those
+ * endpoints were slow, unreachable, or failing (a retryable
+ * `ServiceUnavailable`, so an outage is never cached as a server with no
+ * services), and the caller cancelling mid-discovery (`RequestCancelled`).
  *
  * @module services/capability-registry/capability-registry
  */
 
 import { createHash } from 'node:crypto';
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  requestCancelled,
+  serviceUnavailable,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
+import { defaultIsTransient } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import {
   type BrapiClient,
   type BrapiEnvelope,
   type BrapiRequestOptions,
   getBrapiClient,
+  isPrivateAddressBlocked,
+  PRIVATE_ADDRESS_BLOCKED_REASON,
 } from '@/services/brapi-client/index.js';
 import type {
   CallDescriptor,
@@ -80,7 +93,7 @@ export class CapabilityRegistry {
     const descriptor = profile.supported[probe.service];
     if (!descriptor) {
       throw validationError(
-        `BrAPI server at ${baseUrl} does not advertise '${probe.service}' in /calls. Check brapi_server_info for the full capability list.`,
+        `BrAPI server at ${baseUrl} does not advertise '${probe.service}' in /serverinfo or /calls. Check brapi_server_info for the full capability list.`,
         {
           baseUrl,
           missingService: probe.service,
@@ -115,6 +128,7 @@ export class CapabilityRegistry {
     const client = this.client();
     const requestOptions = buildRequestOptions(options.auth);
     const warnings: string[] = [];
+    const failures: DiscoveryFailure[] = [];
 
     let serverInfo: ServerInfoPayload | undefined;
     try {
@@ -127,7 +141,9 @@ export class CapabilityRegistry {
       serverInfo = serverInfoEnv.result;
     } catch (err) {
       throwIfAuthRejected(err, baseUrl, '/serverinfo', options.auth !== undefined);
+      throwIfPrivateAddress(err, baseUrl);
       const message = err instanceof Error ? err.message : String(err);
+      failures.push({ endpoint: '/serverinfo', message, transient: isTransientFailure(err) });
       ctx.log.warning('Failed to fetch /serverinfo; falling back to /calls-only profile', {
         baseUrl,
         error: message,
@@ -140,9 +156,24 @@ export class CapabilityRegistry {
     const embeddedCalls = serverInfo?.calls;
     const calls = embeddedCalls?.length
       ? embeddedCalls
-      : await this.fetchCallsFallback(baseUrl, ctx, options.auth, warnings);
+      : await this.fetchCallsFallback(baseUrl, ctx, options.auth, warnings, failures);
+
+    if (calls.length === 0 && failures.some((f) => f.transient)) {
+      throw discoveryUnavailable(baseUrl, failures);
+    }
 
     const crops = await this.fetchCrops(baseUrl, ctx, options.auth, warnings);
+
+    // The soft-degradation paths above read a cancelled request as a missing
+    // endpoint; the profile they produced must not be cached for other callers.
+    if (ctx.signal.aborted) {
+      throw requestCancelled(
+        'Capability discovery was cancelled by the caller; nothing was cached.',
+        {
+          baseUrl,
+        },
+      );
+    }
 
     const supported = indexCalls(calls);
     const server = normalizeIdentity(serverInfo, calls);
@@ -162,13 +193,15 @@ export class CapabilityRegistry {
    * `/calls` fallback — some servers don't embed calls in `/serverinfo` and
    * expect clients to hit the dedicated endpoint. Degrades to an empty list
    * if the server lacks this too; downstream `ensure()` will surface the
-   * missing-capability error with a useful message.
+   * missing-capability error with a useful message. A failure is recorded in
+   * `failures` so a transient one keeps the empty list from being cached.
    */
   private async fetchCallsFallback(
     baseUrl: string,
     ctx: Context,
     auth: CapabilityLookupOptions['auth'],
     warnings: string[],
+    failures: DiscoveryFailure[],
   ): Promise<CallDescriptor[]> {
     try {
       const env = await this.client().get<CallDescriptor[] | { data: CallDescriptor[] }>(
@@ -180,7 +213,9 @@ export class CapabilityRegistry {
       return extractDataArray<CallDescriptor>(env) ?? [];
     } catch (err) {
       throwIfAuthRejected(err, baseUrl, '/calls', auth !== undefined);
+      throwIfPrivateAddress(err, baseUrl);
       const message = err instanceof Error ? err.message : String(err);
+      failures.push({ endpoint: '/calls', message, transient: isTransientFailure(err) });
       ctx.log.warning('Failed to fetch /calls fallback', {
         baseUrl,
         error: message,
@@ -228,6 +263,51 @@ export class CapabilityRegistry {
   }
 }
 
+/** `data.reason` when discovery could not obtain a call list for a transient reason. */
+const DISCOVERY_UNAVAILABLE_REASON = 'capability_discovery_unavailable';
+
+/** A `/serverinfo` or `/calls` request that failed during discovery. */
+interface DiscoveryFailure {
+  endpoint: '/serverinfo' | '/calls';
+  message: string;
+  /** Slow, unreachable, or 5xx — a later attempt can succeed. */
+  transient: boolean;
+}
+
+/**
+ * A failure a later attempt can succeed past: a timeout, a network error, a
+ * 429, or a retryable 5xx — the framework's retry predicate. A response that
+ * arrived but would not parse is an answer, not an outage.
+ */
+function isTransientFailure(err: unknown): boolean {
+  if (err instanceof McpError) {
+    const httpStatus = err.data?.httpStatus;
+    if (typeof httpStatus === 'number' && httpStatus < 500) return false;
+    if (err.code === JsonRpcErrorCode.Timeout) return true;
+  }
+  return defaultIsTransient(err);
+}
+
+/**
+ * Discovery produced no call list because `/serverinfo` and `/calls` were
+ * slow, unreachable, or failing. Thrown instead of caching an empty profile
+ * that would read as a server with no services until the cache expired. The
+ * recovery hint comes from the calling tool's contract, since which call to
+ * retry depends on the tool.
+ */
+function discoveryUnavailable(baseUrl: string, failures: DiscoveryFailure[]): McpError {
+  const detail = failures.map((f) => `${f.endpoint} (${f.message})`).join('; ');
+  return serviceUnavailable(
+    `Capability discovery for ${baseUrl} failed: ${detail}. Nothing was cached.`,
+    {
+      reason: DISCOVERY_UNAVAILABLE_REASON,
+      retryable: true,
+      baseUrl,
+      failedEndpoints: failures.map((f) => f.endpoint),
+    },
+  );
+}
+
 const AUTH_REJECTION_REASONS = new Set(['upstream_unauthorized', 'upstream_forbidden']);
 
 /**
@@ -259,6 +339,22 @@ function throwIfAuthRejected(
     err.code,
     `BrAPI server at ${baseUrl} ${verdict} (HTTP ${String(data.status)} on ${endpoint}), so its capabilities cannot be discovered.`,
     { ...data, baseUrl, endpoint },
+    { cause: err },
+  );
+}
+
+/**
+ * Let the fetch guard's refusal of a private or reserved address escape the
+ * soft degradation path: it is a configuration refusal, and folding it into an
+ * empty profile would cache a server that advertises nothing. The guard's own
+ * hint is dropped, so the calling tool's contract supplies one for its caller.
+ */
+function throwIfPrivateAddress(err: unknown, baseUrl: string): void {
+  if (!isPrivateAddressBlocked(err)) return;
+  throw new McpError(
+    err.code,
+    `BrAPI server at ${baseUrl} is on a private or reserved address, which this server is not allowed to reach. Nothing was cached.`,
+    { reason: PRIVATE_ADDRESS_BLOCKED_REASON, baseUrl },
     { cause: err },
   );
 }

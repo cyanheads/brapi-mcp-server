@@ -150,10 +150,19 @@ export class CanvasBridge {
    * otherwise. See `getInstance` for the full scoping rules.
    */
   private defaultCanvasKey(ctx: Context): string {
-    if (this.serverConfig.sessionIsolation && ctx.sessionId) {
-      return `${SESSION_CANVAS_PREFIX}${ctx.sessionId}`;
-    }
-    return DEFAULT_CANVAS_KEY;
+    return this.isSessionScoped(ctx)
+      ? `${SESSION_CANVAS_PREFIX}${ctx.sessionId}`
+      : DEFAULT_CANVAS_KEY;
+  }
+
+  /**
+   * True when this request resolves a canvas private to its MCP session —
+   * `BRAPI_SESSION_ISOLATION=true` and a `ctx.sessionId` present. Every
+   * dataframe on that canvas was registered within the same session, so
+   * listing it exposes no other caller's tables.
+   */
+  isSessionScoped(ctx: Context): boolean {
+    return this.serverConfig.sessionIsolation && Boolean(ctx.sessionId);
   }
 
   /**
@@ -221,8 +230,10 @@ export class CanvasBridge {
    * Run a SQL query against the default canvas (see `getInstance` for the
    * session-vs-tenant scoping rules). Caps `rowLimit` to
    * `BRAPI_CANVAS_MAX_ROWS` so a missing/excessive caller value can't bypass
-   * the response-size budget. Cancellation flows through `ctx.signal`; the
-   * timeout wraps the AbortSignal with a wall-clock cap.
+   * the response-size budget, and caps `preview` to that effective `rowLimit`
+   * so a larger preview serves up to the ceiling — the framework canvas
+   * rejects a preview above the row limit outright. Cancellation flows through
+   * `ctx.signal`; the timeout wraps the AbortSignal with a wall-clock cap.
    *
    * Pre-gate: rejects SQL that reaches into DuckDB's system catalogs
    * (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*` metadata
@@ -249,7 +260,7 @@ export class CanvasBridge {
       rowLimit,
       signal: composeSignal(ctx.signal, this.serverConfig.canvasQueryTimeoutMs),
     };
-    if (options.preview !== undefined) queryOpts.preview = options.preview;
+    if (options.preview !== undefined) queryOpts.preview = Math.min(options.preview, rowLimit);
     if (options.registerAs !== undefined) queryOpts.registerAs = options.registerAs;
     return await instance.query(sql, queryOpts);
   }

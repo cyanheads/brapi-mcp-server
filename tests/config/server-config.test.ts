@@ -8,8 +8,15 @@
  * @module tests/config/server-config.test
  */
 
+import { config as frameworkConfig, resetConfig } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getServerConfig, resetServerConfig, ServerConfigSchema } from '@/config/server-config.js';
+import {
+  assertCanvasMaxRowsWithinCanvasLimit,
+  getServerConfig,
+  resetServerConfig,
+  ServerConfigSchema,
+} from '@/config/server-config.js';
 
 describe('ServerConfigSchema defaults', () => {
   it('parses an empty input by populating every default', () => {
@@ -96,5 +103,58 @@ describe('server environment configuration', () => {
     const url = `https://example.org/\${instance}/brapi/v2`;
     vi.stubEnv('BRAPI_DEFAULT_BASE_URL', url);
     expect(getServerConfig().defaultBaseUrl).toBe(url);
+  });
+});
+
+describe('BRAPI_CANVAS_MAX_ROWS against the framework canvas row limit', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetServerConfig();
+    resetConfig();
+  });
+
+  it('accepts the defaults, which sit exactly at the framework limit', () => {
+    const limit = frameworkConfig.canvas.defaultRowLimit;
+    expect(limit).toBe(10_000);
+    expect(() => assertCanvasMaxRowsWithinCanvasLimit(getServerConfig(), limit)).not.toThrow();
+  });
+
+  it('accepts a cap below the limit', () => {
+    vi.stubEnv('BRAPI_CANVAS_MAX_ROWS', '500');
+    expect(() =>
+      assertCanvasMaxRowsWithinCanvasLimit(
+        getServerConfig(),
+        frameworkConfig.canvas.defaultRowLimit,
+      ),
+    ).not.toThrow();
+  });
+
+  it('fails as a ConfigurationError naming both variables when the cap exceeds the limit', () => {
+    vi.stubEnv('BRAPI_CANVAS_MAX_ROWS', '20000');
+    expect(() =>
+      assertCanvasMaxRowsWithinCanvasLimit(
+        getServerConfig(),
+        frameworkConfig.canvas.defaultRowLimit,
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        code: JsonRpcErrorCode.ConfigurationError,
+        message: expect.stringMatching(
+          /BRAPI_CANVAS_MAX_ROWS \(20000\) exceeds .*CANVAS_DEFAULT_ROW_LIMIT \(10000\)/,
+        ),
+      }),
+    );
+  });
+
+  it('follows a lowered framework limit rather than a fixed 10,000', () => {
+    vi.stubEnv('CANVAS_DEFAULT_ROW_LIMIT', '2000');
+    resetConfig();
+    expect(frameworkConfig.canvas.defaultRowLimit).toBe(2000);
+    expect(() =>
+      assertCanvasMaxRowsWithinCanvasLimit(
+        getServerConfig(),
+        frameworkConfig.canvas.defaultRowLimit,
+      ),
+    ).toThrow(/CANVAS_DEFAULT_ROW_LIMIT \(2000\)/);
   });
 });

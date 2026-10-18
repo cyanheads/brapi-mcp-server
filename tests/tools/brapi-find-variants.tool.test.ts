@@ -6,8 +6,9 @@
  * @module tests/tools/brapi-find-variants.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindVariants } from '@/mcp-server/tools/definitions/brapi-find-variants.tool.js';
@@ -159,14 +160,14 @@ describe('brapi_find_variants tool', () => {
     // loadLimit: 5 with 7 upstream variants → spillover (mirrors the issue's
     // repro). Each row carries an `end` field — a reserved SQL keyword the
     // canvas identifier gate rejects unsanitized.
-    const page1 = Array.from({ length: 5 }, (_, i) => variantRow({ variantDbId: `v-${i}` }));
-    const page2 = Array.from({ length: 2 }, (_, i) => variantRow({ variantDbId: `v-1${i}` }));
-    let call = 0;
+    const rows = Array.from({ length: 7 }, (_, i) => variantRow({ variantDbId: `v-${i}` }));
     fetcher.mockImplementation(async (url: string) => {
-      const path = pathnameOf(url);
-      if (!path.endsWith('/variants')) throw new Error(`Unexpected path: ${path}`);
-      call += 1;
-      return jsonResponse(envelope({ data: call === 1 ? page1 : page2 }, { totalCount: 7 }));
+      const u = new URL(String(url));
+      if (!u.pathname.endsWith('/variants')) throw new Error(`Unexpected path: ${u.pathname}`);
+      const page = Number(u.searchParams.get('page') ?? '0');
+      const pageSize = Number(u.searchParams.get('pageSize') ?? '10');
+      const data = rows.slice(page * pageSize, page * pageSize + pageSize);
+      return jsonResponse(envelope({ data }, { totalCount: rows.length }));
     });
 
     const result = await brapiFindVariants.handler(
@@ -181,5 +182,87 @@ describe('brapi_find_variants tool', () => {
     // format() surfaces the rename so the agent writes correct SQL.
     const text = (brapiFindVariants.format!(result)[0] as { text: string }).text;
     expect(text).toContain('end_ → end');
+  });
+});
+
+describe('brapi_find_variants inline budget (#66)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  /** Serve a paged /variants list; any other host fails the call. */
+  function serve(rows: Record<string, unknown>[]): void {
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      if (u.hostname !== 'brapi.example.org' || u.pathname !== '/brapi/v2/variants') {
+        throw new Error(`unmocked fetch: ${u.href}`);
+      }
+      const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
+      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10);
+      return jsonResponse(
+        envelope(
+          { data: rows.slice(page * pageSize, page * pageSize + pageSize) },
+          { totalCount: rows.length },
+        ),
+      );
+    });
+  }
+
+  async function call(ctx: Context, input: Record<string, unknown>) {
+    const definition = {
+      ...brapiFindVariants,
+      handler: (parsed, contractCtx) =>
+        brapiFindVariants.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFindVariants;
+    const result = await runToolContract(definition, input, { context: { tenantId: 't1' } });
+    const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+    return { result, structured: result.structuredContent as Record<string, unknown>, text };
+  }
+
+  const variants = (n: number, extra: Record<string, unknown> = {}) =>
+    Array.from({ length: n }, (_, i) => variantRow({ variantDbId: `v-${i + 1}`, ...extra }));
+
+  it('trims results[] to the byte budget and stages every matched row', async () => {
+    const ctx = await connect(fetcher);
+    // ~5 KB per row: four fit the 24,000-byte budget.
+    serve(variants(8, { referenceBases: 'A'.repeat(4_800) }));
+
+    const { result, structured, text } = await call(ctx, { variantSets: ['vset-1'] });
+
+    expect(result.isError).toBeFalsy();
+    expect(fetcher.mock.calls.length).toBe(1);
+    expect(Buffer.byteLength(JSON.stringify(structured.results), 'utf8')).toBeLessThanOrEqual(
+      24_000,
+    );
+    expect(structured).toMatchObject({
+      returnedCount: 4,
+      totalCount: 8,
+      hasMore: true,
+      truncated: true,
+      shown: 4,
+      cap: 1_000,
+      dataframe: { rowCount: 8 },
+    });
+    expect(text).toContain('24,000-byte inline budget');
+  });
+
+  it('sets no truncation fields and stages nothing on an empty result', async () => {
+    const ctx = await connect(fetcher);
+    serve([]);
+
+    const { result, structured } = await call(ctx, { variantSets: ['vset-1'] });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({ returnedCount: 0, hasMore: false, results: [] });
+    expect(structured.notice).toMatch(/^No variants matched/);
+    for (const key of ['truncated', 'shown', 'cap', 'dataframe']) {
+      expect(structured).not.toHaveProperty(key);
+    }
   });
 });

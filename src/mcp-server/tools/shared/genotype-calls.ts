@@ -12,7 +12,13 @@
  */
 
 import { type Context, z } from '@cyanheads/mcp-ts-core';
-import type { BrapiClient } from '@/services/brapi-client/index.js';
+import { JsonRpcErrorCode, McpError, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
+import {
+  type BrapiClient,
+  CALL_DEADLINE_MS,
+  CALL_DEADLINE_REASON,
+  callDeadlineAt,
+} from '@/services/brapi-client/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import { buildRequestOptions } from './find-helpers.js';
 
@@ -75,6 +81,12 @@ export interface CollectCallsInput {
 export interface CollectCallsResult {
   callFormatting: CallFormatting;
   rows: CallRow[];
+  /**
+   * Why the page walk ended before the last page: this call's deadline for
+   * upstream requests. The calls collected up to then are kept in `rows`.
+   */
+  stopReason?: string;
+  /** The pull limit (`maxCalls`) cut the pull short. */
   truncated: boolean;
 }
 
@@ -110,12 +122,17 @@ export function buildCallsSearchBody(input: {
  * Pull all genotype call pages for a given search body, capping at `maxCalls`.
  * Uses BrAPI's async-search pattern: `POST /search/calls` → `GET /search/calls/{id}`
  * with 202-retry. Pages are collected until all results are fetched or `maxCalls`
- * is reached.
+ * is reached. When this call's deadline for upstream requests ends the walk
+ * after the first page, the calls collected so far are returned with a
+ * `stopReason` and a warning; on the first page it fails the call. Caller
+ * cancellation rejects.
  */
 export async function collectCalls(input: CollectCallsInput): Promise<CollectCallsResult> {
   const rows: CallRow[] = [];
   let callFormatting: CallFormatting = {};
   let truncated = false;
+  let stopReason: string | undefined;
+  const deadlineLabel = `this call's ${CALL_DEADLINE_MS / 1000} s deadline for upstream requests`;
 
   const firstBody = { ...input.body, page: 0 };
   const first = await input.client.postSearch<Record<string, unknown>>(
@@ -146,40 +163,52 @@ export async function collectCalls(input: CollectCallsInput): Promise<CollectCal
   });
   const totalPages = envelope.metadata?.pagination?.totalPages;
 
-  for (let page = 1; page < (totalPages ?? 1); page++) {
-    if (rows.length >= input.maxCalls) {
-      truncated = true;
-      break;
-    }
-    if (input.ctx.signal.aborted) break;
-    let pageEnvelope: Awaited<ReturnType<BrapiClient['get']>>;
+  const fetchPage = async (page: number): Promise<Awaited<ReturnType<BrapiClient['get']>>> => {
     if (searchResultsDbId) {
-      pageEnvelope = await input.client.getSearchResults<Record<string, unknown>>(
+      return await input.client.getSearchResults<Record<string, unknown>>(
         input.connection.baseUrl,
         'calls',
         searchResultsDbId,
         input.ctx,
         buildRequestOptions(input.connection, { page, pageSize: PAGE_SIZE }),
       );
-    } else {
-      const nextSearch = await input.client.postSearch<Record<string, unknown>>(
-        input.connection.baseUrl,
-        'calls',
-        { ...input.body, page },
-        input.ctx,
-        buildRequestOptions(input.connection),
-      );
-      if (nextSearch.kind === 'sync') {
-        pageEnvelope = nextSearch.envelope;
-      } else {
-        pageEnvelope = await input.client.getSearchResults<Record<string, unknown>>(
-          input.connection.baseUrl,
-          'calls',
-          nextSearch.searchResultsDbId,
-          input.ctx,
-          buildRequestOptions(input.connection),
-        );
-      }
+    }
+    const nextSearch = await input.client.postSearch<Record<string, unknown>>(
+      input.connection.baseUrl,
+      'calls',
+      { ...input.body, page },
+      input.ctx,
+      buildRequestOptions(input.connection),
+    );
+    if (nextSearch.kind === 'sync') return nextSearch.envelope;
+    return await input.client.getSearchResults<Record<string, unknown>>(
+      input.connection.baseUrl,
+      'calls',
+      nextSearch.searchResultsDbId,
+      input.ctx,
+      buildRequestOptions(input.connection),
+    );
+  };
+
+  for (let page = 1; page < (totalPages ?? 1); page++) {
+    if (rows.length >= input.maxCalls) {
+      truncated = true;
+      break;
+    }
+    if (input.ctx.signal.aborted) {
+      throw requestCancelled('Genotype-call pull cancelled by the caller.');
+    }
+    if (Date.now() >= callDeadlineAt(input.ctx)) {
+      stopReason = `${deadlineLabel} ran out before page ${page}`;
+      break;
+    }
+    let pageEnvelope: Awaited<ReturnType<BrapiClient['get']>>;
+    try {
+      pageEnvelope = await fetchPage(page);
+    } catch (err) {
+      if (input.ctx.signal.aborted || !isCallDeadline(err)) throw err;
+      stopReason = `${deadlineLabel} ran out during page ${page}`;
+      break;
     }
     consumePage(pageEnvelope, rows, (cf) => {
       callFormatting = cf;
@@ -189,12 +218,36 @@ export async function collectCalls(input: CollectCallsInput): Promise<CollectCal
   if (rows.length > input.maxCalls) {
     rows.length = input.maxCalls;
     truncated = true;
+  }
+  // Whether a dataframe holds the kept calls is the calling tool's to say.
+  if (truncated) {
     input.warnings.push(
-      `Truncated at the deployment pull limit (${input.maxCalls} rows). Narrow the filters and re-pull; the captured slice is preserved in the spilled dataframe.`,
+      `Truncated at the pull limit (${input.maxCalls} calls): the calls collected up to it are kept. Narrow the filters and re-pull to reach the rest.`,
+    );
+  }
+  if (stopReason) {
+    input.ctx.log.warning('Genotype-call pull stopped before the last page', {
+      callsCollected: rows.length,
+      totalPages,
+      stopReason,
+    });
+    input.warnings.push(
+      `Genotype-call pull stopped after ${rows.length} call(s): ${stopReason}. More calls may exist upstream; narrow the filters so the pull needs fewer pages, or retry the call.`,
     );
   }
 
-  return { rows, callFormatting, truncated };
+  const result: CollectCallsResult = { rows, callFormatting, truncated };
+  if (stopReason) result.stopReason = stopReason;
+  return result;
+}
+
+/** A `Timeout` this call's deadline for upstream requests caused. */
+function isCallDeadline(err: unknown): boolean {
+  return (
+    err instanceof McpError &&
+    err.code === JsonRpcErrorCode.Timeout &&
+    err.data?.reason === CALL_DEADLINE_REASON
+  );
 }
 
 /**

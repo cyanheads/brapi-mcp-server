@@ -9,11 +9,22 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  notFound,
+  requestCancelled,
+  serviceUnavailable,
+  timeout,
+} from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
-import { BrapiClient, type BrapiEnvelope } from '@/services/brapi-client/index.js';
+import {
+  BrapiClient,
+  type BrapiEnvelope,
+  CALL_DEADLINE_MS,
+} from '@/services/brapi-client/index.js';
 import { CapabilityRegistry } from '@/services/capability-registry/capability-registry.js';
 
 const BASE_URL = 'https://brapi.example.org/brapi/v2';
@@ -85,21 +96,34 @@ describe('CapabilityRegistry', () => {
     registry = makeRegistry(client);
   });
 
+  /** Route `client.get` by path; unrouted paths fail the test. */
+  function route(routes: Record<string, () => unknown>) {
+    client.get.mockImplementation(async (_base, path: string) => {
+      const handler = routes[path];
+      if (!handler) throw new Error(`Unexpected path: ${path}`);
+      return handler();
+    });
+  }
+  /** A /serverinfo advertising GET /studies, with no crops. */
+  const studiesOnly = () =>
+    route({
+      '/serverinfo': () => envelope({ calls: [{ service: 'studies', methods: ['GET'] }] }),
+      '/commoncropnames': () => envelope({ data: [] }),
+    });
+
   describe('profile', () => {
     it('fetches /serverinfo + /commoncropnames and uses embedded calls when present', async () => {
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') {
-          return envelope({
+      route({
+        '/serverinfo': () =>
+          envelope({
             serverName: 'Test Server',
             organizationName: 'Test Org',
             calls: [
               { service: 'studies', methods: ['GET'], versions: ['2.1'] },
               { service: 'search/studies', methods: ['POST'], versions: ['2.1'] },
             ],
-          });
-        }
-        if (path === '/commoncropnames') return envelope({ data: ['Cassava', 'Yam'] });
-        throw new Error(`Unexpected path: ${path}`);
+          }),
+        '/commoncropnames': () => envelope({ data: ['Cassava', 'Yam'] }),
       });
       const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -139,18 +163,16 @@ describe('CapabilityRegistry', () => {
     });
 
     it('falls back to /calls when /serverinfo omits them', async () => {
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') return envelope({ serverName: 'Sparse Server' });
-        if (path === '/calls') {
-          return envelope({
+      route({
+        '/serverinfo': () => envelope({ serverName: 'Sparse Server' }),
+        '/calls': () =>
+          envelope({
             data: [
               { service: 'studies', methods: ['GET'], versions: ['2.0'] },
               { service: 'studies', methods: ['POST'], versions: ['2.1'] },
             ],
-          });
-        }
-        if (path === '/commoncropnames') return envelope({ data: [] });
-        throw new Error(`Unexpected path: ${path}`);
+          }),
+        '/commoncropnames': () => envelope({ data: [] }),
       });
       const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -163,15 +185,13 @@ describe('CapabilityRegistry', () => {
     });
 
     it('builds a partial profile from /calls when /serverinfo is unavailable', async () => {
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') throw serviceUnavailable('503 maintenance');
-        if (path === '/calls') {
-          return envelope({
-            data: [{ service: 'studies', methods: ['GET'], versions: ['2.1'] }],
-          });
-        }
-        if (path === '/commoncropnames') return envelope({ data: [] });
-        throw new Error(`Unexpected path: ${path}`);
+      route({
+        '/serverinfo': () => {
+          throw serviceUnavailable('503 maintenance');
+        },
+        '/calls': () =>
+          envelope({ data: [{ service: 'studies', methods: ['GET'], versions: ['2.1'] }] }),
+        '/commoncropnames': () => envelope({ data: [] }),
       });
       const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -183,12 +203,11 @@ describe('CapabilityRegistry', () => {
     });
 
     it('degrades gracefully when /commoncropnames is unavailable', async () => {
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') {
-          return envelope({ calls: [{ service: 'studies', methods: ['GET'] }] });
-        }
-        if (path === '/commoncropnames') throw serviceUnavailable('404 missing endpoint');
-        throw new Error(`Unexpected path: ${path}`);
+      route({
+        '/serverinfo': () => envelope({ calls: [{ service: 'studies', methods: ['GET'] }] }),
+        '/commoncropnames': () => {
+          throw serviceUnavailable('404 missing endpoint');
+        },
       });
       const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -199,11 +218,13 @@ describe('CapabilityRegistry', () => {
     });
 
     it('degrades gracefully when the /calls fallback also fails', async () => {
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') return envelope({}); // no calls embedded
-        if (path === '/calls') throw serviceUnavailable('501 not implemented');
-        if (path === '/commoncropnames') return envelope({ data: [] });
-        throw new Error(`Unexpected path: ${path}`);
+      route({
+        '/serverinfo': () => envelope({}), // no calls embedded
+        // The shape the client gives an HTTP 501: a definitive answer, not retryable.
+        '/calls': () => {
+          throw serviceUnavailable('501 not implemented', { status: 501, retryable: false });
+        },
+        '/commoncropnames': () => envelope({ data: [] }),
       });
       const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -213,14 +234,182 @@ describe('CapabilityRegistry', () => {
       expect(profile.warnings?.some((w) => w.includes('/calls'))).toBe(true);
     });
 
-    it('caches profiles on the first fetch and reuses them on subsequent calls', async () => {
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') {
-          return envelope({ calls: [{ service: 'studies', methods: ['GET'] }] });
-        }
-        if (path === '/commoncropnames') return envelope({ data: ['Yam'] });
-        throw new Error(path);
+    describe('transient discovery failure', () => {
+      const stalled = () => timeout('Fetch GET timed out.', { errorSource: 'FetchTimeout' });
+      const http503 = () => serviceUnavailable('Fetch failed. Status: 503', { status: 503 });
+
+      const cases: Array<{ name: string; serverinfo: () => unknown; calls: () => unknown }> = [
+        {
+          name: 'both time out',
+          serverinfo: () => {
+            throw stalled();
+          },
+          calls: () => {
+            throw stalled();
+          },
+        },
+        {
+          name: 'both answer 5xx',
+          serverinfo: () => {
+            throw http503();
+          },
+          calls: () => {
+            throw http503();
+          },
+        },
+        {
+          name: 'both hit a network error',
+          serverinfo: () => {
+            throw new TypeError('fetch failed');
+          },
+          calls: () => {
+            throw new TypeError('fetch failed');
+          },
+        },
+        {
+          name: '/serverinfo answers without calls and /calls times out',
+          serverinfo: () => envelope({ serverName: 'Sparse' }),
+          calls: () => {
+            throw stalled();
+          },
+        },
+        {
+          name: '/serverinfo answers 404 and /calls times out',
+          serverinfo: () => {
+            throw notFound('Fetch failed. Status: 404', {
+              status: 404,
+              reason: 'upstream_not_found',
+            });
+          },
+          calls: () => {
+            throw stalled();
+          },
+        },
+      ];
+
+      for (const { name, serverinfo, calls } of cases) {
+        it(`fails retryable and caches nothing when ${name}`, async () => {
+          route({ '/serverinfo': serverinfo, '/calls': calls });
+          const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+          const error = await registry.profile(BASE_URL, ctx).catch((e: unknown) => e);
+
+          expect(error).toBeInstanceOf(McpError);
+          expect(error).toMatchObject({
+            code: JsonRpcErrorCode.ServiceUnavailable,
+            data: {
+              reason: 'capability_discovery_unavailable',
+              retryable: true,
+              baseUrl: BASE_URL,
+            },
+          });
+          // Which call to retry depends on the caller, so the hint comes from its contract.
+          expect((error as McpError).data?.recovery).toBeUndefined();
+          const failed = (error as McpError).data?.failedEndpoints as string[];
+          expect(failed.length).toBeGreaterThan(0);
+          for (const endpoint of failed) expect((error as Error).message).toContain(endpoint);
+          expect(failed).toContain('/calls');
+          // No crop probe once discovery has failed.
+          const paths = client.get.mock.calls.map((c) => c[1]);
+          expect(paths).not.toContain('/commoncropnames');
+
+          // Nothing cached: the next lookup goes back to the server.
+          client.get.mockClear();
+          await registry.profile(BASE_URL, ctx).catch(() => undefined);
+          expect(client.get.mock.calls.map((c) => c[1])).toContain('/serverinfo');
+        });
+      }
+
+      it('caches nothing and reports the cancellation when the caller cancels mid-discovery', async () => {
+        const controller = new AbortController();
+        const cancelled = () => requestCancelled('Request cancelled by the caller.');
+        route({
+          '/serverinfo': () => {
+            controller.abort();
+            throw cancelled();
+          },
+          '/calls': () => {
+            throw cancelled();
+          },
+          '/commoncropnames': () => {
+            throw cancelled();
+          },
+        });
+        const state = createMockContext({ tenantId: 'test-tenant' }).state;
+        const ctx = {
+          ...createMockContext({ tenantId: 'test-tenant', signal: controller.signal }),
+          state,
+        };
+
+        const error = await registry.profile(BASE_URL, ctx).catch((e: unknown) => e);
+        expect(error).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+
+        // Nothing cached: the next caller's lookup goes back to the server.
+        studiesOnly();
+        const next = await registry.profile(BASE_URL, {
+          ...createMockContext({ tenantId: 'test-tenant' }),
+          state,
+        });
+        expect(Object.keys(next.supported)).toEqual(['studies']);
       });
+
+      it('still builds and caches a profile when only /serverinfo failed and /calls answered', async () => {
+        route({
+          '/serverinfo': () => {
+            throw stalled();
+          },
+          '/calls': () => envelope({ data: [{ service: 'studies', methods: ['GET'] }] }),
+          '/commoncropnames': () => envelope({ data: [] }),
+        });
+        const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+        const profile = await registry.profile(BASE_URL, ctx);
+        expect(Object.keys(profile.supported)).toEqual(['studies']);
+        client.get.mockClear();
+        await registry.profile(BASE_URL, ctx);
+        expect(client.get).not.toHaveBeenCalled();
+      });
+
+      it('caches an empty profile for a server that answers but advertises nothing', async () => {
+        route({
+          '/serverinfo': () => envelope({ serverName: 'Empty' }),
+          '/calls': () => {
+            throw notFound('Fetch failed. Status: 404', {
+              status: 404,
+              reason: 'upstream_not_found',
+            });
+          },
+          '/commoncropnames': () => envelope({ data: [] }),
+        });
+        const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+        const profile = await registry.profile(BASE_URL, ctx);
+        expect(profile.supported).toEqual({});
+        client.get.mockClear();
+        await registry.profile(BASE_URL, ctx);
+        expect(client.get).not.toHaveBeenCalled();
+      });
+
+      it('caches an empty profile when /serverinfo answers with a non-JSON body', async () => {
+        route({
+          '/serverinfo': () => {
+            throw serviceUnavailable('BrAPI returned non-JSON response', {
+              bodyPreview: '<html>',
+              httpStatus: 200,
+            });
+          },
+          '/calls': () => envelope({ data: [] }),
+          '/commoncropnames': () => envelope({ data: [] }),
+        });
+        const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+        const profile = await registry.profile(BASE_URL, ctx);
+        expect(profile.supported).toEqual({});
+      });
+    });
+
+    it('caches profiles on the first fetch and reuses them on subsequent calls', async () => {
+      studiesOnly();
       const ctx = createMockContext({ tenantId: 'test-tenant' });
 
       await registry.profile(BASE_URL, ctx);
@@ -231,13 +420,7 @@ describe('CapabilityRegistry', () => {
     });
 
     it('refetches when forceRefresh is set', async () => {
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') {
-          return envelope({ calls: [{ service: 'studies', methods: ['GET'] }] });
-        }
-        if (path === '/commoncropnames') return envelope({ data: [] });
-        throw new Error(path);
-      });
+      studiesOnly();
       const ctx = createMockContext({ tenantId: 'test-tenant' });
 
       await registry.profile(BASE_URL, ctx);
@@ -246,11 +429,10 @@ describe('CapabilityRegistry', () => {
     });
 
     it('forwards the auth option to client.get', async () => {
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') return envelope({ calls: [] });
-        if (path === '/calls') return envelope({ data: [] });
-        if (path === '/commoncropnames') return envelope({ data: [] });
-        throw new Error(path);
+      route({
+        '/serverinfo': () => envelope({ calls: [] }),
+        '/calls': () => envelope({ data: [] }),
+        '/commoncropnames': () => envelope({ data: [] }),
       });
       const ctx = createMockContext({ tenantId: 'test-tenant' });
       const auth = { headerName: 'Authorization', headerValue: 'Bearer xyz' };
@@ -265,17 +447,15 @@ describe('CapabilityRegistry', () => {
 
   describe('ensure', () => {
     beforeEach(() => {
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') {
-          return envelope({
+      route({
+        '/serverinfo': () =>
+          envelope({
             calls: [
               { service: 'studies', methods: ['GET', 'POST'] },
               { service: 'observations', methods: ['GET'] },
             ],
-          });
-        }
-        if (path === '/commoncropnames') return envelope({ data: [] });
-        throw new Error(path);
+          }),
+        '/commoncropnames': () => envelope({ data: [] }),
       });
     });
 
@@ -285,28 +465,20 @@ describe('CapabilityRegistry', () => {
       expect(descriptor.service).toBe('studies');
     });
 
-    it('throws ValidationError when the service is missing', async () => {
+    it.each([
+      ['the service is missing', { service: 'genomics' }],
+      ['a requested method is not supported', { service: 'observations', method: 'POST' }],
+    ])('throws ValidationError when %s', async (_label, call) => {
       const ctx = createMockContext({ tenantId: 'test-tenant' });
-      await expect(registry.ensure(BASE_URL, { service: 'genomics' }, ctx)).rejects.toMatchObject({
+      await expect(registry.ensure(BASE_URL, call, ctx)).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
       });
     });
 
-    it('throws ValidationError when a requested method is not supported', async () => {
-      const ctx = createMockContext({ tenantId: 'test-tenant' });
-      await expect(
-        registry.ensure(BASE_URL, { service: 'observations', method: 'POST' }, ctx),
-      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
-    });
-
     it('allows any method when the descriptor omits methods', async () => {
-      client.get.mockReset();
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') {
-          return envelope({ calls: [{ service: 'studies' }] });
-        }
-        if (path === '/commoncropnames') return envelope({ data: [] });
-        throw new Error(path);
+      route({
+        '/serverinfo': () => envelope({ calls: [{ service: 'studies' }] }),
+        '/commoncropnames': () => envelope({ data: [] }),
       });
       const ctx = createMockContext({ tenantId: 'test-tenant' });
       const descriptor = await registry.ensure(
@@ -320,13 +492,7 @@ describe('CapabilityRegistry', () => {
 
   describe('invalidate', () => {
     it('clears the cached profile so the next profile() call refetches', async () => {
-      client.get.mockImplementation(async (_base, path: string) => {
-        if (path === '/serverinfo') {
-          return envelope({ calls: [{ service: 'studies', methods: ['GET'] }] });
-        }
-        if (path === '/commoncropnames') return envelope({ data: [] });
-        throw new Error(path);
-      });
+      studiesOnly();
       const ctx = createMockContext({ tenantId: 'test-tenant' });
 
       await registry.profile(BASE_URL, ctx);
@@ -393,31 +559,60 @@ describe('CapabilityRegistry auth rejections over a real socket', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  it('propagates a 401 on /serverinfo as upstream_unauthorized and caches nothing', async () => {
-    routes['/serverinfo'] = status(401);
+  it.each([
+    {
+      name: 'a 401 on /serverinfo',
+      serverinfo: status(401),
+      code: JsonRpcErrorCode.Unauthorized,
+      reason: 'upstream_unauthorized',
+      httpStatus: 401,
+      // No fallback to /calls, no crop probe, no retry of the 401.
+      paths: ['/serverinfo'],
+    },
+    {
+      name: 'a 403 on /serverinfo',
+      serverinfo: status(403),
+      code: JsonRpcErrorCode.Forbidden,
+      reason: 'upstream_forbidden',
+      httpStatus: 403,
+      paths: ['/serverinfo'],
+    },
+    {
+      name: 'a 401 on the /calls fallback when /serverinfo carries no calls',
+      serverinfo: ok({ serverName: 'Walled' }),
+      calls: status(401),
+      code: JsonRpcErrorCode.Unauthorized,
+      reason: 'upstream_unauthorized',
+      httpStatus: 401,
+      paths: ['/serverinfo', '/calls'],
+    },
+    {
+      name: 'a 403 on the /calls fallback',
+      serverinfo: ok({}),
+      calls: status(403),
+      code: JsonRpcErrorCode.Forbidden,
+      reason: 'upstream_forbidden',
+      httpStatus: 403,
+      paths: ['/serverinfo', '/calls'],
+    },
+  ])('propagates $name as $reason, caching nothing', async (c) => {
+    routes['/serverinfo'] = c.serverinfo;
+    if (c.calls) routes['/calls'] = c.calls;
     routes['/commoncropnames'] = ok({ data: ['Wheat'] });
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
-    await expect(registry.profile(origin, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.Unauthorized,
-      data: { reason: 'upstream_unauthorized', status: 401 },
+    const error = await registry.profile(origin, ctx).catch((e: unknown) => e);
+    expect(error).toMatchObject({
+      code: c.code,
+      data: { reason: c.reason, status: c.httpStatus },
     });
-    // No fallback to /calls, no crop probe, no retry of the 401.
-    expect(hits.map((h) => h.path)).toEqual(['/serverinfo']);
+    // The hint depends on which tool called, so it comes from that tool's contract.
+    expect((error as { data?: Record<string, unknown> }).data?.recovery).toBeUndefined();
+    expect(hits.map((h) => h.path)).toEqual(c.paths);
 
+    // Nothing cached: a second lookup asks the server again and fails the same way.
     await expect(registry.profile(origin, ctx)).rejects.toMatchObject({
-      data: { reason: 'upstream_unauthorized' },
-    });
-    expect(hits.map((h) => h.path)).toEqual(['/serverinfo', '/serverinfo']);
-  });
-
-  it('propagates a 403 on /serverinfo as upstream_forbidden', async () => {
-    routes['/serverinfo'] = status(403);
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
-
-    await expect(registry.profile(origin, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.Forbidden,
-      data: { reason: 'upstream_forbidden', status: 403 },
+      data: { reason: c.reason },
     });
   });
 
@@ -432,30 +627,6 @@ describe('CapabilityRegistry auth rejections over a real socket', () => {
     const auth = { headerName: 'Authorization', headerValue: 'Bearer stale' };
     const rejected = await registry.profile(origin, ctx, { auth }).catch((e: Error) => e);
     expect(rejected.message).toContain('rejected the supplied credentials');
-  });
-
-  it('propagates a 401 on the /calls fallback when /serverinfo carries no calls', async () => {
-    routes['/serverinfo'] = ok({ serverName: 'Walled' });
-    routes['/calls'] = status(401);
-    routes['/commoncropnames'] = ok({ data: ['Oat'] });
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
-
-    await expect(registry.profile(origin, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.Unauthorized,
-      data: { reason: 'upstream_unauthorized', status: 401 },
-    });
-    expect(hits.map((h) => h.path)).toEqual(['/serverinfo', '/calls']);
-  });
-
-  it('propagates a 403 on the /calls fallback as upstream_forbidden', async () => {
-    routes['/serverinfo'] = ok({});
-    routes['/calls'] = status(403);
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
-
-    await expect(registry.profile(origin, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.Forbidden,
-      data: { reason: 'upstream_forbidden' },
-    });
   });
 
   it('still degrades softly when only /commoncropnames answers 401', async () => {
@@ -477,6 +648,50 @@ describe('CapabilityRegistry auth rejections over a real socket', () => {
     const profile = await registry.profile(origin, ctx);
     expect(Object.keys(profile.supported)).toEqual(['studies']);
     expect(profile.warnings?.some((w) => w.includes('/serverinfo was unavailable'))).toBe(true);
+  });
+
+  it('fails capability_discovery_unavailable when /serverinfo and /calls answer 429', async () => {
+    routes['/serverinfo'] = status(429);
+    routes['/calls'] = status(429);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    await expect(registry.profile(origin, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'capability_discovery_unavailable', retryable: true },
+    });
+    expect(hits.filter((h) => h.path === '/calls').length).toBeGreaterThan(0);
+  });
+
+  it('caches a profile with no services when /serverinfo and /calls answer 501', async () => {
+    routes['/serverinfo'] = status(501);
+    routes['/calls'] = status(501);
+    routes['/commoncropnames'] = ok({ data: [] });
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const profile = await registry.profile(origin, ctx);
+    expect(profile.supported).toEqual({});
+    expect(profile.warnings?.some((w) => w.includes('/calls was unavailable'))).toBe(true);
+  });
+
+  it('propagates private_address_blocked for a base URL on a loopback address, sending and caching nothing', async () => {
+    routes['/serverinfo'] = ok(STUDIES_CALLS);
+    routes['/calls'] = ok({ data: STUDIES_CALLS.calls });
+    routes['/commoncropnames'] = ok({ data: [] });
+    const guarded = new BrapiClient({ ...baseConfig, allowPrivateIps: false });
+    const guardedRegistry = new CapabilityRegistry(baseConfig, () => guarded);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const error = await guardedRegistry.profile(origin, ctx).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'private_address_blocked', baseUrl: origin },
+    });
+    expect((error as Error).message).toContain(origin);
+    // The calling tool's contract supplies the hint.
+    expect((error as { data?: Record<string, unknown> }).data?.recovery).toBeUndefined();
+    expect(hits).toEqual([]);
+    expect((await ctx.state.list('brapi/capability/')).items).toEqual([]);
   });
 
   it('succeeds and caches once working credentials are supplied after a 401', async () => {
@@ -502,15 +717,35 @@ describe('CapabilityRegistry auth rejections over a real socket', () => {
     expect(hits.length).toBe(before);
   });
 
-  it('keeps the auth reason and leaves the recovery hint to the calling tool contract', async () => {
-    routes['/serverinfo'] = status(401);
-    const ctx = createMockContext({ tenantId: 'test-tenant' });
-
-    const error = await registry.profile(origin, ctx).catch((e: unknown) => e);
-    expect(error).toMatchObject({
-      code: JsonRpcErrorCode.Unauthorized,
-      data: { reason: 'upstream_unauthorized' },
+  it('fails retryable inside the call deadline when the host never answers, caching nothing', async () => {
+    const stallingClient = new BrapiClient({
+      ...baseConfig,
+      allowPrivateIps: true,
+      requestTimeoutMs: 30_000,
+      retryMaxAttempts: 3,
     });
-    expect((error as { data?: Record<string, unknown> }).data?.recovery).toBeUndefined();
+    const stallingRegistry = new CapabilityRegistry(baseConfig, () => stallingClient);
+    routes['/serverinfo'] = () => {};
+    routes['/calls'] = () => {};
+    const base = createMockContext({ tenantId: 'test-tenant' });
+    const ctx = {
+      ...base,
+      timestamp: new Date(Date.now() - (CALL_DEADLINE_MS - 400)).toISOString(),
+    };
+    const startedAt = Date.now();
+
+    const error = await stallingRegistry.profile(origin, ctx).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: {
+        reason: 'capability_discovery_unavailable',
+        failedEndpoints: ['/serverinfo', '/calls'],
+      },
+    });
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    // The deadline left /calls unsent; nothing reached /commoncropnames.
+    expect(hits.map((h) => h.path)).toEqual(['/serverinfo']);
+    server.closeAllConnections();
   });
 });

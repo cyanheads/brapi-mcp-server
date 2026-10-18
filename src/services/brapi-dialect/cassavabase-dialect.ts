@@ -2,11 +2,12 @@
  * @fileoverview Dialects for CassavaBase and broader CXGN / SGN-derived BrAPI
  * deployments — Breedbase, Sweetpotatobase, Yambase, Musabase, BananaBase,
  * T3, etc. These servers run the SGN BrAPI implementation, which predates the BrAPI v2.1
- * filter-name normalization and only honors the older **singular** query
- * parameters on GET list endpoints. Sending `commonCropNames=Cassava` is
+ * filter-name normalization and honors the older **singular** query
+ * parameters on most GET list endpoints. Sending `commonCropNames=Cassava` is
  * silently ignored upstream — the singular `commonCropName=Cassava` works.
  * Empirically verified against `https://cassavabase.org/brapi/v2` on
- * 2026-04-30.
+ * 2026-04-30. `/locations` is the exception: it honors the plural v2.1 keys
+ * and ignores the singulars, so its filters pass through untranslated.
  *
  * The dialects:
  *   1. Translates plural filter keys to their singular equivalents per
@@ -16,7 +17,7 @@
  *      route is advertised but unresponsive in practice).
  *   2. Drops filters that the server doesn't honor at all (`searchText` —
  *      we invented this earlier; not in the BrAPI v2.1 spec, no SGN-family
- *      server honors it).
+ *      server honors it — and `locationDbIds` on `/studies`).
  *
  * Translation engine lives in `singularizing-dialect.ts`; this module supplies
  * SGN-specific data only.
@@ -34,9 +35,12 @@ import type { BrapiDialect } from './types.js';
 const verified = (target: string): DialectFilterMappingInput => ({ target, verified: true });
 
 /**
- * Plural BrAPI v2.1 filter key → singular form CassavaBase honors. Keyed by
- * endpoint resource segment (matches the path's first segment, no leading
- * slash). Endpoints not listed here pass through with zero translation.
+ * Plural BrAPI v2.1 filter key → singular form SGN-family servers honor. Keyed
+ * by endpoint resource segment (matches the path's first segment, no leading
+ * slash). Endpoints not listed here pass through with zero translation —
+ * `locations` among them: CassavaBase and Sweetpotatobase both narrow on the
+ * plural `locationDbIds` / `locationNames` / `countryCodes` / `abbreviations`
+ * and ignore the singular forms (`locationTypes` works in both).
  *
  * Mappings reflect what's empirically verified to filter; entries marked
  * `// observed: works` were narrowed against a live CassavaBase deployment.
@@ -45,7 +49,7 @@ const verified = (target: string): DialectFilterMappingInput => ({ target, verif
  * in `find-helpers` will surface a warning when a translation doesn't reduce
  * the result set as expected.
  */
-const CASSAVABASE_PLURAL_TO_SINGULAR: Record<
+const SGN_PLURAL_TO_SINGULAR: Record<
   string,
   Readonly<Record<string, DialectFilterMappingInput>>
 > = {
@@ -99,13 +103,6 @@ const CASSAVABASE_PLURAL_TO_SINGULAR: Record<
     seasonDbIds: 'seasonDbId',
     observationLevels: 'observationLevel',
   },
-  locations: {
-    locationDbIds: 'locationDbId',
-    locationNames: 'locationName',
-    countryCodes: 'countryCode',
-    locationTypes: 'locationType',
-    abbreviations: 'abbreviation',
-  },
   variables: {
     observationVariableDbIds: 'observationVariableDbId',
     observationVariableNames: 'observationVariableName',
@@ -142,27 +139,16 @@ const CASSAVABASE_PLURAL_TO_SINGULAR: Record<
   },
 };
 
-const BREEDBASE_PLURAL_TO_SINGULAR: Record<
-  string,
-  Readonly<Record<string, DialectFilterMappingInput>>
-> = {
-  ...CASSAVABASE_PLURAL_TO_SINGULAR,
-  // Sweetpotatobase (SPB) honors the BrAPI v2 plural location filters and
-  // silently ignores singular locationDbId/locationName/countryCode/
-  // abbreviation. Leave the named tool filters in their plural form for the
-  // broader Breedbase dialect; locationTypes works in both forms.
-  locations: {},
-};
-
 /**
  * Filters CassavaBase silently ignores entirely — drop them from the wire and
  * surface a warning so the agent stops trusting the response as if the filter
  * were honored. `searchText` is a non-spec extension we invented earlier;
  * no SGN-family server recognizes it. `locationDbIds` (and the singular
  * `locationDbId`) on `/studies` was empirically verified to leak: requesting
- * `locationDbId=3` still returned studies for other locations (Mokwa, Zaria).
- * Until we have a working alternative, narrow location-wise post-fetch via
- * `locationName` distribution or a follow-up `brapi_get_study` call.
+ * `locationDbId=3` still returned studies for other locations (Mokwa, Zaria),
+ * and `locationName(s)` is ignored there too. `brapi_find_studies` detects
+ * the drop and matches its `locations` input against each row's
+ * `locationDbId` client-side instead.
  */
 const DROPPED_FILTERS: Record<string, ReadonlySet<string>> = {
   studies: new Set(['searchText', 'locationDbIds', 'locationDbId']),
@@ -200,15 +186,11 @@ const SGN_NOTES = [
   'Several advertised POST /search routes are treated as unavailable because SGN-family deployments often expose them in /calls while serving broken or hanging responses.',
 ] as const;
 
-function createSgnFamilyDialect(
-  id: string,
-  label: string,
-  pluralToSingular: Record<string, Readonly<Record<string, DialectFilterMappingInput>>>,
-): BrapiDialect {
+function createSgnFamilyDialect(id: string, label: string): BrapiDialect {
   return createSingularizingDialect({
     id,
     label,
-    pluralToSingular,
+    pluralToSingular: SGN_PLURAL_TO_SINGULAR,
     droppedFilters: DROPPED_FILTERS,
     disabledSearchEndpoints: DISABLED_SEARCH_ENDPOINTS,
     notes: SGN_NOTES,
@@ -246,14 +228,6 @@ function stripNulls(value: unknown): unknown {
   return out;
 }
 
-export const cassavabaseDialect = createSgnFamilyDialect(
-  'cassavabase',
-  'CassavaBase',
-  CASSAVABASE_PLURAL_TO_SINGULAR,
-);
+export const cassavabaseDialect = createSgnFamilyDialect('cassavabase', 'CassavaBase');
 
-export const breedbaseDialect = createSgnFamilyDialect(
-  'breedbase',
-  'Breedbase/SGN',
-  BREEDBASE_PLURAL_TO_SINGULAR,
-);
+export const breedbaseDialect = createSgnFamilyDialect('breedbase', 'Breedbase/SGN');

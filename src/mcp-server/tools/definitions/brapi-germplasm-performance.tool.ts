@@ -36,9 +36,10 @@ import {
   buildRequestOptions,
   extractRows,
   isUpstreamNotFound,
+  NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
-import { type NormObs, pullObservationsForStudies } from '../shared/observations.js';
+import { describeError, type NormObs, pullObservationsForStudies } from '../shared/observations.js';
 
 /** Upper bound on studies discovered per germplasm (guards the filter-ignored case). */
 const STUDY_DISCOVERY_CAP = 200;
@@ -98,7 +99,7 @@ const PerVariableSchema = z
   );
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   germplasmDbId: z.string().describe('The germplasm that was analyzed.'),
   germplasmName: z
     .string()
@@ -116,7 +117,7 @@ const OutputSchema = z.object({
   warnings: z
     .array(z.string())
     .describe(
-      'Advisory messages (study-discovery limits, dropped filters, fallback paths, per-study failures).',
+      'Advisory messages (study-discovery limits, dropped filters, fallback paths, per-study failures, partial study scans).',
     ),
 });
 
@@ -135,9 +136,68 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_germplasm_performance.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_germplasm_performance.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_germplasm_performance in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_germplasm_performance.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_germplasm_performance.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_germplasm_performance.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_germplasm_performance.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -150,15 +210,15 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
   ] as const,
   input: z.object({
     alias: AliasInput,
-    germplasmDbId: z.string().min(1).describe('The germplasmDbId to summarize performance for.'),
+    germplasmDbId: NonBlankString.describe('The germplasmDbId to summarize performance for.'),
     studyDbIds: z
-      .array(z.string().min(1))
+      .array(NonBlankString)
       .optional()
       .describe(
         'Optional explicit set of studyDbIds to aggregate over. When supplied, skips automatic study discovery and its 200-study cap entirely — use it to process a specific slice of studies, e.g. the full germplasm-scoped study set retrieved via brapi_find_studies with extraFilters.germplasmDbIds. Omit to let the tool discover the germplasm’s studies automatically.',
       ),
     variables: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe(
         'Optional subset of observationVariableDbIds to aggregate. Omit to include every variable observed for the germplasm.',
@@ -218,11 +278,11 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
     }
 
     // 3. Pull observations per study, scoped to the germplasm, with bounded
-    //    concurrency. Filter returned rows to the iterated study + target
-    //    germplasm so the aggregate stays correct on servers that ignore the
-    //    studyDbId filter or over-return. Per-study failures warn and continue.
+    //    concurrency. The pull keeps only the iterated study's rows for the
+    //    target germplasm (and variables), so the aggregate stays correct on
+    //    servers that ignore the studyDbId filter or over-return. Per-study
+    //    failures and partial scans warn and continue.
     const collected: NormObs[] = [];
-    const wantVariables = input.variables?.length ? new Set(input.variables) : undefined;
     const outcomes = await pullObservationsForStudies({
       studyDbIds,
       input: input.variables
@@ -241,7 +301,7 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
       warnings.push(...outcome.warnings);
       if (outcome.error !== undefined) {
         warnings.push(
-          `Study '${outcome.studyDbId}': observation pull failed (${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}).`,
+          `Study '${outcome.studyDbId}': observation pull failed (${describeError(outcome.error)}).`,
         );
         continue;
       }
@@ -251,12 +311,7 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
         );
         continue;
       }
-      for (const o of outcome.observations) {
-        if (o.studyDbId !== outcome.studyDbId) continue;
-        if (o.germplasmDbId !== input.germplasmDbId) continue;
-        if (wantVariables && !wantVariables.has(o.observationVariableDbId)) continue;
-        collected.push(o);
-      }
+      collected.push(...outcome.observations);
     }
 
     // 4. Aggregate per variable.
@@ -376,8 +431,8 @@ interface DiscoverStudiesArgs {
  * Discover the studies a germplasm appears in via `/studies?germplasmDbIds=…`,
  * paging up to `STUDY_DISCOVERY_CAP`. Cross-checks the filtered total against an
  * unfiltered baseline: when equal (and > 0) the server ignored the germplasm
- * filter — the anchor set is over-broad, so it warns but still proceeds (the
- * per-study observation pull remains germplasm-scoped). When the dialect drops
+ * filter — the anchor set is over-broad, so it warns but still proceeds (each
+ * study's observations are filtered to the germplasm). When the dialect drops
  * the filter outright, returns an empty set with a warning.
  */
 async function discoverStudiesForGermplasm(
@@ -437,7 +492,7 @@ async function discoverStudiesForGermplasm(
     const baseline = await fetchStudyTotal(client, connection, ctx).catch(() => undefined);
     if (typeof baseline === 'number' && baseline > 0 && filteredTotal === baseline) {
       warnings.push(
-        `/studies returned the same total (${baseline}) for the germplasm-filtered probe and an unfiltered baseline — the server appears to ignore the germplasm filter on /studies. Proceeding with the ${studyDbIds.length} discovered studies (per-study observation pulls remain germplasm-scoped), but coverage may be over-broad.`,
+        `/studies returned the same total (${baseline}) for the germplasm-filtered probe and an unfiltered baseline — the server appears to ignore the germplasm filter on /studies. Proceeding with the ${studyDbIds.length} discovered studies (each study's observations are filtered to this germplasm), but coverage may be over-broad.`,
       );
     }
   }

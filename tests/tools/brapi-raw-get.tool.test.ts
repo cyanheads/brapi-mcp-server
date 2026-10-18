@@ -7,7 +7,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiRawGet } from '@/mcp-server/tools/definitions/brapi-raw-get.tool.js';
@@ -83,6 +83,24 @@ describe('brapi_raw_get tool', () => {
     expect(result.suggestion).toContain('brapi_find_studies');
   });
 
+  it('names the genotype tools that take a variantSetDbId when listing /variantsets', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockResolvedValue(
+      jsonResponse(envelope({ data: [{ variantSetDbId: 'vs1', studyDbId: '140' }] })),
+    );
+
+    const result = await brapiRawGet.handler(
+      brapiRawGet.input.parse({ path: 'variantsets', params: { studyDbId: '140' } }),
+      ctx,
+    );
+
+    const parsed = brapiRawGet.output.parse(result);
+    expect(parsed.suggestion).toContain('variantSetDbId');
+    expect(parsed.suggestion).toContain('brapi_find_genotype_calls');
+    expect(parsed.suggestion).toContain('brapi_export_genotype_matrix');
+    expect(brapiRawGet.format(result)[0]?.text).toContain('brapi_export_genotype_matrix');
+  });
+
   it('normalizes a path missing the leading slash', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] })));
@@ -112,51 +130,6 @@ describe('brapi_raw_get tool', () => {
     const text = (brapiRawGet.format!(result)[0] as { text: string }).text;
     expect(text).toContain('/samples');
     expect(text).toContain('totalCount=12');
-  });
-
-  it('spills to a canvas dataframe when result.data is a list and totalCount > loadLimit', async () => {
-    const ctx = await connect(fetcher);
-    const totalCount = 15;
-    const allRows = Array.from({ length: totalCount }, (_, i) => ({
-      sampleDbId: `s${i + 1}`,
-      observationUnitDbId: `ou${i + 1}`,
-    }));
-    fetcher.mockImplementation(async (url: string) => {
-      const u = new URL(String(url));
-      const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
-      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10);
-      return jsonResponse(
-        envelope({ data: allRows.slice(page * pageSize, page * pageSize + pageSize) }, {
-          totalCount,
-        } as unknown as { totalCount: number }),
-      );
-    });
-
-    const result = await brapiRawGet.handler(
-      brapiRawGet.input.parse({ path: '/samples', loadLimit: 10 }),
-      ctx,
-    );
-    expect(result.dataframe).toBeDefined();
-    expect(result.dataframe?.rowCount).toBe(15);
-    expect(result.dataframe?.tableName).toMatch(/^df_/);
-    // Inline `result` is unchanged — raw passthrough preserves the upstream payload.
-    expect(Array.isArray((result.result as { data?: unknown[] }).data)).toBe(true);
-  });
-
-  it('does not spill when totalCount fits within loadLimit', async () => {
-    const ctx = await connect(fetcher);
-    fetcher.mockResolvedValue(
-      jsonResponse(
-        envelope({ data: [{ sampleDbId: 'sample-1' }] }, { totalCount: 1 } as unknown as {
-          totalCount: number;
-        }),
-      ),
-    );
-    const result = await brapiRawGet.handler(
-      brapiRawGet.input.parse({ path: '/samples', loadLimit: 10 }),
-      ctx,
-    );
-    expect(result.dataframe).toBeUndefined();
   });
 
   it('does not spill when result is not a list shape (single object)', async () => {
@@ -198,5 +171,100 @@ describe('brapi_raw_get tool', () => {
     // User opted into manual paging — handler treats this as a single explicit
     // page fetch and skips the spillover walk even though totalCount is huge.
     expect(result.dataframe).toBeUndefined();
+  });
+
+  describe('dataframe spill and walk stop disclosure', () => {
+    const allRows = Array.from({ length: 25 }, (_, i) => ({ sampleDbId: `s${i + 1}` }));
+
+    /** Serve GET /samples pages, failing pages at or past `failFromPage`; any other host fails. */
+    function serve(failFromPage: number): void {
+      fetcher.mockImplementation(async (url: string) => {
+        const u = new URL(String(url));
+        if (u.hostname !== 'brapi.example.org' || u.pathname !== '/brapi/v2/samples') {
+          throw new Error(`unmocked fetch: ${u.href}`);
+        }
+        const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
+        if (page >= failFromPage) return jsonResponse({ error: 'upstream down' }, 500);
+        const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10);
+        const totalCount = allRows.length;
+        return jsonResponse({
+          metadata: {
+            pagination: {
+              currentPage: page,
+              pageSize,
+              totalCount,
+              totalPages: Math.ceil(totalCount / pageSize),
+            },
+          },
+          result: { data: allRows.slice(page * pageSize, page * pageSize + pageSize) },
+        });
+      });
+    }
+
+    async function run(ctx: Awaited<ReturnType<typeof connect>>, loadLimit = 10) {
+      const definition = {
+        ...brapiRawGet,
+        handler(input, contractCtx) {
+          return brapiRawGet.handler(input, { ...contractCtx, state: ctx.state });
+        },
+      } satisfies typeof brapiRawGet;
+      const result = await runToolContract(
+        definition,
+        { path: '/samples', loadLimit },
+        { context: { tenantId: 't1' } },
+      );
+      const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+      return { result, structured: result.structuredContent as Record<string, unknown>, text };
+    }
+
+    it('warns on both surfaces when a walk page fails, staging the rows already fetched', async () => {
+      const ctx = await connect(fetcher);
+      serve(1);
+
+      const { result, structured, text } = await run(ctx);
+
+      expect(result.isError).toBeFalsy();
+      expect(structured.dataframe).toMatchObject({ rowCount: 10, truncated: true });
+      const warnings = structured.warnings as string[];
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('Dataframe walk stopped after 10 of 25 upstream row(s)');
+      expect(warnings[0]).toContain('page 1 failed');
+      expect(text).toContain('Dataframe walk stopped after 10 of 25 upstream row(s)');
+      expect(text).toContain(`**Warnings:**\n- ${warnings[0]}`);
+      const tableName = (structured.dataframe as { tableName: string }).tableName;
+      expect(structured.notice).toBe(
+        `Staged dataframe \`${tableName}\` (10 rows, truncated — warnings says why): list its columns with brapi_dataframe_describe, then query it with brapi_dataframe_query (SQL).`,
+      );
+      expect(text).toContain(`> ${structured.notice as string}`);
+    });
+
+    it('spills a list past loadLimit, with no warnings when the walk reaches the upstream total', async () => {
+      const ctx = await connect(fetcher);
+      serve(Number.POSITIVE_INFINITY);
+
+      const { structured, text } = await run(ctx);
+
+      expect(structured.dataframe).toMatchObject({
+        rowCount: 25,
+        tableName: expect.stringMatching(/^df_/),
+      });
+      // Inline `result` is unchanged — raw passthrough preserves the upstream page.
+      expect((structured.result as { data?: unknown[] }).data).toHaveLength(10);
+      expect(structured).not.toHaveProperty('warnings');
+      expect(structured.notice).toContain('brapi_dataframe_describe');
+      expect(structured.notice).toContain('brapi_dataframe_query');
+      expect(text).not.toContain('**Warnings:**');
+    });
+
+    it('stages nothing and carries no dataframe pointer when the list fits loadLimit', async () => {
+      const ctx = await connect(fetcher);
+      serve(Number.POSITIVE_INFINITY);
+
+      const { result, structured } = await run(ctx, 50);
+
+      expect(result.isError).toBeFalsy();
+      expect(structured).not.toHaveProperty('dataframe');
+      expect(structured).not.toHaveProperty('notice');
+    });
   });
 });

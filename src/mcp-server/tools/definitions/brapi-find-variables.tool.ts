@@ -31,14 +31,21 @@ import {
   computeDistribution,
   DataframeHandleSchema,
   dialectRowMapper,
+  discloseInlineTrim,
   ExtraFiltersInput,
+  FreeTextInput,
+  InlineTrimEnrichment,
   LoadLimitInput,
   loadInitialFindPage,
   maybeSpill,
   mergeFilters,
+  NonBlankString,
+  renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  renderMoreRowsLine,
+  renderWarningsTrailer,
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
@@ -121,11 +128,11 @@ const CandidateSchema = z
   .describe('One ranked ontology candidate from a free-text query.');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   results: z
     .array(VariableRowSchema)
     .describe(
-      'Observation variable rows returned in-context (up to loadLimit). Rows matching `text` are promoted to the top when the free-text query produces candidates.',
+      'Leading observation variable rows, up to loadLimit and a 24,000-byte budget, whichever binds first. Rows matching `text` are promoted to the top when the free-text query produces candidates; nested objects with no non-empty field are omitted.',
     ),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
@@ -140,14 +147,14 @@ const OutputSchema = z.object({
         .record(z.string(), z.number())
         .describe('Scale name → count of variables using that scale.'),
     })
-    .describe('Value frequency per field across the full result set.'),
+    .describe('Value frequency per field across every matched row fetched.'),
   ontologyCandidates: z
     .array(CandidateSchema)
     .describe(
       'Top ranked candidates from the free-text query (if any). Empty when `text` was not supplied.',
     ),
   dataframe: DataframeHandleSchema.optional().describe(
-    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
+    'The matched rows, staged as a dataframe when results[] holds fewer.',
   ),
 });
 
@@ -177,15 +184,74 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindVariables = tool('brapi_find_variables', {
   description:
-    'Find observation variables (traits) by name, trait class, ontology term, or free-text query. Free-text queries are ranked against the returned set and may resolve to ontology URIs when the server advertises them. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
+    'Find observation variables (traits) by name, trait class, ontology term, or free-text query. Free-text queries are ranked against every fetched row by PUI, name, synonym, and trait text; a candidate carries the ontology PUI of its row as termId when the row has one. results[] holds the leading rows up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_variables.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_find_variables.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_find_variables in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_find_variables.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_find_variables.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_find_variables.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_find_variables.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -199,24 +265,27 @@ export const brapiFindVariables = tool('brapi_find_variables', {
   ] as const,
   input: z.object({
     alias: AliasInput,
-    variables: z.array(z.string()).optional().describe('Filter by observationVariableDbIds.'),
+    variables: z.array(NonBlankString).optional().describe('Filter by observationVariableDbIds.'),
     variableNames: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe('Filter by exact observationVariableNames.'),
-    variablePUIs: z.array(z.string()).optional().describe('Filter by persistent ontology URIs.'),
-    traitClasses: z.array(z.string()).optional().describe('Filter by trait class.'),
-    ontologies: z.array(z.string()).optional().describe('Filter by ontologyDbIds.'),
-    studies: z.array(z.string()).optional().describe('Filter by studyDbIds.'),
-    methods: z.array(z.string()).optional().describe('Filter by methodDbIds.'),
-    scales: z.array(z.string()).optional().describe('Filter by scaleDbIds.'),
-    crop: z.string().optional().describe('Filter by common crop name (single value).'),
-    text: z
-      .string()
+    variablePUIs: z
+      .array(NonBlankString)
       .optional()
-      .describe(
-        'Free-text query. Ranks the **full upstream union** (the spilled dataframe when one is produced, otherwise the first page) via the ontology resolver, then fills the in-context window up to loadLimit with matches first and unmatched rows for context. Use exact filters (`variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`) to actually narrow the upstream pull. Differs from `brapi_find_germplasm.text`, which drops unmatched rows.',
-      ),
+      .describe('Filter by persistent ontology URIs.'),
+    traitClasses: z.array(NonBlankString).optional().describe('Filter by trait class.'),
+    ontologies: z.array(NonBlankString).optional().describe('Filter by ontologyDbIds.'),
+    studies: z
+      .array(NonBlankString)
+      .optional()
+      .describe('Filter by studyDbId. /variables takes one, so only the first value is sent.'),
+    methods: z.array(NonBlankString).optional().describe('Filter by methodDbIds.'),
+    scales: z.array(NonBlankString).optional().describe('Filter by scaleDbIds.'),
+    crop: NonBlankString.optional().describe('Filter by common crop name (single value).'),
+    text: FreeTextInput.optional().describe(
+      'Free-text query. Ranks **every row the call fetched** (the whole dataframe walk, not just the first page) via the ontology resolver, then fills results[] — up to loadLimit and the 24,000-byte budget — with matches first and unmatched rows for context. Use exact filters (`variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`) to actually narrow the upstream pull. Differs from `brapi_find_germplasm.text`, which drops unmatched rows.',
+    ),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
@@ -227,40 +296,28 @@ export const brapiFindVariables = tool('brapi_find_variables', {
   // notices. Populated via ctx.enrich() so it reaches both structuredContent
   // and the content[] trailer without living in the domain return.
   enrichment: {
-    totalCount: z.number().int().nonnegative().describe('Total rows reported by the server.'),
+    totalCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe('Total rows reported by the server, else the rows scanned.'),
     returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
       .record(z.string(), z.unknown())
-      .describe('The final filter map sent to the server (named + extraFilters).'),
+      .describe('Filter map sent upstream (named filters plus extraFilters).'),
     refinementHint: z
       .string()
       .optional()
-      .describe('Suggested next-step query refinement when the result set is large.'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Guidance when no rows were returned — how to broaden filters or retry.'),
+      .describe('Suggested refinement when the result set is large.'),
+    ...InlineTrimEnrichment,
     warnings: z
       .array(z.string())
       .describe('Advisory messages (filter overrides, partial data, capability gaps).'),
   },
 
   enrichmentTrailer: {
-    appliedFilters: {
-      render: (filters) => {
-        const entries = Object.entries(filters);
-        if (entries.length === 0) return '**Applied Filters:** none';
-        const lines = entries.map(([k, v]) => {
-          const display = SERVER_TO_USER[k] ?? k;
-          return `- **${display}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`;
-        });
-        return `**Applied Filters:**\n${lines.join('\n')}`;
-      },
-    },
-    warnings: {
-      render: (ws) => (ws.length > 0 ? ws.map((w) => `- ${w}`).join('\n') : '_none_'),
-      label: 'Warnings',
-    },
+    appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
+    warnings: { render: renderWarningsTrailer },
   },
 
   async handler(input, ctx) {
@@ -315,7 +372,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     }
     if (input.text && !hasOntologyEndpoint) {
       warnings.push(
-        'Server does not expose /ontologies — free-text matching falls back to local substring + synonym matching on the returned rows.',
+        'Server does not expose /ontologies — free-text matching uses substring + synonym matching on the fetched rows.',
       );
     }
 
@@ -330,7 +387,9 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       normalizeRow ? { normalizeRow } : {},
     );
 
-    const { fullRows, dataframe } = await maybeSpill({
+    const text = input.text;
+    let candidates: OntologyCandidate[] = [];
+    const spill = await maybeSpill({
       firstPage,
       client,
       connection,
@@ -341,44 +400,19 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       loadLimit,
       ctx,
       bridge,
+      warnings,
       ...(normalizeRow ? { normalizeRow } : {}),
+      /**
+       * results[] carries free-text matches first, with empty nested containers
+       * stripped (CassavaBase emits `method: {}` on every variable); the inline
+       * bounds measure those rows. The dataframe keeps the raw upstream shape.
+       */
+      inlineView: (rows) => {
+        candidates = text ? resolver.match(text, rows as VariableLike[], { limit: 10 }) : [];
+        return promoteCandidates(rows, candidates).map(pruneEmptyNestedObjects);
+      },
     });
-
-    let rankedResults = firstPage.rows;
-    let candidates: OntologyCandidate[] = [];
-    if (input.text) {
-      candidates = resolver.match(input.text, fullRows as VariableLike[], { limit: 10 });
-      if (candidates.length > 0) {
-        // PUI is sparse on real servers (CassavaBase doesn't populate it),
-        // so promote rows by observationVariableDbId — always present —
-        // and fall back to PUI for any candidate that lacked the dbId.
-        const matchedDbIds = new Set(
-          candidates.map((c) => c.observationVariableDbId).filter((v): v is string => Boolean(v)),
-        );
-        const matchedPuis = new Set(
-          candidates.map((c) => c.termId).filter((v): v is string => Boolean(v)),
-        );
-        // Iterate the full spilled union, not just firstPage.rows. The
-        // ontology resolver matches against fullRows, so matched dbIds
-        // routinely sit past the in-context window (e.g. "dry matter
-        // content" hits CO_334:0002058, which is row ~700 of 750 in
-        // alphabetical order). Walking firstPage.rows alone produced an
-        // empty `matched` set and a no-op rerank. After the merge, slice
-        // back to loadLimit so the response stays bounded.
-        const matched: Record<string, unknown>[] = [];
-        const rest: Record<string, unknown>[] = [];
-        for (const row of fullRows) {
-          const dbId = row.observationVariableDbId;
-          const pui = row.observationVariablePUI;
-          const isMatch =
-            (typeof dbId === 'string' && matchedDbIds.has(dbId)) ||
-            (typeof pui === 'string' && matchedPuis.has(pui));
-          if (isMatch) matched.push(row);
-          else rest.push(row);
-        }
-        rankedResults = [...matched, ...rest].slice(0, loadLimit);
-      }
-    }
+    const { fullRows, dataframe, results, hasMore, rowsScanned } = spill;
 
     const distributions = {
       ontologyDbId: computeDistribution(fullRows, (r) => asString(r.ontologyDbId)),
@@ -409,8 +443,8 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
-    const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+    const totalCount = firstPage.totalCount ?? rowsScanned;
+    const refinementHint = buildRefinementHint(spill, distributions, {
       availableFilters: [
         'variables',
         'variableNames',
@@ -425,35 +459,26 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       ],
     });
 
-    // Strip top-level keys whose value is a non-array object with no
-    // meaningful fields (every leaf null/undefined/empty). CassavaBase
-    // emits `method: {}` and similar empty containers on every variable,
-    // and the bloat is pure noise in the in-context view. Objects that
-    // carry any non-empty field are kept untouched — including their null
-    // siblings — so no information is dropped, only empty containers.
-    // Applied to in-context rows only; the dataframe keeps the raw
-    // upstream shape for research traceability.
-    const inContextRows = rankedResults.map(pruneEmptyNestedObjects);
-
     const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
     ctx.enrich({
       totalCount,
-      returnedCount: inContextRows.length,
+      returnedCount: results.length,
       appliedFilters,
       warnings,
       ...(refinementHint ? { refinementHint } : {}),
     });
-    if (inContextRows.length === 0)
+    if (results.length === 0)
       ctx.enrich.notice(
         warnings.length > 0
           ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
           : 'No variables matched the applied filters. Try broadening variableNames, traitClasses, ontologies, or using the text parameter.',
       );
+    discloseInlineTrim(ctx, spill, loadLimit);
 
     const result: Output = {
       alias: connection.alias,
-      results: inContextRows as z.infer<typeof VariableRowSchema>[],
-      hasMore: firstPage.hasMore,
+      results: results as z.infer<typeof VariableRowSchema>[],
+      hasMore,
       distributions,
       ontologyCandidates: candidates,
     };
@@ -472,12 +497,8 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       }),
     );
     lines.push('');
-    if (result.hasMore) {
-      lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
-      );
-      lines.push('');
-    }
+    const moreRows = renderMoreRowsLine(result);
+    if (moreRows) lines.push(moreRows, '');
     if (result.ontologyCandidates.length > 0) {
       lines.push('## Ontology candidates (ranked)');
       for (const c of result.ontologyCandidates) {
@@ -538,6 +559,38 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/**
+ * Reorder `rows` so those the ontology candidates name come first, each group
+ * keeping upstream order. Matches by observationVariableDbId — always present —
+ * and falls back to the PUI, which is sparse on real servers (CassavaBase
+ * leaves it unset). Runs over the full matched set, not the first page: a
+ * match routinely sits far past the inline window ("dry matter content" is row
+ * ~700 of 750 in alphabetical order on CassavaBase).
+ */
+function promoteCandidates(
+  rows: Record<string, unknown>[],
+  candidates: OntologyCandidate[],
+): Record<string, unknown>[] {
+  if (candidates.length === 0) return rows;
+  const matchedDbIds = new Set(
+    candidates.map((c) => c.observationVariableDbId).filter((v): v is string => Boolean(v)),
+  );
+  const matchedPuis = new Set(
+    candidates.map((c) => c.termId).filter((v): v is string => Boolean(v)),
+  );
+  const matched: Record<string, unknown>[] = [];
+  const rest: Record<string, unknown>[] = [];
+  for (const row of rows) {
+    const dbId = row.observationVariableDbId;
+    const pui = row.observationVariablePUI;
+    const isMatch =
+      (typeof dbId === 'string' && matchedDbIds.has(dbId)) ||
+      (typeof pui === 'string' && matchedPuis.has(pui));
+    (isMatch ? matched : rest).push(row);
+  }
+  return [...matched, ...rest];
+}
 
 /**
  * Drop top-level keys whose value is a non-array object with no meaningful

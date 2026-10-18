@@ -2,8 +2,8 @@
  * @fileoverview `brapi_find_observations` — pull observation records filtered
  * by study, germplasm, variable, season, or observation unit. Matches the
  * find_* pattern: paged single pull capped at loadLimit, distributions across
- * variable/study/germplasm/level, dataframe spillover when the upstream
- * total exceeds loadLimit.
+ * variable/study/germplasm/level, dataframe spillover when loadLimit or the
+ * inline byte budget cuts results[] short of the matched rows.
  *
  * @module mcp-server/tools/definitions/brapi-find-observations.tool
  */
@@ -33,18 +33,24 @@ import {
   computeDistribution,
   DataframeHandleSchema,
   dialectRowMapper,
+  discloseInlineTrim,
   ExtraFiltersInput,
   extractRows,
   type FindRoute,
   fkMatchCheck,
+  InlineTrimEnrichment,
   type LoadedRows,
   LoadLimitInput,
   loadInitialFindPage,
   maybeSpill,
   mergeFilters,
+  NonBlankString,
+  renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  renderMoreRowsLine,
+  renderWarningsTrailer,
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
@@ -80,14 +86,12 @@ const ObservationRowSchema = z
           .object({})
           .passthrough()
           .describe(
-            'Structured season block per BrAPI v2.1 — may carry seasonDbId, year, season, or seasonName. Fields vary by server; all pass through and are collapsed into a single label by format().',
+            'BrAPI v2.1 season object — seasonDbId, year, season, or seasonName; fields vary by server.',
           ),
         z.null().describe('Field present but null on the upstream.'),
       ])
       .optional()
-      .describe(
-        'Season — either a flat string or a structured object depending on the server. format() normalizes both into a single label.',
-      ),
+      .describe('Season as a flat string or a structured object, depending on the server.'),
     value: z
       .string()
       .nullish()
@@ -100,10 +104,12 @@ const ObservationRowSchema = z
   .describe('One BrAPI observation record.');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   results: z
     .array(ObservationRowSchema)
-    .describe('Observation rows returned in-context (up to loadLimit).'),
+    .describe(
+      'Leading matched observation rows, up to loadLimit and a 24,000-byte budget, whichever binds first.',
+    ),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
@@ -123,9 +129,9 @@ const OutputSchema = z.object({
         .record(z.string(), z.number())
         .describe('Season identifier → count of observations in that season.'),
     })
-    .describe('Value frequency per field across the full result set.'),
+    .describe('Value frequency per field across every matched row fetched.'),
   dataframe: DataframeHandleSchema.optional().describe(
-    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
+    'The matched rows, staged as a dataframe when results[] holds fewer.',
   ),
 });
 
@@ -170,15 +176,74 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindObservations = tool('brapi_find_observations', {
   description:
-    'Pull observation records filtered by study, germplasm, variable, season, or observation unit. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
+    'Pull observation records filtered by study, germplasm, variable, season, or observation unit. Without a studies, trials, observationUnits, or observations anchor, a GET query first runs a one-row count probe and skips the bulk pull (warnings says so) when the probe fails or reports more than 5,000 matches. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when those bounds cut it short, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_observations.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_find_observations.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_find_observations in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_find_observations.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_find_observations.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_find_observations.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_find_observations.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -192,20 +257,25 @@ export const brapiFindObservations = tool('brapi_find_observations', {
   ] as const,
   input: z.object({
     alias: AliasInput,
-    studies: z.array(z.string()).optional().describe('Filter by studyDbIds.'),
-    germplasm: z.array(z.string()).optional().describe('Filter by germplasmDbIds.'),
-    variables: z.array(z.string()).optional().describe('Filter by observationVariableDbIds.'),
-    observationUnits: z.array(z.string()).optional().describe('Filter by observationUnitDbIds.'),
-    observations: z.array(z.string()).optional().describe('Filter by observationDbIds.'),
-    seasons: z.array(z.string()).optional().describe('Filter by seasonDbIds (e.g. "2022").'),
-    programs: z.array(z.string()).optional().describe('Filter by programDbIds.'),
-    trials: z.array(z.string()).optional().describe('Filter by trialDbIds.'),
+    studies: z.array(NonBlankString).optional().describe('Filter by studyDbIds.'),
+    germplasm: z.array(NonBlankString).optional().describe('Filter by germplasmDbIds.'),
+    variables: z.array(NonBlankString).optional().describe('Filter by observationVariableDbIds.'),
+    observationUnits: z
+      .array(NonBlankString)
+      .optional()
+      .describe('Filter by observationUnitDbIds.'),
+    observations: z.array(NonBlankString).optional().describe('Filter by observationDbIds.'),
+    seasons: z.array(NonBlankString).optional().describe('Filter by seasonDbIds (e.g. "2022").'),
+    programs: z.array(NonBlankString).optional().describe('Filter by programDbIds.'),
+    trials: z.array(NonBlankString).optional().describe('Filter by trialDbIds.'),
     observationLevels: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe('Observation unit level (plot, plant, field, etc.).'),
-    timestampFrom: z.string().optional().describe('ISO 8601 start of the observation-time window.'),
-    timestampTo: z.string().optional().describe('ISO 8601 end of the observation-time window.'),
+    timestampFrom: NonBlankString.optional().describe(
+      'ISO 8601 start of the observation-time window.',
+    ),
+    timestampTo: NonBlankString.optional().describe('ISO 8601 end of the observation-time window.'),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
@@ -216,40 +286,28 @@ export const brapiFindObservations = tool('brapi_find_observations', {
   // notices. Populated via ctx.enrich() so it reaches both structuredContent
   // and the content[] trailer without living in the domain return.
   enrichment: {
-    totalCount: z.number().int().nonnegative().describe('Total rows reported by the server.'),
+    totalCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe('Total rows reported by the server, else the rows scanned.'),
     returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
       .record(z.string(), z.unknown())
-      .describe('The final filter map sent to the server (named + extraFilters).'),
+      .describe('Filter map sent upstream (named filters plus extraFilters).'),
     refinementHint: z
       .string()
       .optional()
-      .describe('Suggested next-step query refinement when the result set is large.'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Guidance when no rows were returned — how to broaden filters or retry.'),
+      .describe('Suggested refinement when the result set is large.'),
+    ...InlineTrimEnrichment,
     warnings: z
       .array(z.string())
       .describe('Advisory messages (filter overrides, partial data, capability gaps).'),
   },
 
   enrichmentTrailer: {
-    appliedFilters: {
-      render: (filters) => {
-        const entries = Object.entries(filters);
-        if (entries.length === 0) return '**Applied Filters:** none';
-        const lines = entries.map(([k, v]) => {
-          const display = SERVER_TO_USER[k] ?? k;
-          return `- **${display}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`;
-        });
-        return `**Applied Filters:**\n${lines.join('\n')}`;
-      },
-    },
-    warnings: {
-      render: (ws) => (ws.length > 0 ? ws.map((w) => `- ${w}`).join('\n') : '_none_'),
-      label: 'Warnings',
-    },
+    appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
+    warnings: { render: renderWarningsTrailer },
   },
 
   async handler(input, ctx) {
@@ -320,8 +378,8 @@ export const brapiFindObservations = tool('brapi_find_observations', {
      * stalled count operation surfaces as a single warning instead of
      * pinning the response. Outcomes:
      *   1. probe stalls/fails → warn and skip the bulk pull entirely
-     *   2. probe returns a count above the threshold → warn, return the
-     *      1-row preflight as the only in-context observation
+     *   2. probe returns a count above the threshold → warn, return only
+     *      the preflight page's rows (one, unless the upstream ignored pageSize)
      *   3. probe returns a count under the threshold → fall through to
      *      the normal bulk pull
      *
@@ -360,7 +418,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         probe.totalCount > PREFLIGHT_BULK_THRESHOLD
       ) {
         warnings.push(
-          `Preflight detected ${probe.totalCount} observations matching this query (no study / trial / observationUnit / observation anchor). Bulk pull skipped to avoid an upstream timeout. ${OBSERVATION_PREFLIGHT_RECOVERY} Returning the 1-row preflight as the only in-context observation.`,
+          `Preflight detected ${probe.totalCount} observations matching this query (no study / trial / observationUnit / observation anchor). Bulk pull skipped to avoid an upstream timeout. ${OBSERVATION_PREFLIGHT_RECOVERY} Returning only the ${probe.rows.length} row(s) the preflight request returned.`,
         );
         firstPage = probe;
         bulkPullSkipped = true;
@@ -368,26 +426,26 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     }
     firstPage ??= await loadObservations(loadLimit);
 
-    const { fullRows, dataframe } = bulkPullSkipped
-      ? { fullRows: firstPage.rows, dataframe: undefined }
-      : await maybeSpill({
-          firstPage,
-          client,
-          connection,
-          path: '/observations',
-          filters,
-          route,
-          source: 'find_observations',
-          loadLimit,
-          ctx,
-          bridge,
-          warnings,
-          ...(normalizeRow ? { normalizeRow } : {}),
-          spillRequestOptions: {
-            timeoutMs: config.companionTimeoutMs,
-            retryMaxAttempts: 0,
-          },
-        });
+    const spill = await maybeSpill({
+      /** A skipped bulk pull works from the preflight page alone — no walk; the upstream total keeps hasMore honest. */
+      firstPage: bulkPullSkipped ? { ...firstPage, hasMore: false } : firstPage,
+      client,
+      connection,
+      path: '/observations',
+      filters,
+      route,
+      source: 'find_observations',
+      loadLimit,
+      ctx,
+      bridge,
+      warnings,
+      ...(normalizeRow ? { normalizeRow } : {}),
+      spillRequestOptions: {
+        timeoutMs: config.companionTimeoutMs,
+        retryMaxAttempts: 0,
+      },
+    });
+    const { fullRows, dataframe, results, hasMore, rowsScanned } = spill;
 
     const distributions = {
       observationVariableName: computeDistribution(fullRows, (r) =>
@@ -423,8 +481,8 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
-    const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+    const totalCount = firstPage.totalCount ?? rowsScanned;
+    const refinementHint = buildRefinementHint(spill, distributions, {
       availableFilters: [
         'studies',
         'germplasm',
@@ -443,22 +501,23 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
     ctx.enrich({
       totalCount,
-      returnedCount: firstPage.rows.length,
+      returnedCount: results.length,
       appliedFilters,
       warnings,
       ...(refinementHint ? { refinementHint } : {}),
     });
-    if (firstPage.rows.length === 0)
+    if (results.length === 0)
       ctx.enrich.notice(
         warnings.length > 0
           ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
           : 'No observations matched the applied filters. Try narrowing with studies, germplasm, variables, or observationUnits.',
       );
+    discloseInlineTrim(ctx, spill, loadLimit);
 
     const result: Output = {
       alias: connection.alias,
-      results: firstPage.rows as z.infer<typeof ObservationRowSchema>[],
-      hasMore: firstPage.hasMore,
+      results: results as z.infer<typeof ObservationRowSchema>[],
+      hasMore,
       distributions,
     };
     if (dataframe) result.dataframe = dataframe;
@@ -476,12 +535,8 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       }),
     );
     lines.push('');
-    if (result.hasMore) {
-      lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
-      );
-      lines.push('');
-    }
+    const moreRows = renderMoreRowsLine(result);
+    if (moreRows) lines.push(moreRows, '');
     lines.push('## Distributions');
     lines.push(
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',

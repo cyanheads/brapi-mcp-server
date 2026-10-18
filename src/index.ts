@@ -32,9 +32,14 @@ if (process.env.BRAPI_EXPORT_DIR) {
 }
 
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { configurationError } from '@cyanheads/mcp-ts-core/errors';
+import { configurationError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { disabledTool } from '@cyanheads/mcp-ts-core/tools';
-import { getServerConfig } from '@/config/server-config.js';
+import {
+  assertCanvasMaxRowsWithinCanvasLimit,
+  getServerConfig,
+  resolveDataframeExportGate,
+  type ServerConfig,
+} from '@/config/server-config.js';
 import { initBrapiClient } from '@/services/brapi-client/index.js';
 import { initBrapiDialectRegistry } from '@/services/brapi-dialect/index.js';
 import { initCanvasBridge } from '@/services/canvas-bridge/index.js';
@@ -57,7 +62,22 @@ import {
   writeToolDefinitions,
 } from './mcp-server/tools/definitions/index.js';
 
-const serverConfig = getServerConfig();
+/**
+ * The tool gates below read server config before `createApp` runs. A malformed
+ * `BRAPI_*` value must fail inside `setup()`, where the framework prints its
+ * configuration banner, so a failed parse here leaves every gated tool
+ * disabled and `setup()` raises the same error when it parses again.
+ */
+function readGateConfig(): ServerConfig | undefined {
+  try {
+    return getServerConfig();
+  } catch (err) {
+    if (err instanceof McpError && err.code === JsonRpcErrorCode.ConfigurationError) return;
+    throw err;
+  }
+}
+
+const gateConfig = readGateConfig();
 
 /**
  * Operator-facing metadata for the dataframe-drop gate. Surfaces in
@@ -74,42 +94,16 @@ const writesDisabled = {
   hint: 'Set BRAPI_ENABLE_WRITES=true to enable observation submission.',
 };
 
-/**
- * Resolve the dataframe-export gate. Two reasons it can be off:
- * (1) running under HTTP transport — file paths only make sense when the
- *     server lives on the user's machine,
- * (2) `BRAPI_EXPORT_DIR` unset — setting it is the opt-in (no separate
- *     enable flag).
- * Returns `null` when the tool should register, otherwise the operator
- * metadata to wrap the disabled tool with.
- */
-function resolveExportGate(): { reason: string; hint: string } | null {
-  const transportMode = process.env.MCP_TRANSPORT_TYPE ?? 'stdio';
-  if (transportMode !== 'stdio') {
-    return {
-      reason: 'Dataframe export requires stdio transport.',
-      hint: 'File paths must resolve on the same machine as the user — run the server with MCP_TRANSPORT_TYPE=stdio to enable.',
-    };
-  }
-  if (!serverConfig.exportDir) {
-    return {
-      reason: 'Dataframe export is unconfigured (BRAPI_EXPORT_DIR unset).',
-      hint: 'Set BRAPI_EXPORT_DIR to a writable directory on the server host to enable file export.',
-    };
-  }
-  return null;
-}
-
-const exportDisabled = resolveExportGate();
+const exportDisabled = resolveDataframeExportGate(gateConfig);
 
 const tools = [
   ...readOnlyToolDefinitions,
   ...dropToolDefinitions.map((d) =>
-    serverConfig.canvasDropEnabled ? d : disabledTool(d, dropDisabled),
+    gateConfig?.canvasDropEnabled ? d : disabledTool(d, dropDisabled),
   ),
   ...exportToolDefinitions.map((d) => (exportDisabled ? disabledTool(d, exportDisabled) : d)),
   ...writeToolDefinitions.map((d) =>
-    serverConfig.enableWrites ? d : disabledTool(d, writesDisabled),
+    gateConfig?.enableWrites ? d : disabledTool(d, writesDisabled),
   ),
 ];
 
@@ -139,14 +133,16 @@ await createApp({
   // gates the inventory behind auth; this override restores the open-catalog UX.
   landing: { requireAuth: false },
   instructions:
-    'Bridges BrAPI v2 servers (Breeding API for plant/crop research). Call `brapi_connect` first to register a server under an alias and return the orientation envelope (capabilities, dialect, content summary, the finders the server supports). `brapi_find_*` tools page filtered lookups across studies, germplasm, observations, variables, locations, images, variants, and genotype calls; rows beyond the per-call cap spill to a canvas dataframe — query with `brapi_dataframe_query` (SELECT-only SQL). `brapi_get_*` fetch single records by `*DbId`. Use `brapi_raw_get` / `brapi_raw_search` only when no curated tool fits — responses route back to the right curated tool.',
+    'Bridges BrAPI v2 servers (Breeding API for plant/crop research). `brapi_connect` registers a server under an alias and returns the orientation envelope (capabilities, dialect, content summary, the finders the server supports); call it first for any server given by URL. Built-in and operator-configured aliases also connect on first use from any tool. `brapi_find_*` tools page filtered lookups across studies, germplasm, observations, variables, locations, images, variants, and genotype calls; rows beyond the per-call cap spill to a canvas dataframe — query with `brapi_dataframe_query` (SELECT-only SQL). `brapi_get_*` fetch single records by `*DbId`. Use `brapi_raw_get` / `brapi_raw_search` only when no curated tool fits — responses route back to the right curated tool.',
   setup(core) {
+    const serverConfig = getServerConfig();
     if (!core.canvas) {
       throw configurationError(
         'brapi-mcp-server requires the framework canvas service (DuckDB) for dataframe spillover. Set CANVAS_PROVIDER_TYPE=duckdb (the default) and ensure @duckdb/node-api is installed.',
         { canvasProviderType: process.env.CANVAS_PROVIDER_TYPE ?? 'duckdb' },
       );
     }
+    assertCanvasMaxRowsWithinCanvasLimit(serverConfig, core.config.canvas.defaultRowLimit);
     initCanvasBridge(core.canvas, serverConfig);
     initBrapiClient(serverConfig);
     initCapabilityRegistry(serverConfig);

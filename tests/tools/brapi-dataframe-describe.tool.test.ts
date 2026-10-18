@@ -6,6 +6,7 @@
  * @module tests/tools/brapi-dataframe-describe.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { resetConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -63,24 +64,6 @@ describe('brapi_dataframe_describe', () => {
       (formatted ?? [])[0]?.type === 'text' ? (formatted![0] as { text: string }).text : '';
     expect(text).toContain('# 0 dataframe(s)');
     expect(text).toContain('No dataframes');
-  });
-
-  it('gates list-all under shared-tenant HTTP', async () => {
-    const fake = new FakeDataCanvas();
-    initCanvasBridge(fake as unknown as DataCanvas, TEST_CONFIG);
-    vi.stubEnv('MCP_TRANSPORT_TYPE', 'http');
-    vi.stubEnv('MCP_AUTH_MODE', 'none');
-    resetConfig();
-    const ctx = createMockContext({
-      tenantId: 'default',
-      errors: brapiDataframeDescribe.errors,
-    });
-    await expect(
-      brapiDataframeDescribe.handler(brapiDataframeDescribe.input.parse({}), ctx),
-    ).rejects.toMatchObject({
-      code: JsonRpcErrorCode.Forbidden,
-      data: expect.objectContaining({ reason: 'list_all_disabled_on_shared_http' }),
-    });
   });
 
   it('allows list-all under stdio with default tenant (single-process safety)', async () => {
@@ -160,6 +143,72 @@ describe('brapi_dataframe_describe', () => {
     ).error?.data?.recovery?.hint;
     expect(hint).toMatch(/dataframe/);
     expect(hint).toMatch(/find_\*|registerAs/);
+  });
+
+  describe('list-all on shared-tenant HTTP with session-scoped canvases', () => {
+    const isolated = { ...TEST_CONFIG, sessionIsolation: true };
+
+    function sharedTenantHttp(): void {
+      vi.stubEnv('MCP_TRANSPORT_TYPE', 'http');
+      vi.stubEnv('MCP_AUTH_MODE', 'none');
+      resetConfig();
+    }
+
+    /** Contexts for one `default` tenant sharing a state store, as production storage does. */
+    function tenantContexts(...sessionIds: Array<string | undefined>) {
+      const [first, ...rest] = sessionIds.map((sessionId) =>
+        createMockContext({
+          tenantId: 'default',
+          errors: brapiDataframeDescribe.errors,
+          ...(sessionId !== undefined && { sessionId }),
+        }),
+      );
+      if (!first) throw new Error('at least one context');
+      for (const ctx of rest) (ctx as { state: typeof first.state }).state = first.state;
+      return [first, ...rest];
+    }
+
+    async function register(bridge: ReturnType<typeof initCanvasBridge>, ctx: Context) {
+      return await bridge.registerDataframe(ctx, {
+        source: 'find_observations',
+        baseUrl: 'https://brapi.example.org/brapi/v2',
+        query: {},
+        rows: [{ observationDbId: 'o1' }],
+      });
+    }
+
+    function listAll(ctx: Context) {
+      return brapiDataframeDescribe.handler(
+        brapiDataframeDescribe.input.parse({}),
+        ctx as Parameters<typeof brapiDataframeDescribe.handler>[1],
+      );
+    }
+
+    it('lists only each session’s own dataframes', async () => {
+      const bridge = initCanvasBridge(new FakeDataCanvas() as unknown as DataCanvas, isolated);
+      sharedTenantHttp();
+      const [ctxA, ctxB] = tenantContexts('sess-A', 'sess-B') as [Context, Context];
+      const fromA = await register(bridge, ctxA);
+      const fromB = await register(bridge, ctxB);
+      expect((await listAll(ctxA)).tables.map((t) => t.name)).toEqual([fromA.tableName]);
+      expect((await listAll(ctxB)).tables.map((t) => t.name)).toEqual([fromB.tableName]);
+    });
+
+    it.each([
+      // A session-less request resolves the tenant-wide canvas every caller writes to.
+      ['a session-less request', isolated, undefined],
+      // With isolation off, sessions share the tenant canvas too.
+      ['a session when isolation is off', { ...TEST_CONFIG, sessionIsolation: false }, 'sess-A'],
+    ])('refuses list-all for %s', async (_label, config, sessionId) => {
+      const bridge = initCanvasBridge(new FakeDataCanvas() as unknown as DataCanvas, config);
+      sharedTenantHttp();
+      const [caller, other] = tenantContexts(sessionId, sessionId) as [Context, Context];
+      await register(bridge, other);
+      await expect(listAll(caller)).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Forbidden,
+        data: expect.objectContaining({ reason: 'list_all_disabled_on_shared_http' }),
+      });
+    });
   });
 
   it('renders provenance lines for df_-prefixed dataframes', () => {

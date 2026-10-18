@@ -22,7 +22,7 @@ export const brapiEdaStudy = prompt('brapi_eda_study', {
       .regex(/^[a-zA-Z0-9_-]+$/)
       .optional()
       .describe(
-        'Connection alias registered via brapi_connect. Omit to use the default connection.',
+        'Connection alias: one registered via brapi_connect, or a built-in or operator-configured alias. Omit to use the default connection.',
       ),
   }),
   generate: (args) => {
@@ -40,12 +40,12 @@ export const brapiEdaStudy = prompt('brapi_eda_study', {
       '3. Group variables by trait class and by scale data type — the breakdown drives which downstream checks make sense (numerical → outlier checks; categorical → distribution checks).',
       '',
       '## Step 3 — Observation coverage',
-      `1. Call \`brapi_find_observations\` with \`studies: ["${args.studyDbId}"]${aliasArg}\` and a \`loadLimit\` large enough to materialize the full study in one shot if \`observationCount\` from Step 1 fits. Otherwise, the call spills to a dataframe — note the \`dataframe.tableName\` from the response, then describe + query it via \`brapi_dataframe_describe\` and \`brapi_dataframe_query\` (use SQL \`LIMIT/OFFSET\` to walk pages, projection to trim columns, aggregation for summaries).`,
+      `1. Call \`brapi_find_observations\` with \`studies: ["${args.studyDbId}"]${aliasArg}\`. Inline \`results\` stop at \`loadLimit\` or a 24,000-byte budget, so most studies do not fit inline; when \`results\` holds fewer rows than matched, every matched observation is staged in a dataframe. Note the \`dataframe.tableName\` from the response, then describe + query it via \`brapi_dataframe_describe\` and \`brapi_dataframe_query\` (use SQL \`LIMIT/OFFSET\` to walk pages, projection to trim columns, aggregation for summaries).`,
       '2. From the response `distributions`, capture: observations per variable, observations per germplasm, observations per observation level (plot / plant / field), and observations per season.',
       '3. Compute coverage = `observationCount` ÷ (`observationUnitCount` × `variableCount`). Anything materially below 1.0 implies missing measurements.',
       '',
       '## Step 4 — Missing data',
-      '1. From the rows pulled in Step 3, count observations with `value == null`, `value == ""`, or values matching the unknown sentinel from the variable\'s scale (e.g. `.`, `NA`, `999`).',
+      '1. From the observations pulled in Step 3 — the dataframe when one was staged, otherwise the inline `results` — count observations with `value == null`, `value == ""`, or values matching the unknown sentinel from the variable\'s scale (e.g. `.`, `NA`, `999`).',
       '2. Cross-tab missing-rate by variable and by germplasm. Surface the top-3 worst offenders on each axis.',
       '',
       '## Step 5 — Outliers (numerical variables only)',

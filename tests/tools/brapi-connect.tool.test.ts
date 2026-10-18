@@ -579,6 +579,84 @@ describe('brapi_connect against an auth-walled server (real socket)', () => {
     expect(result.notes.some((n) => n.includes('/commoncropnames'))).toBe(true);
   });
 
+  it('fails retryable when /serverinfo and /calls answer 5xx, registering and caching nothing', async () => {
+    routes['/serverinfo'] = status(503);
+    routes['/calls'] = status(503);
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiConnect.errors });
+
+    const definition = {
+      ...brapiConnect,
+      handler(input, contractCtx) {
+        return brapiConnect.handler(input, { ...contractCtx, state: ctx.state });
+      },
+    } satisfies typeof brapiConnect;
+    const result = await runToolContract(
+      definition,
+      { baseUrl, alias: 'flaky' },
+      { context: { tenantId: 't1' } },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: {
+          reason: 'capability_discovery_unavailable',
+          retryable: true,
+          failedEndpoints: ['/serverinfo', '/calls'],
+          recovery: { hint: expect.stringContaining('Retry brapi_connect') },
+        },
+      },
+    });
+    const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+    expect(text).toContain('/serverinfo');
+    expect(text).toContain('/calls');
+    expect(text).toMatch(/reason capability_discovery_unavailable · retryable/);
+    expect(hits).toEqual(['/serverinfo', '/calls']);
+    expect(await ctx.state.get('brapi/conn/flaky')).toBeNull();
+    expect(await cachedProfileKeys(ctx)).toEqual([]);
+  });
+
+  it.each([
+    ['no auth', undefined],
+    ['SGN auth', { mode: 'sgn', username: 'u', password: 'p' }],
+  ] as const)(
+    'with %s, refuses a base URL on a private address with its declared hint, caching and registering nothing',
+    async (_label, auth) => {
+      routes['/serverinfo'] = ok({ calls: [{ service: 'studies', methods: ['GET'] }] });
+      routes['/token'] = ok({ access_token: 't' });
+      const guarded: ServerConfig = { ...socketConfig, allowPrivateIps: false };
+      initBrapiClient(guarded);
+      initCapabilityRegistry(guarded);
+      initServerRegistry(guarded);
+      const ctx = createMockContext({ tenantId: 't1' });
+      const definition = {
+        ...brapiConnect,
+        handler: (parsed, contractCtx) =>
+          brapiConnect.handler(parsed, { ...contractCtx, state: ctx.state }),
+      } satisfies typeof brapiConnect;
+
+      const result = await runToolContract(
+        definition,
+        { baseUrl, alias: 'priv', ...(auth && { auth }) },
+        { context: { tenantId: 't1' } },
+      );
+
+      const declared = brapiConnect.errors.find((e) => e.reason === 'private_address_blocked');
+      expect(declared).toBeDefined();
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'private_address_blocked', recovery: { hint: declared?.recovery } },
+        },
+      });
+      expect(hits).toEqual([]);
+      expect(await ctx.state.get('brapi/conn/priv')).toBeNull();
+      expect(await cachedProfileKeys(ctx)).toEqual([]);
+    },
+  );
+
   describe('a failed connect leaves registration state untouched', () => {
     const STUDIES = ok({ calls: [{ service: 'studies', methods: ['GET'] }] });
 
@@ -796,6 +874,28 @@ describe('brapi_connect env credential pairing', () => {
     expect(fetcher).not.toHaveBeenCalled();
     expect(globalFetch).not.toHaveBeenCalled();
     expect(await ctx.state.get('brapi/conn/cgiar')).toBeNull();
+  });
+
+  it('refuses a configured base URL that is not a URL, naming its variable, before any request', async () => {
+    vi.stubEnv('BRAPI_CGIAR_BASE_URL', 'notaurl');
+
+    const result = await runToolContract(
+      brapiConnect,
+      { alias: 'cgiar' },
+      { context: { tenantId: 't1' } },
+    );
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ConfigurationError,
+        data: {
+          reason: 'alias_base_url_invalid',
+          retryable: false,
+          recovery: { hint: expect.stringContaining('BRAPI_CGIAR_BASE_URL') },
+        },
+      },
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(globalFetch).not.toHaveBeenCalled();
   });
 
   it('connects anonymously when only default credentials exist for another server', async () => {

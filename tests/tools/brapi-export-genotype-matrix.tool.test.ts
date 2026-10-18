@@ -8,8 +8,9 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetServerConfig } from '@/config/server-config.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiExportGenotypeMatrix } from '@/mcp-server/tools/definitions/brapi-export-genotype-matrix.tool.js';
 import { registerDialect } from '@/services/brapi-dialect/registry.js';
@@ -111,6 +112,47 @@ describe('brapi_export_genotype_matrix tool', () => {
   afterEach(() => {
     resetTestServices();
     vi.unstubAllEnvs();
+  });
+
+  it('names the matrix dataframe and the dataframe tools in a notice, adding export only when registered', async () => {
+    const run = async () => {
+      const ctx = await connect(fetcher);
+      fetcher.mockImplementation(async (url: string) => {
+        const u = new URL(String(url));
+        if (u.hostname !== 'brapi.example.org' || u.pathname !== '/brapi/v2/search/calls') {
+          throw new Error(`unmocked fetch: ${u.href}`);
+        }
+        return jsonResponse(
+          envelope({ data: [call(), call({ callSetDbId: 'cs-2', callSetName: 'TMS' })] }),
+        );
+      });
+      const definition = {
+        ...brapiExportGenotypeMatrix,
+        handler: (input, contractCtx) =>
+          brapiExportGenotypeMatrix.handler(input, { ...contractCtx, state: ctx.state }),
+      } satisfies typeof brapiExportGenotypeMatrix;
+      const result = await runToolContract(
+        definition,
+        { variantSetDbId: 'vset-1', format: 'matrix-json' },
+        { context: { tenantId: 't1' } },
+      );
+      const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+      return { structured: result.structuredContent as Record<string, unknown>, text };
+    };
+
+    const exportOff = await run();
+    const tableName = (exportOff.structured.dataframe as { tableName: string }).tableName;
+    expect(exportOff.structured.notice).toBe(
+      `Staged dataframe \`${tableName}\` (2 rows): list its columns with brapi_dataframe_describe, then query it with brapi_dataframe_query (SQL).`,
+    );
+    expect(exportOff.text).toContain(`> ${exportOff.structured.notice as string}`);
+
+    vi.stubEnv('BRAPI_EXPORT_DIR', '/tmp/brapi-exports');
+    resetServerConfig();
+    const exportOn = await run();
+    expect(exportOn.structured.notice).toMatch(
+      /, or write it to a file with brapi_dataframe_export\.$/,
+    );
   });
 
   it('rejects at Zod parse when variantSetDbId is omitted', () => {
@@ -720,5 +762,13 @@ describe('brapi_export_genotype_matrix tool', () => {
     expect(result.ped).toContain('0\tS1\t0\t0\t0\t0\tA\tT\t0\t0');
     // S2: variant01 (no call) → 0 0, variant02 G/G → G G
     expect(result.ped).toContain('0\tS2\t0\t0\t0\t0\t0\t0\tG\tG');
+  });
+});
+
+describe('brapi_export_genotype_matrix variant-set discovery', () => {
+  it('names where a variantSetDbId comes from', () => {
+    const description = brapiExportGenotypeMatrix.input.shape.variantSetDbId.description ?? '';
+    expect(description).toContain('brapi_raw_get({ path: "/variantsets" })');
+    expect(description).toContain('params.studyDbId');
   });
 });

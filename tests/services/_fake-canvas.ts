@@ -20,7 +20,7 @@ import type {
   RegisterTableResult,
   TableInfo,
 } from '@cyanheads/mcp-ts-core/canvas';
-import { conflict, notFound } from '@cyanheads/mcp-ts-core/errors';
+import { conflict, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 
 interface FakeTable {
   columns: string[];
@@ -108,12 +108,25 @@ function makeInstance(
     expiresAt: state.expiresAt,
     isNew,
 
-    async registerTable(name: string, rows: RegisterRows): Promise<RegisterTableResult> {
+    async registerTable(
+      name: string,
+      rows: RegisterRows,
+      options?: { schema?: readonly { name: string }[] },
+    ): Promise<RegisterTableResult> {
       const materialized = await materialize(rows);
       if (state.tables.has(name)) {
         throw conflict(`Table ${name} already exists.`, { reason: 'table_conflict' });
       }
-      const columns = materialized.length > 0 ? Object.keys(materialized[0] ?? {}) : [];
+      const columns = options?.schema
+        ? options.schema.map((col) => col.name)
+        : Object.keys(materialized[0] ?? {});
+      // DuckDB builds `CREATE TABLE` from the schema and rejects one with no
+      // columns — an empty row set (or an empty explicit schema) fails there.
+      if (columns.length === 0) {
+        throw validationError('Table schema must contain at least one column.', {
+          tableName: name,
+        });
+      }
       state.tables.set(name, { columns, rows: materialized });
       return { tableName: name, rowCount: materialized.length, columns };
     },

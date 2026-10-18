@@ -10,6 +10,7 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+import { configurationError } from '@cyanheads/mcp-ts-core/errors';
 
 /**
  * Absolute upper bound on `genotypeCallsMaxPull`, and therefore on any
@@ -69,7 +70,7 @@ export const ServerConfigSchema = z.object({
     .positive()
     .default(1_000)
     .describe(
-      'Default in-context row cap returned by find_* tools before spilling to a canvas dataframe. Rows beyond this cap land in the dataframe; query with brapi_dataframe_query (SQL).',
+      'Default in-context row cap for find_* tools. A 24,000-byte budget also bounds the inline rows, whichever binds first; when either cuts them short of the matched set, the matched rows land in a canvas dataframe — query with brapi_dataframe_query (SQL). Also the default per-study cap on matching observations collected by brapi_build_phenotype_matrix and brapi_germplasm_performance.',
     ),
   pageSize: z.coerce
     .number()
@@ -77,7 +78,7 @@ export const ServerConfigSchema = z.object({
     .positive()
     .default(1_000)
     .describe(
-      'Upstream pageSize used during canvas spillover walks. Decoupled from loadLimit so lowering the inline preview cap no longer shrinks the dataframe ceiling. Most BrAPI servers cap pageSize at 1,000; the dataframe ceiling is pageSize × MAX_SPILLOVER_PAGES (50).',
+      'Upstream pageSize used during canvas spillover walks. Decoupled from loadLimit so lowering the inline preview cap no longer shrinks the dataframe ceiling. Most BrAPI servers cap pageSize at 1,000; the dataframe ceiling is pageSize × 50 pages, capped at 50,000 rows.',
     ),
   maxConcurrentRequests: z.coerce
     .number()
@@ -90,7 +91,9 @@ export const ServerConfigSchema = z.object({
     .int()
     .min(0)
     .default(3)
-    .describe('Max retries on 429/5xx before surfacing.'),
+    .describe(
+      "Max retries on 429/5xx and timeouts before surfacing. A timed-out request is retried only while the call's 50 s upstream deadline still fits another attempt.",
+    ),
   retryBaseDelayMs: z.coerce
     .number()
     .int()
@@ -177,7 +180,7 @@ export const ServerConfigSchema = z.object({
     .positive()
     .default(10_000)
     .describe(
-      'Hard upper bound on rows materialized into a brapi_dataframe_query response. Larger result sets must use registerAs to keep the full set in the workspace.',
+      'Hard upper bound on rows materialized into a brapi_dataframe_query response. Larger result sets must use registerAs to keep the full set in the workspace. Must not exceed the framework canvas row limit (CANVAS_DEFAULT_ROW_LIMIT, default 10,000) — startup fails when it does, since the canvas rejects every query whose row limit is above its own.',
     ),
   canvasQueryTimeoutMs: z.coerce
     .number()
@@ -229,6 +232,60 @@ export function getServerConfig(): ServerConfig {
     sessionIsolation: 'BRAPI_SESSION_ISOLATION',
   });
   return _config;
+}
+
+/**
+ * Fail startup when `BRAPI_CANVAS_MAX_ROWS` exceeds the framework canvas row
+ * limit (`CANVAS_DEFAULT_ROW_LIMIT`). The bridge passes the configured cap to
+ * the canvas as each query's row limit, and the canvas rejects any limit above
+ * its own, so the pair would otherwise start cleanly and then fail every
+ * `brapi_dataframe_query` call. Called from `setup()`, where both configs are
+ * parsed, so the error prints behind the framework's startup config banner.
+ */
+export function assertCanvasMaxRowsWithinCanvasLimit(
+  serverConfig: Pick<ServerConfig, 'canvasMaxRows'>,
+  canvasRowLimit: number,
+): void {
+  if (serverConfig.canvasMaxRows <= canvasRowLimit) return;
+  throw configurationError(
+    `BRAPI_CANVAS_MAX_ROWS (${serverConfig.canvasMaxRows}) exceeds the framework canvas row limit CANVAS_DEFAULT_ROW_LIMIT (${canvasRowLimit}); the canvas would reject every brapi_dataframe_query. Set BRAPI_CANVAS_MAX_ROWS to ${canvasRowLimit} or less, or raise CANVAS_DEFAULT_ROW_LIMIT.`,
+    { canvasMaxRows: serverConfig.canvasMaxRows, canvasRowLimit },
+  );
+}
+
+/**
+ * Resolve the `brapi_dataframe_export` registration gate. Two reasons it can be
+ * off: (1) running under HTTP transport — file paths only make sense when the
+ * server lives on the user's machine, (2) `BRAPI_EXPORT_DIR` unset — setting it
+ * is the opt-in (no separate enable flag). Returns `null` when the tool should
+ * register, otherwise the operator metadata to wrap the disabled tool with.
+ * `config` is `undefined` when the server config failed to parse.
+ */
+export function resolveDataframeExportGate(
+  config: Pick<ServerConfig, 'exportDir'> | undefined,
+): { reason: string; hint: string } | null {
+  const transportMode = process.env.MCP_TRANSPORT_TYPE ?? 'stdio';
+  if (transportMode !== 'stdio') {
+    return {
+      reason: 'Dataframe export requires stdio transport.',
+      hint: 'File paths must resolve on the same machine as the user — run the server with MCP_TRANSPORT_TYPE=stdio to enable.',
+    };
+  }
+  if (!config?.exportDir) {
+    return {
+      reason: 'Dataframe export is unconfigured (BRAPI_EXPORT_DIR unset).',
+      hint: 'Set BRAPI_EXPORT_DIR to a writable directory on the server host to enable file export.',
+    };
+  }
+  return null;
+}
+
+/**
+ * True when `brapi_dataframe_export` is registered, so a response names the
+ * export tool only where a client can call it.
+ */
+export function isDataframeExportRegistered(): boolean {
+  return resolveDataframeExportGate(getServerConfig()) === null;
 }
 
 /** Test-only — reset the lazy cache between suites. */

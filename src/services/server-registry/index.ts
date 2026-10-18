@@ -11,5 +11,6 @@ export {
   initServerRegistry,
   resetServerRegistry,
   ServerRegistry,
+  validateBaseUrl,
 } from './server-registry.js';
 export type { AuthMode, ConnectAuth, RegisteredServer } from './types.js';

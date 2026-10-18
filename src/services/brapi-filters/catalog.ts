@@ -418,7 +418,7 @@ const VARIANTS: FilterDescriptor[] = [
   {
     name: 'start',
     type: 'integer',
-    description: 'Inclusive start position on the reference (1-based).',
+    description: 'Inclusive start position on the reference (0-based per BrAPI).',
     example: '1000',
   },
   {

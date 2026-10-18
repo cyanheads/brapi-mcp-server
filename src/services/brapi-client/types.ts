@@ -54,6 +54,14 @@ export interface ResolvedAuth {
 export interface BrapiRequestOptions {
   auth?: ResolvedAuth;
   /**
+   * Wall-clock budget (ms) for this request across every attempt and backoff,
+   * for a caller holding a tighter limit than the call deadline every request
+   * already shares (`CALL_DEADLINE_MS` from the tool call's start); the earlier
+   * of the two applies. Expiry aborts the attempt in flight and rejects with
+   * `Timeout`. `getSearchResults()` stops polling at it.
+   */
+  deadlineMs?: number;
+  /**
    * Per-server dialect. When supplied, `BrapiClient.get` extracts the endpoint
    * segment from `path` and routes `params` through `dialect.adaptGetFilters`
    * before serializing — so plural-vs-singular mismatches and silently-dropped
@@ -70,6 +78,12 @@ export interface BrapiRequestOptions {
    */
   retryMaxAttempts?: number;
   /**
+   * `false` fails a timed-out attempt at once instead of retrying it, while
+   * 429/5xx keep the retry budget. Without it, a timed-out attempt is retried
+   * only while the remaining budget still fits a full attempt.
+   */
+  retryOnTimeout?: boolean;
+  /**
    * Marks this as a single-record GET on a `/{noun}/{id}` path. The client
    * reclassifies 5xx responses on these requests as `NotFound`, so callers
    * (`brapi_get_study`, `brapi_get_germplasm`, walk_pedigree's per-root
@@ -83,7 +97,7 @@ export interface BrapiRequestOptions {
    * to confirm. Off by default.
    */
   singleton?: boolean;
-  /** Override the config default timeout. */
+  /** Override the config default per-attempt timeout. */
   timeoutMs?: number;
   /**
    * Sink for dialect translation warnings. When `dialect` is supplied, any
@@ -96,6 +110,9 @@ export interface BrapiRequestOptions {
 
 /** Stable error code surfaced by BrapiClient when the dialect adapter dropped every supplied filter. */
 export const DIALECT_ALL_DROPPED_REASON = 'dialect_all_filters_dropped' as const;
+
+/** `data.reason` the framework's fetch guard sets when it refuses a private or reserved address. */
+export const PRIVATE_ADDRESS_BLOCKED_REASON = 'private_address_blocked' as const;
 
 /**
  * POST /search/{noun} returns either full results inline, or a

@@ -22,9 +22,10 @@ import {
   unauthorized,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import type { FetchWithTimeoutOptions } from '@cyanheads/mcp-ts-core/utils';
-import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import type { FetchWithTimeoutOptions, RetryAttempt } from '@cyanheads/mcp-ts-core/utils';
+import { defaultIsTransient, fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
+import { callDeadlineAt, callDeadlineExceeded, UPSTREAM_TIMEOUT_HINT } from './call-deadline.js';
 import type {
   BinaryResponse,
   BrapiEnvelope,
@@ -32,7 +33,7 @@ import type {
   ResolvedAuth,
   SearchResponse,
 } from './types.js';
-import { DIALECT_ALL_DROPPED_REASON } from './types.js';
+import { DIALECT_ALL_DROPPED_REASON, PRIVATE_ADDRESS_BLOCKED_REASON } from './types.js';
 
 /**
  * Signature of the underlying HTTP fetcher. `Context extends RequestContext`,
@@ -70,25 +71,16 @@ export class BrapiClient {
     options: BrapiRequestOptions = {},
   ): Promise<BrapiEnvelope<T>> {
     const params = applyDialectToParams(path, options);
-    return await withRetry(
-      async ({ signal }) => {
-        const response = await this.doFetch(
-          this.buildUrl(baseUrl, path, params),
-          ctx,
-          { method: 'GET', headers: this.buildHeaders(options.auth), signal },
-          options.timeoutMs,
-          options.singleton === true,
-        );
-        return this.parseEnvelope<T>(response);
-      },
-      {
-        operation: `brapi.get ${path}`,
-        context: ctx,
-        maxRetries: options.retryMaxAttempts ?? this.serverConfig.retryMaxAttempts,
-        baseDelayMs: this.serverConfig.retryBaseDelayMs,
-        signal: ctx.signal,
-      },
-    );
+    return await this.withBudget(`GET ${path}`, ctx, options, async ({ signal }) => {
+      const response = await this.doFetch(
+        this.buildUrl(baseUrl, path, params),
+        ctx,
+        { method: 'GET', headers: this.buildHeaders(options.auth), signal },
+        options.timeoutMs,
+        options.singleton === true,
+      );
+      return this.parseEnvelope<T>(response);
+    });
   }
 
   /**
@@ -102,28 +94,17 @@ export class BrapiClient {
     ctx: Context,
     options: BrapiRequestOptions & { accept?: string } = {},
   ): Promise<BinaryResponse> {
-    return withRetry(
-      async ({ signal }) => {
-        const headers = this.buildHeaders(options.auth);
-        headers.Accept = options.accept ?? 'image/*';
-        const response = await this.doFetch(
-          this.buildUrl(baseUrl, path, options.params),
-          ctx,
-          { method: 'GET', headers, signal },
-          options.timeoutMs,
-        );
-        const buffer = await response.arrayBuffer();
-        const contentType = response.headers.get('Content-Type') ?? 'application/octet-stream';
-        return { bytes: new Uint8Array(buffer), contentType };
-      },
-      {
-        operation: `brapi.getBinary ${path}`,
-        context: ctx,
-        maxRetries: this.serverConfig.retryMaxAttempts,
-        baseDelayMs: this.serverConfig.retryBaseDelayMs,
-        signal: ctx.signal,
-      },
-    );
+    return this.withBudget(`GET ${path}`, ctx, options, async ({ signal }) => {
+      const headers = this.buildHeaders(options.auth);
+      headers.Accept = options.accept ?? 'image/*';
+      const response = await this.doFetch(
+        this.buildUrl(baseUrl, path, options.params),
+        ctx,
+        { method: 'GET', headers, signal },
+        options.timeoutMs,
+      );
+      return await readBinary(response);
+    });
   }
 
   /**
@@ -131,18 +112,22 @@ export class BrapiClient {
    * BrAPI server doesn't expose `/images/{id}/imagecontent` but the image's
    * metadata carries an `imageURL` (CDN, S3, etc.). No auth is attached; the
    * assumption is that these URLs are publicly reachable. Still honors the
-   * private-IP guard and request timeout.
+   * private-IP guard, request timeout, and call deadline; never retried.
    */
-  async fetchBinaryUrl(url: string, ctx: Context, accept = 'image/*'): Promise<BinaryResponse> {
-    const response = await this.doFetch(
-      url,
+  fetchBinaryUrl(url: string, ctx: Context, accept = 'image/*'): Promise<BinaryResponse> {
+    return this.withBudget(
+      `GET ${new URL(url).origin}`,
       ctx,
-      { method: 'GET', headers: { Accept: accept } },
-      this.serverConfig.requestTimeoutMs,
+      { retryMaxAttempts: 0 },
+      async ({ signal }) => {
+        const response = await this.doFetch(url, ctx, {
+          method: 'GET',
+          headers: { Accept: accept },
+          signal,
+        });
+        return await readBinary(response);
+      },
     );
-    const buffer = await response.arrayBuffer();
-    const contentType = response.headers.get('Content-Type') ?? 'application/octet-stream';
-    return { bytes: new Uint8Array(buffer), contentType };
   }
 
   /**
@@ -157,37 +142,28 @@ export class BrapiClient {
     ctx: Context,
     options: BrapiRequestOptions = {},
   ): Promise<SearchResponse<T>> {
-    return withRetry(
-      async ({ signal }) => {
-        const response = await this.doFetch(
-          this.buildUrl(baseUrl, `/search/${noun}`),
-          ctx,
-          {
-            method: 'POST',
-            headers: {
-              ...this.buildHeaders(options.auth),
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(body),
-            signal,
+    return this.withBudget(`POST /search/${noun}`, ctx, options, async ({ signal }) => {
+      const response = await this.doFetch(
+        this.buildUrl(baseUrl, `/search/${noun}`),
+        ctx,
+        {
+          method: 'POST',
+          headers: {
+            ...this.buildHeaders(options.auth),
+            'Content-Type': 'application/json',
           },
-          options.timeoutMs,
-        );
-        const envelope = await this.parseEnvelope<unknown>(response);
-        const asyncId = extractAsyncId(envelope);
-        if (asyncId !== undefined) {
-          return { kind: 'async', searchResultsDbId: asyncId };
-        }
-        return { kind: 'sync', envelope: envelope as BrapiEnvelope<T> };
-      },
-      {
-        operation: `brapi.postSearch ${noun}`,
-        context: ctx,
-        maxRetries: this.serverConfig.retryMaxAttempts,
-        baseDelayMs: this.serverConfig.retryBaseDelayMs,
-        signal: ctx.signal,
-      },
-    );
+          body: JSON.stringify(body),
+          signal,
+        },
+        options.timeoutMs,
+      );
+      const envelope = await this.parseEnvelope<unknown>(response);
+      const asyncId = extractAsyncId(envelope);
+      if (asyncId !== undefined) {
+        return { kind: 'async', searchResultsDbId: asyncId } as const;
+      }
+      return { kind: 'sync', envelope: envelope as BrapiEnvelope<T> } as const;
+    });
   }
 
   /**
@@ -227,38 +203,33 @@ export class BrapiClient {
     ctx: Context,
     options: BrapiRequestOptions = {},
   ): Promise<BrapiEnvelope<T>> {
-    return withRetry(
-      async ({ signal }) => {
-        const response = await this.doFetch(
-          this.buildUrl(baseUrl, path, options.params),
-          ctx,
-          {
-            method,
-            headers: {
-              ...this.buildHeaders(options.auth),
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(body),
-            signal,
+    return this.withBudget(`${method} ${path}`, ctx, options, async ({ signal }) => {
+      const response = await this.doFetch(
+        this.buildUrl(baseUrl, path, options.params),
+        ctx,
+        {
+          method,
+          headers: {
+            ...this.buildHeaders(options.auth),
+            'Content-Type': 'application/json',
           },
-          options.timeoutMs,
-        );
-        return this.parseEnvelope<T>(response);
-      },
-      {
-        operation: `brapi.${method.toLowerCase()} ${path}`,
-        context: ctx,
-        maxRetries: this.serverConfig.retryMaxAttempts,
-        baseDelayMs: this.serverConfig.retryBaseDelayMs,
-        signal: ctx.signal,
-      },
-    );
+          body: JSON.stringify(body),
+          signal,
+        },
+        options.timeoutMs,
+      );
+      return this.parseEnvelope<T>(response);
+    });
   }
 
   /**
    * Poll `GET /search/{noun}/{searchResultsDbId}`. Returns the envelope once
    * the server replies with 200. 202 means "still processing" — the method
-   * sleeps `searchPollIntervalMs` and retries until `searchPollTimeoutMs`.
+   * sleeps `searchPollIntervalMs` and polls again until `searchPollTimeoutMs`,
+   * `deadlineMs`, or the call deadline, whichever comes first, clipping each
+   * poll's timeout to it. The `Timeout` names the bound that ended it: the
+   * call deadline's reason, `retry_deadline_exceeded` for `deadlineMs` (as a
+   * request whose retries outlast it rejects), or none for the poll budget.
    */
   async getSearchResults<T>(
     baseUrl: string,
@@ -267,14 +238,45 @@ export class BrapiClient {
     ctx: Context,
     options: BrapiRequestOptions = {},
   ): Promise<BrapiEnvelope<T>> {
+    const operation = `GET /search/${noun}/${searchResultsDbId}`;
     const url = this.buildUrl(
       baseUrl,
       `/search/${noun}/${encodeURIComponent(searchResultsDbId)}`,
       options.params,
     );
-    const pollTimeoutMs = this.serverConfig.searchPollTimeoutMs;
+    const pollTimeoutMs = Math.min(
+      this.serverConfig.searchPollTimeoutMs,
+      options.deadlineMs ?? Number.POSITIVE_INFINITY,
+    );
     const pollIntervalMs = this.serverConfig.searchPollIntervalMs;
+    const attemptTimeoutMs = options.timeoutMs ?? this.serverConfig.requestTimeoutMs;
     const startedAt = Date.now();
+    const callAt = callDeadlineAt(ctx);
+    // Polling stops at the poll budget; a poll's own timeout is clipped only
+    // to the deadlines (call, caller), which also end the request in flight.
+    const stopAt = Math.min(callAt, startedAt + pollTimeoutMs);
+    const clipAt = Math.min(callAt, startedAt + (options.deadlineMs ?? Number.POSITIVE_INFINITY));
+    let polls = 0;
+    const callerBound =
+      options.deadlineMs !== undefined &&
+      options.deadlineMs <= this.serverConfig.searchPollTimeoutMs;
+    const expired = (cause?: unknown) =>
+      callAt <= startedAt + pollTimeoutMs
+        ? callDeadlineExceeded(operation, { sent: polls > 0 }, cause)
+        : timeout(
+            `Async search ${noun}/${searchResultsDbId} timed out after ${pollTimeoutMs}ms`,
+            {
+              noun,
+              searchResultsDbId,
+              pollTimeoutMs,
+              ...(callerBound && {
+                reason: 'retry_deadline_exceeded',
+                deadlineMs: options.deadlineMs,
+              }),
+              recovery: { hint: UPSTREAM_TIMEOUT_HINT },
+            },
+            cause === undefined ? undefined : { cause },
+          );
 
     for (;;) {
       if (ctx.signal.aborted) {
@@ -283,25 +285,78 @@ export class BrapiClient {
           searchResultsDbId,
         });
       }
-      if (Date.now() - startedAt > pollTimeoutMs) {
-        throw timeout(
-          `Async search ${noun}/${searchResultsDbId} timed out after ${pollTimeoutMs}ms`,
-          { noun, searchResultsDbId, pollTimeoutMs },
+      if (Date.now() >= stopAt) throw expired();
+
+      const clipRemainingMs = clipAt - Date.now();
+      const clipped = clipRemainingMs < attemptTimeoutMs;
+      let response: Response;
+      try {
+        polls += 1;
+        response = await this.doFetch(
+          url,
+          ctx,
+          { method: 'GET', headers: this.buildHeaders(options.auth) },
+          clipped ? clipRemainingMs : options.timeoutMs,
         );
+      } catch (err) {
+        if (clipped && isTimeout(err) && !ctx.signal.aborted) throw expired(err);
+        throw withTimeoutHint(err);
       }
 
-      const response = await this.doFetch(
-        url,
-        ctx,
-        { method: 'GET', headers: this.buildHeaders(options.auth) },
-        options.timeoutMs,
-      );
-
       if (response.status === 202) {
-        await sleep(pollIntervalMs, ctx);
+        await sleep(Math.min(pollIntervalMs, Math.max(0, stopAt - Date.now())), ctx);
         continue;
       }
       return this.parseEnvelope<T>(response);
+    }
+  }
+
+  /**
+   * Run one request under the call deadline (`callDeadlineAt(ctx)`) and the
+   * caller's tighter `deadlineMs`, whichever ends first, with the retry
+   * ladder inside that budget. A timed-out attempt is retried only when the
+   * remaining budget still fits a full attempt; a request the call deadline
+   * ends or keeps from starting rejects with the call-deadline `Timeout`, and
+   * every other escaping `Timeout` gains a recovery hint.
+   */
+  private async withBudget<T>(
+    operation: string,
+    ctx: Context,
+    options: BrapiRequestOptions,
+    attempt: (a: RetryAttempt) => Promise<T>,
+  ): Promise<T> {
+    const startedAt = Date.now();
+    const callRemainingMs = callDeadlineAt(ctx) - startedAt;
+    if (callRemainingMs <= 0) throw callDeadlineExceeded(operation, { sent: false });
+    const callBound = options.deadlineMs === undefined || callRemainingMs <= options.deadlineMs;
+    const deadlineMs = callBound ? callRemainingMs : (options.deadlineMs as number);
+    const attemptTimeoutMs = options.timeoutMs ?? this.serverConfig.requestTimeoutMs;
+    const isTransient = (error: unknown): boolean => {
+      if (!defaultIsTransient(error)) return false;
+      if (!isTimeout(error)) return true;
+      if (options.retryOnTimeout === false) return false;
+      return deadlineMs - (Date.now() - startedAt) >= attemptTimeoutMs;
+    };
+    try {
+      return await withRetry(attempt, {
+        operation: `brapi ${operation}`,
+        context: ctx,
+        maxRetries: options.retryMaxAttempts ?? this.serverConfig.retryMaxAttempts,
+        baseDelayMs: this.serverConfig.retryBaseDelayMs,
+        signal: ctx.signal,
+        deadlineMs,
+        isTransient,
+      });
+    } catch (err) {
+      if (callBound && isRetryDeadline(err)) {
+        const attempts = (err as McpError).data?.retryAttempts;
+        throw callDeadlineExceeded(
+          operation,
+          { sent: true, ...(typeof attempts === 'number' && { retryAttempts: attempts }) },
+          err,
+        );
+      }
+      throw withTimeoutHint(err);
     }
   }
 
@@ -433,6 +488,32 @@ function reclassifyHttpError(err: unknown, singleton: boolean = false): void {
   throw validationError(err.message, { ...data, reason: 'upstream_bad_request' }, options);
 }
 
+function isTimeout(error: unknown): error is McpError {
+  return error instanceof McpError && error.code === JsonRpcErrorCode.Timeout;
+}
+
+/** `withRetry`'s expiry of the `deadlineMs` it was given. */
+function isRetryDeadline(error: unknown): boolean {
+  return isTimeout(error) && error.data?.reason === 'retry_deadline_exceeded';
+}
+
+/** A `Timeout` leaving the client carries the upstream-timeout recovery hint. */
+function withTimeoutHint(error: unknown): unknown {
+  if (!isTimeout(error) || error.data?.recovery !== undefined) return error;
+  return new McpError(
+    error.code,
+    error.message,
+    { ...error.data, recovery: { hint: UPSTREAM_TIMEOUT_HINT } },
+    { cause: error },
+  );
+}
+
+async function readBinary(response: Response): Promise<BinaryResponse> {
+  const buffer = await response.arrayBuffer();
+  const contentType = response.headers.get('Content-Type') ?? 'application/octet-stream';
+  return { bytes: new Uint8Array(buffer), contentType };
+}
+
 function extractHttpStatus(err: McpError): number | undefined {
   const data = asRecord(err.data);
   if (!data) return;
@@ -508,6 +589,15 @@ export function isDialectAllDropped(err: unknown): err is McpError {
     err.data !== null &&
     (err.data as Record<string, unknown>).reason === DIALECT_ALL_DROPPED_REASON
   );
+}
+
+/**
+ * True when the fetch guard refused the request's host as a private or
+ * reserved address. A configuration refusal, not an outage or a sparse
+ * server: callers propagate it instead of degrading.
+ */
+export function isPrivateAddressBlocked(err: unknown): err is McpError {
+  return err instanceof McpError && err.data?.reason === PRIVATE_ADDRESS_BLOCKED_REASON;
 }
 
 /**

@@ -1,8 +1,9 @@
 /**
  * @fileoverview `brapi_get_image` — fetch image bytes for up to 5 imageDbIds
  * and return them inline as `type: image` content blocks. Tries the BrAPI
- * `/images/{id}/imagecontent` endpoint when the server advertises it;
- * otherwise falls back to the `imageURL` field from the image metadata.
+ * `/images/{id}/imagecontent` endpoint when the server advertises it for GET;
+ * otherwise, or when that request fails, falls back to the `imageURL` field
+ * from the image metadata.
  * Hard cap of 5 images per call to prevent context explosion.
  *
  * @module mcp-server/tools/definitions/brapi-get-image.tool
@@ -18,6 +19,7 @@ import {
   AliasInput,
   appendPassthroughLines,
   buildRequestOptions,
+  NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
 
@@ -55,7 +57,11 @@ const ImageMetadataSchema = z
 const ImagePayloadSchema = z
   .object({
     imageDbId: z.string().describe('Server-side identifier for the image.'),
-    mimeType: z.string().describe('Actual MIME type of the returned bytes.'),
+    mimeType: z
+      .string()
+      .describe(
+        'Content-Type of the byte response, else the metadata mimeType, else application/octet-stream.',
+      ),
     sizeBytes: z.number().int().nonnegative().describe('Size of the returned byte payload.'),
     source: z.enum(['imagecontent', 'imageURL']).describe('How the bytes were fetched.'),
     data: z.string().describe('Base64-encoded image bytes.'),
@@ -78,7 +84,7 @@ const ImageWarningSchema = z
   .describe('Per-image advisory for loaded-but-suspect content (e.g. non-image MIME).');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   images: z.array(ImagePayloadSchema).describe('Successfully loaded images.'),
   errors: z.array(ImageErrorSchema).describe('Images that could not be loaded, one entry per id.'),
   warnings: z
@@ -91,28 +97,87 @@ const OutputSchema = z.object({
 type Output = z.infer<typeof OutputSchema>;
 
 export const brapiGetImage = tool('brapi_get_image', {
-  description: `Fetch image bytes for up to ${MAX_IMAGES_PER_CALL} imageDbIds and return them inline as \`type: image\` content blocks. Falls back to the metadata \`imageURL\` when the server lacks dedicated image-content delivery. No filesystem side-effects.`,
+  description: `Fetch image bytes for up to ${MAX_IMAGES_PER_CALL} imageDbIds and return them inline as \`type: image\` content blocks. Falls back to the metadata \`imageURL\` when the server lacks dedicated image-content delivery or that request fails. No filesystem side-effects.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_get_image.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_get_image.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_get_image in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_get_image.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_get_image.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_get_image.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_get_image.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
       reason: 'images_unsupported',
       code: JsonRpcErrorCode.NotFound,
-      when: 'BrAPI server does not advertise /images in /serverinfo',
+      when: 'The BrAPI server does not advertise /images',
       recovery:
         'Run brapi_server_info to inspect the advertised endpoints, or call brapi_connect with a different alias for a server that exposes /images.',
     },
   ] as const,
   input: z.object({
     imageDbIds: z
-      .array(z.string().min(1))
+      .array(NonBlankString)
       .min(1)
       .max(MAX_IMAGES_PER_CALL)
       .describe(`1–${MAX_IMAGES_PER_CALL} image identifiers.`),

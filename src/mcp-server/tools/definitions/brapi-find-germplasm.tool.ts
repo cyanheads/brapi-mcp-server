@@ -2,7 +2,7 @@
  * @fileoverview `brapi_find_germplasm` — search germplasm by name, synonym,
  * accession, attribute, or free text. Matches BrAPI's registered-synonym
  * semantics. Returns distributions for crop / genus / species / collection
- * and spills to a dataframe when the upstream total exceeds loadLimit.
+ * and spills to a dataframe when results[] holds fewer rows than matched.
  *
  * @module mcp-server/tools/definitions/brapi-find-germplasm.tool
  */
@@ -26,17 +26,25 @@ import {
   DataframeHandleSchema,
   dedupSynonymsByIdentity,
   dialectRowMapper,
+  discloseInlineTrim,
   ExtraFiltersInput,
+  FreeTextInput,
+  InlineTrimEnrichment,
   LoadLimitInput,
   loadInitialFindPage,
   type MaybeSpillInput,
   maybeSpill,
   mergeFilters,
+  NonBlankString,
+  renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  renderMoreRowsLine,
+  renderWarningsTrailer,
   requireRegisteredConnection,
   resolveFindRoute,
+  spillWalkCeiling,
 } from '../shared/find-helpers.js';
 
 const GermplasmRowSchema = z
@@ -88,10 +96,12 @@ const GermplasmRowSchema = z
   .describe('One BrAPI germplasm record.');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   results: z
     .array(GermplasmRowSchema)
-    .describe('Germplasm rows returned in-context (up to loadLimit).'),
+    .describe(
+      'Leading matched germplasm rows, up to loadLimit and a 24,000-byte budget, whichever binds first.',
+    ),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
@@ -109,9 +119,9 @@ const OutputSchema = z.object({
         .record(z.string(), z.number())
         .describe('ISO country code → count of rows from that country.'),
     })
-    .describe('Value frequency per field across the full result set.'),
+    .describe('Value frequency per field across every matched row fetched.'),
   dataframe: DataframeHandleSchema.optional().describe(
-    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
+    'The matched rows, staged as a dataframe when results[] holds fewer.',
   ),
 });
 
@@ -141,15 +151,74 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   description:
-    'Find germplasm by name, synonym, accession number, PUI, crop, or free-text query. Matches across registered synonyms. When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL) instead of paging row-by-row.',
+    'Find germplasm by name, synonym, accession number, PUI, crop, or free-text query. Matches across registered synonyms. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL) instead of paging row-by-row.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_germplasm.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_find_germplasm.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_find_germplasm in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_find_germplasm.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_find_germplasm.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_find_germplasm.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_find_germplasm.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -163,24 +232,24 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   ] as const,
   input: z.object({
     alias: AliasInput,
-    names: z.array(z.string()).optional().describe('Filter by germplasm display names.'),
-    germplasmDbIds: z.array(z.string()).optional().describe('Filter by DbIds.'),
-    germplasmPUIs: z.array(z.string()).optional().describe('Persistent unique identifiers.'),
+    names: z.array(NonBlankString).optional().describe('Filter by germplasm display names.'),
+    germplasmDbIds: z.array(NonBlankString).optional().describe('Filter by DbIds.'),
+    germplasmPUIs: z.array(NonBlankString).optional().describe('Persistent unique identifiers.'),
     accessionNumbers: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe('Filter by accession numbers (gene-bank catalog codes).'),
-    crops: z.array(z.string()).optional().describe('Filter by common crop names.'),
-    synonyms: z.array(z.string()).optional().describe('Match registered synonyms.'),
-    collections: z.array(z.string()).optional().describe('Filter by germplasm collection names.'),
-    genus: z.string().optional().describe('Botanical genus.'),
-    species: z.string().optional().describe('Botanical species.'),
-    text: z
-      .string()
+    crops: z.array(NonBlankString).optional().describe('Filter by common crop names.'),
+    synonyms: z.array(NonBlankString).optional().describe('Match registered synonyms.'),
+    collections: z
+      .array(NonBlankString)
       .optional()
-      .describe(
-        'Free-text query. Applied client-side as a substring match on returned rows (germplasmName, accessionNumber, defaultDisplayName, registered synonyms) — no BrAPI server reliably supports a server-side free-text filter, so combine with `crops` / `genus` / etc. to narrow the upstream pull first.',
-      ),
+      .describe('Filter by germplasm collection names.'),
+    genus: NonBlankString.optional().describe('Botanical genus.'),
+    species: NonBlankString.optional().describe('Botanical species.'),
+    text: FreeTextInput.optional().describe(
+      'Free-text query. Applied client-side as a case-insensitive substring match on germplasmName, germplasmPUI, accessionNumber, defaultDisplayName, and registered synonyms — no BrAPI server reliably supports a server-side free-text filter. Every upstream row is scanned when the filtered set fits one dataframe walk; above that, a miss on the first page stops the scan, and the warnings report how many rows were checked. Combine with `crops` / `genus` / etc. to narrow the upstream pull first.',
+    ),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
@@ -191,40 +260,28 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   // notices. Populated via ctx.enrich() so it reaches both structuredContent
   // and the content[] trailer without living in the domain return.
   enrichment: {
-    totalCount: z.number().int().nonnegative().describe('Total rows reported by the server.'),
+    totalCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe('Total rows reported by the server, else the rows scanned.'),
     returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
       .record(z.string(), z.unknown())
-      .describe('The final filter map sent to the server (named + extraFilters).'),
+      .describe('Filter map sent upstream (named filters plus extraFilters).'),
     refinementHint: z
       .string()
       .optional()
-      .describe('Suggested next-step query refinement when the result set is large.'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Guidance when no rows were returned — how to broaden filters or retry.'),
+      .describe('Suggested refinement when the result set is large.'),
+    ...InlineTrimEnrichment,
     warnings: z
       .array(z.string())
       .describe('Advisory messages (filter overrides, partial data, capability gaps).'),
   },
 
   enrichmentTrailer: {
-    appliedFilters: {
-      render: (filters) => {
-        const entries = Object.entries(filters);
-        if (entries.length === 0) return '**Applied Filters:** none';
-        const lines = entries.map(([k, v]) => {
-          const display = SERVER_TO_USER[k] ?? k;
-          return `- **${display}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`;
-        });
-        return `**Applied Filters:**\n${lines.join('\n')}`;
-      },
-    },
-    warnings: {
-      render: (ws) => (ws.length > 0 ? ws.map((w) => `- ${w}`).join('\n') : '_none_'),
-      label: 'Warnings',
-    },
+    appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
+    warnings: { render: renderWarningsTrailer },
   },
 
   async handler(input, ctx) {
@@ -284,23 +341,26 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     // Free-text matching is client-side. No BrAPI server reliably honors a
     // free-text query parameter on /germplasm — earlier versions of this tool
     // sent `searchText`, which CassavaBase and the Test Server both silently
-    // ignore. Decide upfront whether to spill: when text is set and matches
-    // 0 rows on the first page, pulling more pages is unlikely to surface
-    // hits and we'd just bury the agent in 50k unrelated rows.
+    // ignore. Names cluster by naming scheme and arrive in DbId order, so a
+    // first-page miss says little about the rest: when the upstream set fits
+    // one spill walk, scan all of it (only matches are persisted). Above the
+    // walk ceiling a full scan is impossible anyway, so a first-page miss
+    // stops at the first page instead of walking 50 pages of a partial scan.
+    // An upstream reporting no total is walked: its size is unknown.
     const text = input.text;
-    const wouldSpill =
-      firstPage.hasMore && firstPage.totalCount !== undefined && firstPage.totalCount > loadLimit;
-    const firstPageMatched = text
-      ? firstPage.rows.filter((row) => rowMatchesText(row, text))
-      : firstPage.rows;
+    const scanCeiling = spillWalkCeiling();
     const skipSpillForTextMiss = Boolean(
-      text && wouldSpill && firstPage.rows.length > 0 && firstPageMatched.length === 0,
+      text &&
+        firstPage.hasMore &&
+        (firstPage.totalCount ?? 0) > scanCeiling &&
+        firstPage.rows.length > 0 &&
+        !firstPage.rows.some((row) => rowMatchesText(row, text)),
     );
 
     const spillInput: MaybeSpillInput<Record<string, unknown>> = {
       firstPage: skipSpillForTextMiss
-        ? // Treat the first page as the whole result — no further pages pulled.
-          { rows: firstPage.rows, hasMore: false, pagesFetched: 1 }
+        ? // Scan the first page only — no further pages pulled; the total keeps hasMore honest.
+          { ...firstPage, hasMore: false }
         : firstPage,
       client,
       connection,
@@ -311,6 +371,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       loadLimit,
       ctx,
       bridge,
+      warnings,
       // CassavaBase repeats every synonym entry 11× per record. Dedup at the
       // spillover layer so the in-context view and the dataframe see
       // the cleaned shape consistently.
@@ -319,7 +380,8 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     if (normalizeRow) spillInput.normalizeRow = normalizeRow;
     if (text) spillInput.rowFilter = (row) => rowMatchesText(row, text);
 
-    const { fullRows, dataframe } = await maybeSpill(spillInput);
+    const spill = await maybeSpill(spillInput);
+    const { fullRows, dataframe, rowsScanned, scanComplete, results, hasMore } = spill;
 
     const distributions = {
       commonCropName: computeDistribution(fullRows, (r) => asString(r.commonCropName)),
@@ -357,8 +419,8 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
-    const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+    const totalCount = firstPage.totalCount ?? rowsScanned;
+    const refinementHint = buildRefinementHint(spill, distributions, {
       availableFilters: [
         'names',
         'germplasmDbIds',
@@ -373,47 +435,36 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       ],
     });
 
-    if (text) {
-      if (skipSpillForTextMiss) {
-        warnings.push(
-          `Free-text '${text}' matched 0 of ${firstPage.rows.length} first-page rows out of ${totalCount} upstream. Spillover skipped — pulling more pages is unlikely to surface hits. Use exact filters: \`names: ['${text}']\`, \`accessionNumbers: ['${text}']\`, or \`germplasmDbIds: ['${text}']\` for direct lookup.`,
-        );
-      } else if (fullRows.length === 0 && firstPage.rows.length > 0) {
-        warnings.push(
-          `Free-text '${text}' matched 0 of ${firstPage.rows.length} returned rows. Use exact filters (\`names\`, \`accessionNumbers\`, \`germplasmDbIds\`) for direct lookup, or check spelling.`,
-        );
-      } else if (dataframe) {
-        warnings.push(
-          `Free-text '${text}' filtered the dataframe to ${dataframe.rowCount} matched row(s) across the upstream union.`,
-        );
-      } else if (fullRows.length < firstPage.rows.length) {
-        warnings.push(
-          `Free-text '${text}' narrowed in-context view to ${fullRows.length} of ${firstPage.rows.length} returned rows.`,
-        );
-      }
+    if (text && rowsScanned > 0) {
+      warnings.push(
+        textScanWarning(text, fullRows.length, rowsScanned, {
+          upstreamTotal: firstPage.totalCount,
+          scanComplete,
+          scanCeiling,
+        }),
+      );
     }
-
-    const inContextRows = fullRows.slice(0, loadLimit);
 
     const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
     ctx.enrich({
       totalCount,
-      returnedCount: inContextRows.length,
+      returnedCount: results.length,
       appliedFilters,
       warnings,
       ...(refinementHint ? { refinementHint } : {}),
     });
-    if (inContextRows.length === 0)
+    if (results.length === 0)
       ctx.enrich.notice(
         warnings.length > 0
           ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
           : 'No germplasm matched the applied filters. Try broadening names, crops, genus, species, or collections.',
       );
+    discloseInlineTrim(ctx, spill, loadLimit);
 
     const result: Output = {
       alias: connection.alias,
-      results: inContextRows as z.infer<typeof GermplasmRowSchema>[],
-      hasMore: firstPage.hasMore,
+      results: results as z.infer<typeof GermplasmRowSchema>[],
+      hasMore,
       distributions,
     };
     if (dataframe) result.dataframe = dataframe;
@@ -431,12 +482,8 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       }),
     );
     lines.push('');
-    if (result.hasMore) {
-      lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
-      );
-      lines.push('');
-    }
+    const moreRows = renderMoreRowsLine(result);
+    if (moreRows) lines.push(moreRows, '');
     lines.push('## Distributions');
     lines.push(
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
@@ -506,6 +553,39 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/**
+ * Describe what a free-text scan examined: the full upstream set, or the first
+ * N rows of it. Reports rows scanned, never the inline page size, so a miss
+ * reads as "not found in these rows" rather than "not found".
+ */
+function textScanWarning(
+  text: string,
+  matched: number,
+  scanned: number,
+  scan: { scanCeiling: number; scanComplete: boolean; upstreamTotal: number | undefined },
+): string {
+  const { scanCeiling, upstreamTotal } = scan;
+  const fullScan = scan.scanComplete;
+  const parts = [
+    fullScan
+      ? `Free-text '${text}' matched ${matched} of ${scanned} row(s) scanned (the full upstream set).`
+      : upstreamTotal === undefined
+        ? `Free-text '${text}' matched ${matched} of the first ${scanned} row(s) scanned; the upstream reported no total, and rows past them were not scanned.`
+        : `Free-text '${text}' matched ${matched} of the first ${scanned} row(s) scanned out of ${upstreamTotal} upstream; the remaining rows were not scanned.`,
+  ];
+  if (!fullScan && (upstreamTotal === undefined || upstreamTotal > scanCeiling)) {
+    parts.push(
+      `Narrow with server-side filters (crops, genus, species, collections) to bring the set under the ${scanCeiling}-row scan ceiling.`,
+    );
+  }
+  if (matched === 0) {
+    parts.push(
+      `For an exact name, accession number, or DbId, use names, accessionNumbers, or germplasmDbIds${fullScan ? '; otherwise check spelling' : ''}.`,
+    );
+  }
+  return parts.join(' ');
+}
 
 function rowMatchesText(row: Record<string, unknown>, text: string): boolean {
   const needle = text.toLowerCase();

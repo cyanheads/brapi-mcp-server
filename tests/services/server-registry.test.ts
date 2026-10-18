@@ -6,11 +6,14 @@
  * @module tests/services/server-registry.test
  */
 
+import { createServer, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
+import { CALL_DEADLINE_MS, UPSTREAM_TIMEOUT_HINT } from '@/services/brapi-client/index.js';
 import { ServerRegistry, type TokenFetcher } from '@/services/server-registry/server-registry.js';
 
 const BASE_URL = 'https://brapi.example.org/brapi/v2';
@@ -147,16 +150,16 @@ describe('ServerRegistry', () => {
       expect(registered.resolvedAuth?.expiresAt).toBeDefined();
     });
 
-    it('rejects SGN token exchange that omits access_token', async () => {
-      tokenFetcher.mockResolvedValue({ error: 'bad creds' });
+    it.each([
+      ['SGN', { mode: 'sgn', username: 'alice', password: 'wrong' }],
+      ['OAuth2', { mode: 'oauth2', clientId: 'client-1', clientSecret: 'bad' }],
+    ] as const)('rejects a %s token exchange that omits access_token', async (_mode, auth) => {
+      tokenFetcher.mockResolvedValue({ error: 'invalid_client' });
       const ctx = createMockContext({ tenantId: 't1' });
 
-      await expect(
-        registry.register(ctx, {
-          baseUrl: BASE_URL,
-          auth: { mode: 'sgn', username: 'alice', password: 'wrong' },
-        }),
-      ).rejects.toMatchObject({ code: JsonRpcErrorCode.Forbidden });
+      await expect(registry.register(ctx, { baseUrl: BASE_URL, auth })).rejects.toMatchObject({
+        code: JsonRpcErrorCode.Forbidden,
+      });
     });
 
     it('exchanges OAuth2 client credentials for a bearer token', async () => {
@@ -198,28 +201,47 @@ describe('ServerRegistry', () => {
       expect(tokenFetcher.mock.calls[0]?.[0]).toBe('https://auth.example.org/oauth/token');
     });
 
-    it('rejects OAuth2 token exchange that omits access_token', async () => {
-      tokenFetcher.mockResolvedValue({ error: 'invalid_client' });
-      const ctx = createMockContext({ tenantId: 't1' });
-
-      await expect(
-        registry.register(ctx, {
+    it('clips the token exchange timeout to what remains of the call deadline', async () => {
+      tokenFetcher.mockResolvedValue({ access_token: 'tok' });
+      const slowConfigRegistry = new ServerRegistry(
+        { ...baseConfig, requestTimeoutMs: 120_000 },
+        tokenFetcher as unknown as TokenFetcher,
+      );
+      for (const mode of ['sgn', 'oauth2'] as const) {
+        tokenFetcher.mockClear();
+        const ctx = {
+          ...createMockContext({ tenantId: 't1' }),
+          timestamp: new Date(Date.now() - (CALL_DEADLINE_MS - 2_000)).toISOString(),
+        };
+        await slowConfigRegistry.register(ctx, {
           baseUrl: BASE_URL,
-          auth: { mode: 'oauth2', clientId: 'client-1', clientSecret: 'bad' },
-        }),
-      ).rejects.toMatchObject({ code: JsonRpcErrorCode.Forbidden });
+          auth:
+            mode === 'sgn'
+              ? { mode, username: 'u', password: 'p' }
+              : { mode, clientId: 'c', clientSecret: 's' },
+        });
+        const timeoutMs = tokenFetcher.mock.calls[0]?.[3]?.timeoutMs;
+        expect(timeoutMs).toBeGreaterThan(0);
+        expect(timeoutMs).toBeLessThanOrEqual(2_000);
+      }
     });
 
-    it('rejects aliases with unsupported characters', async () => {
-      const ctx = createMockContext({ tenantId: 't1' });
-      await expect(
-        registry.register(ctx, { baseUrl: BASE_URL, alias: 'has spaces' }),
-      ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
+    it('keeps the configured token exchange timeout when the call deadline is further off', async () => {
+      tokenFetcher.mockResolvedValue({ access_token: 'tok' });
+      await registry.register(createMockContext({ tenantId: 't1' }), {
+        baseUrl: BASE_URL,
+        auth: { mode: 'sgn', username: 'u', password: 'p' },
+      });
+      expect(tokenFetcher.mock.calls[0]?.[3]?.timeoutMs).toBe(baseConfig.requestTimeoutMs);
     });
 
-    it('rejects non-HTTP base URLs', async () => {
+    it.each([
+      ['an alias with unsupported characters', { baseUrl: BASE_URL, alias: 'has spaces' }],
+      ['a non-HTTP base URL', { baseUrl: 'ftp://example.com' }],
+      ['a malformed base URL', { baseUrl: 'not-a-url' }],
+    ])('rejects %s', async (_label, input) => {
       const ctx = createMockContext({ tenantId: 't1' });
-      await expect(registry.register(ctx, { baseUrl: 'ftp://example.com' })).rejects.toMatchObject({
+      await expect(registry.register(ctx, input)).rejects.toMatchObject({
         code: JsonRpcErrorCode.ValidationError,
       });
     });
@@ -232,13 +254,6 @@ describe('ServerRegistry', () => {
       expect(err).toMatchObject({ code: JsonRpcErrorCode.ValidationError });
       expect(JSON.stringify({ m: err.message, d: err.data })).not.toContain('hunter2');
       expect(await registry.getOptional(ctx, 'default')).toBeNull();
-    });
-
-    it('rejects malformed base URLs', async () => {
-      const ctx = createMockContext({ tenantId: 't1' });
-      await expect(registry.register(ctx, { baseUrl: 'not-a-url' })).rejects.toMatchObject({
-        code: JsonRpcErrorCode.ValidationError,
-      });
     });
   });
 
@@ -392,5 +407,227 @@ describe('ServerRegistry', () => {
       const fetched = await sharedRegistry.get(ctxB, 'collab');
       expect(fetched.baseUrl).toBe(BASE_URL);
     });
+  });
+});
+
+describe('ServerRegistry token exchange over a real socket', () => {
+  const realFetch = globalThis.fetch;
+  let server: Server;
+  let origin: string;
+  let tokenHits: number;
+  let answer: ((res: ServerResponse) => void) | undefined;
+
+  beforeEach(async () => {
+    tokenHits = 0;
+    answer = undefined;
+    server = createServer((req, res) => {
+      if (new URL(req.url ?? '/', 'http://stub').pathname !== '/brapi/v2/token') {
+        res.writeHead(404).end();
+        return;
+      }
+      tokenHits += 1;
+      answer?.(res); // No answer: the exchange stalls.
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}/brapi/v2`;
+    const localOrigin = new URL(origin).origin;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+        new URL(String(input instanceof Request ? input.url : input)).origin === localOrigin
+          ? realFetch(input, init)
+          : Promise.reject(new Error(`Unmocked global fetch: ${String(input)}`)),
+      ),
+    );
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  const realRegistry = (config: Partial<ServerConfig> = {}) =>
+    new ServerRegistry({ ...baseConfig, allowPrivateIps: true, ...config });
+  const AUTHS = [
+    ['sgn', { mode: 'sgn', username: 'u', password: 'p' }],
+    ['oauth2', { mode: 'oauth2', clientId: 'c', clientSecret: 's' }],
+  ] as const;
+
+  it.each(AUTHS)(
+    'a %s /token that never answers fails as a retryable Timeout, not a credentials problem',
+    async (_mode, auth) => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      const startedAt = Date.now();
+
+      const err = await realRegistry({ requestTimeoutMs: 300 })
+        .register(ctx, { baseUrl: origin, auth })
+        .catch((e: unknown) => e as McpError);
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(err.data).toMatchObject({
+        retryable: true,
+        recovery: { hint: UPSTREAM_TIMEOUT_HINT },
+      });
+      expect(err.data?.reason).toBeUndefined();
+      expect(err.message).toMatch(/token exchange .* did not answer within 300 ms/i);
+      expect(err.message).not.toMatch(/credentials/i);
+      expect(tokenHits).toBe(1);
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      expect((await ctx.state.list('brapi/conn/')).items).toEqual([]);
+    },
+  );
+
+  it('a stall the call deadline cuts short reports the call deadline', async () => {
+    const ctx = {
+      ...createMockContext({ tenantId: 't1' }),
+      // Enough of the deadline left that a loaded machine still sends the request.
+      timestamp: new Date(Date.now() - (CALL_DEADLINE_MS - 1_000)).toISOString(),
+    };
+
+    const err = await realRegistry({ requestTimeoutMs: 30_000 })
+      .register(ctx, { baseUrl: origin, auth: AUTHS[0][1] })
+      .catch((e: unknown) => e as McpError);
+
+    expect(err.code).toBe(JsonRpcErrorCode.Timeout);
+    expect(err.data).toMatchObject({
+      reason: 'call_deadline_exceeded',
+      operation: 'POST /token',
+      recovery: { hint: UPSTREAM_TIMEOUT_HINT },
+    });
+    expect(tokenHits).toBe(1);
+  });
+
+  it('a rejected exchange keeps auth_token_exchange_failed', async () => {
+    answer = (res) => res.writeHead(401, { 'Content-Type': 'text/plain' }).end('denied');
+    const err = await realRegistry()
+      .register(createMockContext({ tenantId: 't1' }), { baseUrl: origin, auth: AUTHS[0][1] })
+      .catch((e: unknown) => e as McpError);
+
+    expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
+    expect(err.data).toMatchObject({ reason: 'auth_token_exchange_failed' });
+  });
+
+  it.each(AUTHS)(
+    'a %s /token on a private address fails private_address_blocked, not a credentials problem',
+    async (_mode, auth) => {
+      answer = (res) =>
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"access_token":"t"}');
+      const ctx = createMockContext({ tenantId: 't1' });
+
+      const err = await realRegistry({ allowPrivateIps: false })
+        .register(ctx, { baseUrl: origin, auth })
+        .catch((e: unknown) => e as McpError);
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data).toMatchObject({
+        reason: 'private_address_blocked',
+        tokenUrl: `${origin}/token`,
+      });
+      expect(err.data?.recovery).toBeUndefined();
+      expect(tokenHits).toBe(0);
+      expect((await ctx.state.list('brapi/conn/')).items).toEqual([]);
+    },
+  );
+
+  describe("never echoes a token URL's userinfo or query", () => {
+    /** The stub's /token, carrying userinfo and a query secret. */
+    const secretTokenUrl = () => {
+      const u = new URL(`${origin}/token`);
+      u.username = 'user';
+      u.password = 'pass';
+      u.search = '?client_secret=leak';
+      return u.toString();
+    };
+    const SECRETS = ['user:pass', 'pass@', 'client_secret', 'leak'];
+    const json = { 'Content-Type': 'application/json' };
+    const register = () =>
+      realRegistry({ requestTimeoutMs: 300 })
+        .register(createMockContext({ tenantId: 't1' }), {
+          baseUrl: origin,
+          auth: { mode: 'oauth2', clientId: 'c', clientSecret: 's', tokenUrl: secretTokenUrl() },
+        })
+        .catch((e: unknown) => e as McpError);
+    const expectNoSecrets = (err: McpError) => {
+      expect(err.data?.tokenUrl).toBe(`${origin}/token`);
+      // The log record carries the whole cause chain, so every link is checked.
+      const chain: unknown[] = [];
+      for (let e: unknown = err; e instanceof Error; e = e.cause) {
+        chain.push({ message: e.message, data: (e as { data?: unknown }).data });
+      }
+      const surface = JSON.stringify(chain);
+      for (const secret of SECRETS) expect(surface).not.toContain(secret);
+    };
+
+    it('when the runtime refuses to send a URL carrying userinfo', async () => {
+      const err = await register();
+
+      expect(err.code).toBe(JsonRpcErrorCode.Forbidden);
+      expect(err.data?.reason).toBe('auth_token_exchange_failed');
+      expect(tokenHits).toBe(0);
+      expectNoSecrets(err);
+    });
+
+    it.each([
+      ['a stall', undefined, JsonRpcErrorCode.Timeout],
+      [
+        'a rejection',
+        (res: ServerResponse) => res.writeHead(401, { 'Content-Type': 'text/plain' }).end('no'),
+        JsonRpcErrorCode.Forbidden,
+      ],
+      [
+        'an answer without access_token',
+        (res: ServerResponse) => res.writeHead(200, json).end('{"error":"invalid_client"}'),
+        JsonRpcErrorCode.Forbidden,
+      ],
+      [
+        'an empty body',
+        (res: ServerResponse) => res.writeHead(200, json).end(),
+        JsonRpcErrorCode.ServiceUnavailable,
+      ],
+      [
+        'a non-JSON body',
+        (res: ServerResponse) => res.writeHead(200, json).end('<html>'),
+        JsonRpcErrorCode.ServiceUnavailable,
+      ],
+    ] as const)('on %s, names only its origin and path', async (_label, respond, code) => {
+      answer = respond;
+      // Node's fetch refuses a URL carrying userinfo before sending it, while
+      // Bun sends it; drop the userinfo on the way out so the stub answers.
+      const localOrigin = new URL(origin).origin;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const u = new URL(String(input instanceof Request ? input.url : input));
+          if (u.origin !== localOrigin) return Promise.reject(new Error(`Unmocked: ${u.origin}`));
+          u.username = '';
+          u.password = '';
+          return realFetch(u, init);
+        }),
+      );
+
+      const err = await register();
+
+      expect(err).toBeInstanceOf(McpError);
+      expect(err.code).toBe(code);
+      expect(tokenHits).toBe(1);
+      expectNoSecrets(err);
+    });
+  });
+
+  it('a caller cancelling a stalled exchange gets RequestCancelled, not a credentials failure', async () => {
+    const controller = new AbortController();
+    const ctx = createMockContext({ tenantId: 't1', signal: controller.signal });
+    const pending = realRegistry({ requestTimeoutMs: 5_000 })
+      .register(ctx, { baseUrl: origin, auth: AUTHS[0][1] })
+      .catch((e: unknown) => e as McpError);
+    await vi.waitFor(() => expect(tokenHits).toBe(1));
+    controller.abort();
+
+    const err = await pending;
+    expect(err.code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(err.data?.reason).not.toBe('auth_token_exchange_failed');
   });
 });

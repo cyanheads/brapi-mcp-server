@@ -18,7 +18,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
@@ -27,20 +27,31 @@ import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { buildUniqueColumns } from '../shared/canvas-columns.js';
 import {
   AliasInput,
+  buildExtraFilterChecks,
+  checkFilterMatchRates,
   DataframeHandleSchema,
   ExtraFiltersInput,
   LoadLimitInput,
+  NonBlankString,
   renderDataframeHandle,
   requireRegisteredConnection,
+  stagedDataframeNotice,
 } from '../shared/find-helpers.js';
-import { type NormObs, pullObservationsForStudies } from '../shared/observations.js';
+import {
+  describeError,
+  describeTruncation,
+  type NormObs,
+  pullObservationsForStudies,
+  type RawObservationRow,
+  type StudyObservationOutcome,
+} from '../shared/observations.js';
 
 // ---------------------------------------------------------------------------
 // Output schema
 // ---------------------------------------------------------------------------
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   studies: z.array(z.string()).describe('studyDbIds that were queried to build the matrix.'),
   shape: z
     .enum(['wide', 'long'])
@@ -70,14 +81,16 @@ const OutputSchema = z.object({
   variableLegend: z
     .record(z.string(), z.string())
     .describe(
-      'Mapping of safe column identifier → observationVariableName. Wide-matrix column names are SQL-safe identifiers derived from observationVariableDbId (sanitized for DuckDB); consult this map to resolve a column back to its variable display name.',
+      'Wide-matrix column name (SQL-safe, derived from observationVariableDbId) → observationVariableName.',
     ),
   dataframe: DataframeHandleSchema.optional().describe(
-    'Canvas dataframe handle for the materialized matrix. Omitted when no observations were found. Query with brapi_dataframe_query (SQL). Long-form columns: germplasmDbId, observationVariableDbId, studyDbId, value, replicateIndex. Wide-form columns: germplasmDbId, germplasmName, one column per variable (SQL-safe identifier derived from observationVariableDbId — see variableLegend).',
+    'The matrix, staged; absent when no observations were found. Long-form columns: germplasmDbId, observationVariableDbId, studyDbId, value, replicateIndex. Wide-form columns: germplasmDbId, germplasmName, then one per variable (see variableLegend).',
   ),
   warnings: z
     .array(z.string())
-    .describe('Advisory messages (empty studies, non-numeric aggregation skips, fallback paths).'),
+    .describe(
+      'Advisory messages (empty or failed studies, partial study scans, extraFilters the rows contradict or cannot verify, non-numeric aggregation skips, fallback paths).',
+    ),
 });
 
 type Output = z.infer<typeof OutputSchema>;
@@ -88,23 +101,82 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
   description:
-    'Pull observations across one or more studies and pivot them into a germplasm × trait matrix materialized as a canvas dataframe. Returns a dataframe handle (query with brapi_dataframe_query) plus a summary of dimensions and aggregate method. Long-form output is suitable for downstream GROUP BY analysis by study, germplasm, or variable.',
+    'Pull observations across one or more studies and pivot them into a germplasm × trait matrix materialized as a canvas dataframe. Returns a dataframe handle (read it with brapi_dataframe_describe and brapi_dataframe_query) plus a summary of dimensions and aggregate method. Long-form output is suitable for downstream GROUP BY analysis by study, germplasm, or variable. A study whose pull fails is named in warnings and the rest still build the matrix; the call fails only when every study failed.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_build_phenotype_matrix.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_build_phenotype_matrix.',
       thrownBy: 'service',
     },
     {
-      reason: 'all_filters_dropped',
-      code: JsonRpcErrorCode.ValidationError,
-      when: 'The active dialect dropped every filter supplied — the call would silently widen to the unfiltered baseline',
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
       recovery:
-        'Drop unsupported filters or use studies / germplasm / variables to scope the query to supported filter paths on the active dialect.',
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_build_phenotype_matrix in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_build_phenotype_matrix.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_build_phenotype_matrix.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_build_phenotype_matrix.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_build_phenotype_matrix.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'dialect_all_filters_dropped',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'For every requested study, the active dialect dropped the study filter on /observationunits, so the pull would have widened to unfiltered rows',
+      recovery:
+        'This server cannot scope observation units by study; use brapi_find_observations with germplasm or variable filters instead.',
       thrownBy: 'service',
     },
     {
@@ -118,19 +190,19 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
   input: z.object({
     alias: AliasInput,
     studies: z
-      .array(z.string())
+      .array(NonBlankString)
       .min(1)
       .describe(
         'studyDbIds to include in the matrix. At least one is required — the tool is study-anchored to avoid full-table scans.',
       ),
     variables: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe(
         'Optional subset of observationVariableDbIds to include. Omit to include all variables found in the queried studies.',
       ),
     germplasm: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe(
         'Optional subset of germplasmDbIds to include. Omit to include all germplasm found in the queried studies.',
@@ -147,7 +219,9 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       .describe(
         'How to aggregate replicate observations (multiple readings of the same variable on the same germplasm). `mean` and `median` attempt numeric conversion and skip non-numeric values (e.g. categorical traits). `first` keeps the first value seen. `all` keeps every replicate as a separate row (produces long-form output even when shape is "wide"). Default: `mean`.',
       ),
-    loadLimit: LoadLimitInput,
+    loadLimit: LoadLimitInput.describe(
+      'Cap on matching observations collected per study. Omit for the deployment default. A study that stops at it is reported as truncated.',
+    ),
     extraFilters: ExtraFiltersInput,
   }),
   output: OutputSchema,
@@ -155,7 +229,9 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     truncated: z
       .boolean()
       .optional()
-      .describe('True when at least one study saturated the per-study loadLimit.'),
+      .describe(
+        "True when at least one study's observation scan stopped before the study's upstream total — at loadLimit, the page cap, a failed page, or the call deadline.",
+      ),
     shown: z
       .number()
       .int()
@@ -167,11 +243,13 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       .int()
       .positive()
       .optional()
-      .describe('Per-study observation cap that was applied.'),
+      .describe('Per-study cap on matching observations that was applied.'),
     notice: z
       .string()
       .optional()
-      .describe('Guidance for reaching the observations this call left out.'),
+      .describe(
+        'Guidance for reaching the observations this call left out, then the matrix dataframe and the tools that read it.',
+      ),
   },
 
   async handler(input, ctx) {
@@ -188,13 +266,14 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     const loadLimit = input.loadLimit ?? config.loadLimit;
 
     const warnings: string[] = [];
-    const allObs: NormObs[] = [];
+    // Each study's rows, already narrowed to germplasm / variables by the pull.
+    const filteredObs: NormObs[] = [];
 
     // Collect observations across the studies with bounded concurrency,
     // reassembled in input order so the wide-matrix column/row layout (derived
     // from study encounter order below) stays deterministic across identical
-    // runs. Fail-fast: aborts the whole call on the first study with no
-    // observation path or a hard error, preserving studyDbId on each row.
+    // runs. A study with no observation path aborts the call; a failed study is
+    // a warning unless every study failed.
     const outcomes = await pullObservationsForStudies({
       studyDbIds: input.studies,
       input,
@@ -207,13 +286,18 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       failFast: true,
       ctx,
     });
-    const cappedStudies: string[] = [];
+    const failed: StudyObservationOutcome[] = [];
+    const truncatedStudies: string[] = [];
+    const rawRows: RawObservationRow[] = [];
     for (const outcome of outcomes) {
-      if (outcome.error !== undefined) throw outcome.error;
       warnings.push(...outcome.warnings);
-      // Each study's pull is bounded at loadLimit, so a saturated count means
-      // the upstream had more rows than this call collected.
-      if ((outcome.observations?.length ?? 0) >= loadLimit) cappedStudies.push(outcome.studyDbId);
+      if (outcome.error !== undefined) {
+        failed.push(outcome);
+        warnings.push(
+          `Study '${outcome.studyDbId}': observation pull failed (${describeError(outcome.error)}).`,
+        );
+        continue;
+      }
       if (outcome.observations === null) {
         throw ctx.fail(
           'no_observation_path',
@@ -221,11 +305,21 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
           { studyDbId: outcome.studyDbId },
         );
       }
-      allObs.push(...outcome.observations);
+      if (outcome.truncation) {
+        truncatedStudies.push(`${outcome.studyDbId} (${describeTruncation(outcome.truncation)})`);
+      }
+      filteredObs.push(...outcome.observations);
+      rawRows.push(...outcome.rawRows);
     }
+    if (failed.length === outcomes.length) throw everyStudyFailed(failed);
 
-    // Apply variable and germplasm filters if requested
-    const filteredObs = filterObservations(allObs, input.variables, input.germplasm);
+    // A server can ignore an extraFilters key and answer unfiltered: check the
+    // keys against the rows the matrix is built from, as brapi_find_observations does.
+    checkFilterMatchRates(
+      warnings,
+      rawRows.length,
+      buildExtraFilterChecks(input.extraFilters, rawRows, warnings),
+    );
 
     if (filteredObs.length === 0) {
       warnings.push(
@@ -312,12 +406,18 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       };
     }
 
-    if (cappedStudies.length > 0) {
+    // One notice: the truncation guidance (when a scan stopped early), then the
+    // pointer to the matrix dataframe.
+    const pointer = result.dataframe ? stagedDataframeNotice([result.dataframe]) : undefined;
+    if (truncatedStudies.length > 0) {
+      const guidance = `Observation scans stopped early for ${truncatedStudies.join('; ')} — the matrix covers a partial set. Raise loadLimit, narrow with variables / germplasm / fewer studies, or retry when a page failed.`;
       ctx.enrich.truncated({
         shown: filteredObs.length,
         cap: loadLimit,
-        guidance: `Per-study collection hit loadLimit (${loadLimit}) for ${cappedStudies.join(', ')} — the matrix covers a partial set. Raise loadLimit, or narrow with variables / germplasm / fewer studies.`,
+        guidance: pointer ? `${guidance} ${pointer}` : guidance,
       });
+    } else if (pointer) {
+      ctx.enrich.notice(pointer);
     }
 
     return result;
@@ -367,21 +467,30 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
   },
 });
 
-// ---------------------------------------------------------------------------
-// Filter helpers
-// ---------------------------------------------------------------------------
-
-function filterObservations(obs: NormObs[], variables?: string[], germplasm?: string[]): NormObs[] {
-  let result = obs;
-  if (variables?.length) {
-    const set = new Set(variables);
-    result = result.filter((o) => set.has(o.observationVariableDbId));
-  }
-  if (germplasm?.length) {
-    const set = new Set(germplasm);
-    result = result.filter((o) => set.has(o.germplasmDbId));
-  }
-  return result;
+/**
+ * The call's error when every requested study's pull failed: the first study's
+ * error code, reason, and recovery hint, with a message naming each study and
+ * its failure.
+ */
+function everyStudyFailed(failed: StudyObservationOutcome[]): McpError {
+  const first = failed[0]?.error;
+  const studyDbIds = failed.map((o) => o.studyDbId);
+  const message = `Observation pull failed for every requested study: ${failed
+    .map((o) => `'${o.studyDbId}' (${describeError(o.error)})`)
+    .join('; ')}.`;
+  if (!(first instanceof McpError))
+    return serviceUnavailable(message, { studyDbIds }, { cause: first });
+  const { reason, recovery } = first.data ?? {};
+  return new McpError(
+    first.code,
+    message,
+    {
+      ...(reason !== undefined && { reason }),
+      ...(recovery !== undefined && { recovery }),
+      studyDbIds,
+    },
+    { cause: first },
+  );
 }
 
 // ---------------------------------------------------------------------------

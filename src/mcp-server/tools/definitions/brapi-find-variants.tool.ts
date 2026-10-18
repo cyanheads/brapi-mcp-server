@@ -2,7 +2,7 @@
  * @fileoverview `brapi_find_variants` — find variant records by variant set,
  * reference, or genomic region. Standard find_* pattern — distributions +
  * dataframe spillover. Note: the BrAPI filter catalog uses `start` / `end` as
- * single scalars (1-based inclusive / exclusive) per the spec.
+ * single scalars (0-based, inclusive start / exclusive end) per the spec.
  *
  * @module mcp-server/tools/definitions/brapi-find-variants.tool
  */
@@ -25,14 +25,20 @@ import {
   computeDistribution,
   DataframeHandleSchema,
   dialectRowMapper,
+  discloseInlineTrim,
   ExtraFiltersInput,
+  InlineTrimEnrichment,
   LoadLimitInput,
   loadInitialFindPage,
   maybeSpill,
   mergeFilters,
+  NonBlankString,
+  renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
   renderFindHeader,
+  renderMoreRowsLine,
+  renderWarningsTrailer,
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
@@ -70,8 +76,8 @@ const VariantRowSchema = z
       .nullish()
       .describe('Alternate alleles observed at this position.'),
     referenceName: z.string().nullish().describe('Reference sequence name (e.g. "chr01").'),
-    start: z.number().nullish().describe('1-based inclusive start position.'),
-    end: z.number().nullish().describe('1-based exclusive end position.'),
+    start: z.number().nullish().describe('Start position, 0-based inclusive per BrAPI.'),
+    end: z.number().nullish().describe('End position, 0-based exclusive per BrAPI.'),
     filtersPassed: z.boolean().nullish().describe('True when the variant passed all QC filters.'),
     filtersApplied: z
       .boolean()
@@ -86,10 +92,12 @@ const VariantRowSchema = z
   .describe('One BrAPI variant record.');
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection the call used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   results: z
     .array(VariantRowSchema)
-    .describe('Variant rows returned in-context (up to loadLimit).'),
+    .describe(
+      'Leading matched variant rows, up to loadLimit and a 24,000-byte budget, whichever binds first.',
+    ),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
@@ -103,9 +111,9 @@ const OutputSchema = z.object({
         .record(z.string(), z.number())
         .describe('Variant set ID → count of variants in that set.'),
     })
-    .describe('Value frequency per field across the full result set.'),
+    .describe('Value frequency per field across every matched row fetched.'),
   dataframe: DataframeHandleSchema.optional().describe(
-    'Dataframe handle when the full result set was materialized as a dataframe. Query it with brapi_dataframe_query (SQL).',
+    'The matched rows, staged as a dataframe when results[] holds fewer.',
   ),
 });
 
@@ -128,15 +136,74 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindVariants = tool('brapi_find_variants', {
   description:
-    'Find variant records by variant set, reference sequence, or genomic region (start/end, 1-based inclusive / exclusive). When the upstream total exceeds loadLimit, the full result set is materialized as a dataframe — query it with brapi_dataframe_query (SQL).',
+    'Find variant records by variant set, reference sequence, or genomic region (start/end, 0-based inclusive / exclusive per the BrAPI spec; servers may differ). results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_find_variants.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_find_variants.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_find_variants in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_find_variants.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_find_variants.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_find_variants.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_find_variants.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -150,12 +217,14 @@ export const brapiFindVariants = tool('brapi_find_variants', {
   ] as const,
   input: z.object({
     alias: AliasInput,
-    variantSets: z.array(z.string()).optional().describe('Filter by variantSetDbIds.'),
-    variants: z.array(z.string()).optional().describe('Filter by variantDbIds.'),
-    references: z.array(z.string()).optional().describe('Filter by referenceDbIds.'),
-    referenceName: z.string().optional().describe('Reference display name (e.g. "chr01", "chr1").'),
-    start: z.number().int().nonnegative().optional().describe('Inclusive 1-based start.'),
-    end: z.number().int().positive().optional().describe('Exclusive 1-based end.'),
+    variantSets: z.array(NonBlankString).optional().describe('Filter by variantSetDbIds.'),
+    variants: z.array(NonBlankString).optional().describe('Filter by variantDbIds.'),
+    references: z.array(NonBlankString).optional().describe('Filter by referenceDbIds.'),
+    referenceName: NonBlankString.optional().describe(
+      'Reference display name (e.g. "chr01", "chr1").',
+    ),
+    start: z.number().int().nonnegative().optional().describe('Window start, 0-based inclusive.'),
+    end: z.number().int().positive().optional().describe('Window end, 0-based exclusive.'),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
@@ -166,40 +235,28 @@ export const brapiFindVariants = tool('brapi_find_variants', {
   // notices. Populated via ctx.enrich() so it reaches both structuredContent
   // and the content[] trailer without living in the domain return.
   enrichment: {
-    totalCount: z.number().int().nonnegative().describe('Total rows reported by the server.'),
+    totalCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .describe('Total rows reported by the server, else the rows scanned.'),
     returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
       .record(z.string(), z.unknown())
-      .describe('The final filter map sent to the server (named + extraFilters).'),
+      .describe('Filter map sent upstream (named filters plus extraFilters).'),
     refinementHint: z
       .string()
       .optional()
-      .describe('Suggested next-step query refinement when the result set is large.'),
-    notice: z
-      .string()
-      .optional()
-      .describe('Guidance when no rows were returned — how to broaden filters or retry.'),
+      .describe('Suggested refinement when the result set is large.'),
+    ...InlineTrimEnrichment,
     warnings: z
       .array(z.string())
       .describe('Advisory messages (filter overrides, partial data, capability gaps).'),
   },
 
   enrichmentTrailer: {
-    appliedFilters: {
-      render: (filters) => {
-        const entries = Object.entries(filters);
-        if (entries.length === 0) return '**Applied Filters:** none';
-        const lines = entries.map(([k, v]) => {
-          const display = SERVER_TO_USER[k] ?? k;
-          return `- **${display}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`;
-        });
-        return `**Applied Filters:**\n${lines.join('\n')}`;
-      },
-    },
-    warnings: {
-      render: (ws) => (ws.length > 0 ? ws.map((w) => `- ${w}`).join('\n') : '_none_'),
-      label: 'Warnings',
-    },
+    appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
+    warnings: { render: renderWarningsTrailer },
   },
 
   async handler(input, ctx) {
@@ -256,7 +313,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       normalizeRow ? { normalizeRow } : {},
     );
 
-    const { fullRows, dataframe } = await maybeSpill({
+    const spill = await maybeSpill({
       firstPage,
       client,
       connection,
@@ -267,8 +324,10 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       loadLimit,
       ctx,
       bridge,
+      warnings,
       ...(normalizeRow ? { normalizeRow } : {}),
     });
+    const { fullRows, dataframe, results, hasMore, rowsScanned } = spill;
 
     const distributions = {
       variantType: computeDistribution(fullRows, (r) => asString(r.variantType)),
@@ -280,30 +339,31 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
-    const totalCount = firstPage.totalCount ?? firstPage.rows.length;
-    const refinementHint = buildRefinementHint(totalCount, loadLimit, distributions, {
+    const totalCount = firstPage.totalCount ?? rowsScanned;
+    const refinementHint = buildRefinementHint(spill, distributions, {
       availableFilters: ['variantSets', 'variants', 'references', 'referenceName', 'start', 'end'],
     });
 
     const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
     ctx.enrich({
       totalCount,
-      returnedCount: firstPage.rows.length,
+      returnedCount: results.length,
       appliedFilters,
       warnings,
       ...(refinementHint ? { refinementHint } : {}),
     });
-    if (firstPage.rows.length === 0)
+    if (results.length === 0)
       ctx.enrich.notice(
         warnings.length > 0
           ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
           : 'No variants matched the applied filters. Try broadening variantSets, references, or referenceName + start/end range.',
       );
+    discloseInlineTrim(ctx, spill, loadLimit);
 
     const result: Output = {
       alias: connection.alias,
-      results: firstPage.rows as z.infer<typeof VariantRowSchema>[],
-      hasMore: firstPage.hasMore,
+      results: results as z.infer<typeof VariantRowSchema>[],
+      hasMore,
       distributions,
     };
     if (dataframe) result.dataframe = dataframe;
@@ -321,12 +381,8 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       }),
     );
     lines.push('');
-    if (result.hasMore) {
-      lines.push(
-        `⚠ More rows exist beyond the returned set. ${result.dataframe ? `Full set materialized as dataframe \`${result.dataframe.tableName}\` — query with brapi_dataframe_query.` : 'Narrow filters or raise loadLimit.'}`,
-      );
-      lines.push('');
-    }
+    const moreRows = renderMoreRowsLine(result);
+    if (moreRows) lines.push(moreRows, '');
     lines.push('## Distributions');
     lines.push(
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',

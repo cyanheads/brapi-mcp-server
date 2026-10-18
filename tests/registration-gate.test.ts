@@ -9,6 +9,7 @@
  * @module tests/registration-gate.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { disabledTool } from '@cyanheads/mcp-ts-core/tools';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getServerConfig, resetServerConfig } from '@/config/server-config.js';
@@ -53,6 +54,106 @@ describe('tool definition barrels', () => {
   it('readOnlyToolDefinitions has unique tool names', () => {
     const names = readOnlyToolDefinitions.map((t) => t.name);
     expect(new Set(names).size).toBe(names.length);
+  });
+});
+
+/**
+ * Server-owned output-schema prose every session loads with `tools/list`: the
+ * `description` members of `output` extended with `enrichment`, per default
+ * tool. The framework-injected `error` envelope is not part of this schema.
+ */
+describe('default catalog output-schema descriptions', () => {
+  const DESCRIPTION_BUDGET_BYTES = 52_000;
+  const encoder = new TextEncoder();
+  type Definition = (typeof readOnlyToolDefinitions)[number];
+
+  function effectiveOutputSchema(def: Definition): Record<string, unknown> {
+    const { output, enrichment } = def as unknown as {
+      output: z.ZodObject;
+      enrichment?: z.ZodRawShape;
+    };
+    return z.toJSONSchema(enrichment ? output.extend(enrichment) : output) as Record<
+      string,
+      unknown
+    >;
+  }
+
+  function descriptionBytes(node: unknown): number {
+    if (Array.isArray(node)) return node.reduce((sum, n) => sum + descriptionBytes(n), 0);
+    if (!node || typeof node !== 'object') return 0;
+    let sum = 0;
+    for (const [key, value] of Object.entries(node)) {
+      sum +=
+        key === 'description' && typeof value === 'string'
+          ? encoder.encode(value).length
+          : descriptionBytes(value);
+    }
+    return sum;
+  }
+
+  /** Every `properties` entry at any depth, as `[path, schema]`. */
+  function collectProperties(
+    node: unknown,
+    path: string,
+    out: [string, Record<string, unknown>][],
+  ) {
+    if (Array.isArray(node)) {
+      for (const [i, n] of node.entries()) collectProperties(n, `${path}[${i}]`, out);
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    for (const [key, value] of Object.entries(node)) {
+      if (key === 'properties' && value && typeof value === 'object') {
+        for (const [prop, schema] of Object.entries(value)) {
+          out.push([`${path}.${prop}`, schema as Record<string, unknown>]);
+          collectProperties(schema, `${path}.${prop}`, out);
+        }
+      } else {
+        collectProperties(value, `${path}.${key}`, out);
+      }
+    }
+  }
+
+  it(`sums to at most ${DESCRIPTION_BUDGET_BYTES} bytes across the default tools`, () => {
+    const perTool = readOnlyToolDefinitions.map((def) => ({
+      name: def.name,
+      bytes: descriptionBytes(effectiveOutputSchema(def)),
+    }));
+    expect(perTool.length).toBeGreaterThan(20);
+    const total = perTool.reduce((sum, t) => sum + t.bytes, 0);
+    expect(
+      total,
+      `per tool: ${perTool.map((t) => `${t.name}=${t.bytes}`).join(', ')}`,
+    ).toBeLessThanOrEqual(DESCRIPTION_BUDGET_BYTES);
+  });
+
+  it('gives every output and enrichment field a non-empty description', () => {
+    const undescribed: string[] = [];
+    let fields = 0;
+    for (const def of readOnlyToolDefinitions) {
+      const props: [string, Record<string, unknown>][] = [];
+      collectProperties(effectiveOutputSchema(def), def.name, props);
+      fields += props.length;
+      for (const [path, schema] of props) {
+        if (typeof schema.description !== 'string' || schema.description.trim() === '') {
+          undescribed.push(path);
+        }
+      }
+    }
+    expect(fields).toBeGreaterThan(200);
+    expect(undescribed).toEqual([]);
+  });
+
+  it('keeps the dataframe tableName pointing at the describe and query tools', () => {
+    const study = readOnlyToolDefinitions.find((d) => d.name === 'brapi_find_studies');
+    expect(study).toBeDefined();
+    const properties = effectiveOutputSchema(study as Definition).properties as Record<
+      string,
+      { properties: Record<string, { description: string }> }
+    >;
+    const tableName = properties.dataframe?.properties.tableName?.description;
+    expect(tableName).toContain('brapi_dataframe_describe');
+    expect(tableName).toContain('brapi_dataframe_query');
   });
 });
 

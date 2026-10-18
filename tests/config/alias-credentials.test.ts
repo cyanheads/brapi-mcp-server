@@ -272,6 +272,52 @@ describe('resolveConnectInput', () => {
       auth: { mode: 'none' },
     });
   });
+
+  describe('a configured base URL that is not usable', () => {
+    it.each([
+      ['not a URL', 'notaurl', 'foo', {}, 'BRAPI_FOO_BASE_URL'],
+      ['not http(s)', 'ftp://brapi.example/v2', 'foo', {}, 'BRAPI_FOO_BASE_URL'],
+      [
+        'carrying userinfo',
+        'https://alice:hunter2@brapi.example/v2',
+        'foo',
+        { BRAPI_FOO_BEARER_TOKEN: 'tok' },
+        'BRAPI_FOO_BASE_URL',
+      ],
+      ['the default one, reached by another alias', 'notaurl', 'bar', {}, 'BRAPI_DEFAULT_BASE_URL'],
+    ])(
+      'fails alias_base_url_invalid naming the variable when it is %s',
+      (_label, url, alias, extra, envVar) => {
+        const urlVar = alias === 'foo' ? 'BRAPI_FOO_BASE_URL' : 'BRAPI_DEFAULT_BASE_URL';
+        const env = { ...NO_BUILTINS, [urlVar]: url, ...extra };
+        let err: McpError | undefined;
+        try {
+          resolveConnectInput(alias, {}, env);
+        } catch (caught) {
+          err = caught as McpError;
+        }
+        expect(err).toBeInstanceOf(McpError);
+        expect(err?.code).toBe(JsonRpcErrorCode.ConfigurationError);
+        expect(err?.data).toMatchObject({
+          reason: 'alias_base_url_invalid',
+          alias,
+          envVar,
+          retryable: false,
+          recovery: { hint: expect.stringContaining(envVar) },
+        });
+        expect(err?.message).toContain(envVar);
+        // The configured value is never echoed: it can carry credentials.
+        expect(JSON.stringify({ m: err?.message, d: err?.data })).not.toContain(url);
+      },
+    );
+
+    it('leaves a caller-supplied baseUrl to the registry’s own validation', () => {
+      expect(resolveConnectInput('foo', { baseUrl: 'notaurl' }, NO_BUILTINS)).toEqual({
+        baseUrl: 'notaurl',
+        auth: { mode: 'none' },
+      });
+    });
+  });
 });
 
 describe('resolveConnectInput credential/baseUrl pairing', () => {

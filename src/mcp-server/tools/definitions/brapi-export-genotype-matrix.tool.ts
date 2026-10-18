@@ -49,8 +49,10 @@ import {
   buildRequestOptions,
   DataframeHandleSchema,
   extractRows,
+  NonBlankString,
   renderDataframeHandle,
   requireRegisteredConnection,
+  stagedDataframeNotice,
   toDataframeHandle,
 } from '../shared/find-helpers.js';
 import {
@@ -81,7 +83,7 @@ const FORMAT_PREVIEW_LINES = 25;
 // ---------------------------------------------------------------------------
 
 const OutputSchema = z.object({
-  alias: z.string().describe('Alias of the registered BrAPI connection used.'),
+  alias: z.string().describe('Connection alias the call used.'),
   format: z
     .enum(['plink', 'vcf-lite', 'matrix-json'])
     .describe('The output format that was produced.'),
@@ -97,9 +99,7 @@ const OutputSchema = z.object({
     .describe('Number of variant columns in the matrix (excluding the germplasm ID column).'),
   variantColumnLegend: z
     .record(z.string(), z.string())
-    .describe(
-      'Map of sanitized column name → original variantDbId. Dataframe column names are SQL-safe identifiers; use this legend to correlate them back to the original variant IDs.',
-    ),
+    .describe('SQL-safe dataframe column name → original variantDbId.'),
   callFormatting: z
     .object({
       expandHomozygotes: z.boolean().nullish().describe('Homozygous allele expansion flag.'),
@@ -109,7 +109,7 @@ const OutputSchema = z.object({
     })
     .describe('Genotype-encoding hints echoed by the server.'),
   dataframe: DataframeHandleSchema.describe(
-    'Canvas dataframe handle for the wide germplasm × variant matrix (registered for every format). Query with brapi_dataframe_query (SQL); export with brapi_dataframe_export. The vcf/ped/map text fields are the format-specific serialization of the same data.',
+    'The wide germplasm × variant matrix, staged for every format; brapi_dataframe_export writes it to a file where that tool is listed. vcf, ped, and map serialize the same data.',
   ),
   vcf: z
     .string()
@@ -132,7 +132,7 @@ const OutputSchema = z.object({
   truncated: z
     .boolean()
     .describe(
-      'True when the matrix is not the complete upstream result — either the call pull hit the row ceiling (BRAPI_GENOTYPE_CALLS_MAX_PULL) or the distinct-variant count hit the column ceiling (BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS). `warnings` names which ceiling fired.',
+      'True when the matrix is not the complete upstream result: the call pull reached the effective maxCalls cap or ran out of time before the last page, or more distinct variants came back than the effective maxColumns cap. `warnings` names which.',
     ),
   warnings: z.array(z.string()).describe('Advisory messages (truncation, missing fields, etc.).'),
 });
@@ -145,15 +145,74 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
   description:
-    'Pull genotype calls for a germplasm × variant set and pivot them into a matrix. `format` controls the output: `matrix-json` registers a wide germplasm × variant canvas dataframe for SQL analysis; `vcf-lite` returns VCF-subset text (in the `vcf` field) and also registers the dataframe; `plink` returns .ped/.map text (in the `ped`/`map` fields) and also registers the dataframe. vcf-lite/plink pull /variants metadata for CHROM/POS/REF/ALT (`.`/`0` when the server lacks them). Column names are SQL-safe identifiers; `variantColumnLegend` maps them back to original variant IDs.',
+    'Pull genotype calls for a germplasm × variant set and pivot them into a matrix. `format` controls the output: `matrix-json` registers a wide germplasm × variant canvas dataframe for SQL analysis; `vcf-lite` returns VCF-subset text (in the `vcf` field) and also registers the dataframe; `plink` returns .ped/.map text (in the `ped`/`map` fields) and also registers the dataframe. vcf-lite/plink pull /variants metadata for CHROM/POS/REF/ALT (`.`/`0` when the server lacks them). Read the dataframe with brapi_dataframe_describe and brapi_dataframe_query (SQL). Column names are SQL-safe identifiers; `variantColumnLegend` maps them back to original variant IDs.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No connection has been registered under the requested alias',
+      when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
       recovery:
-        'Run brapi_connect with this alias (or omit `alias` to use the default connection) before calling brapi_export_genotype_matrix.',
+        'Run brapi_connect with this alias and a `baseUrl`, or pass an alias the brapi_connect description lists as built-in or operator-configured, before calling brapi_export_genotype_matrix.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_token_exchange_failed',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the SGN or OAuth token exchange against the BrAPI /token endpoint failed',
+      recovery:
+        'Ask the operator to check the credentials configured for this alias and that the server exposes /token, or run brapi_connect with credentials in `auth`.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'auth_no_access_token',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'Connecting the alias on first use, the token endpoint answered without returning an access token',
+      recovery:
+        'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'capability_discovery_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Neither /serverinfo nor /calls listed any call, and at least one of them timed out, was unreachable, or answered 429 or a 5xx other than 501, so nothing was cached',
+      recovery:
+        'The BrAPI server is slow or unreachable right now. Retry brapi_export_genotype_matrix in a minute; if it keeps failing, the server may be down.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_unauthorized',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'The BrAPI server answered HTTP 401: it requires credentials, or rejected the ones sent',
+      recovery:
+        'Run brapi_connect with credentials in `auth`, or ask the operator to set server-side credentials for this alias, then retry brapi_export_genotype_matrix.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_forbidden',
+      code: JsonRpcErrorCode.Forbidden,
+      when: 'The BrAPI server answered HTTP 403: the credentials sent, or their absence, lack access',
+      recovery:
+        'Run brapi_connect with credentials that have access, or ask the operator to set server-side credentials for this alias that do, then retry brapi_export_genotype_matrix.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'alias_base_url_invalid',
+      code: JsonRpcErrorCode.ConfigurationError,
+      when: 'The base URL configured on the server for this alias is not an absolute http(s) URL, or carries credentials',
+      recovery:
+        'Ask the operator to set the base URL configured for this alias to an absolute http(s) URL, then retry brapi_export_genotype_matrix.',
+      retryable: false,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'private_address_blocked',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The base URL configured for this alias, or its token URL, is on a private or reserved address this server may not reach',
+      recovery:
+        'Ask the operator to point this alias at a publicly routable host, or to allow private addresses on this server, then retry brapi_export_genotype_matrix.',
+      retryable: false,
       thrownBy: 'service',
     },
     {
@@ -174,12 +233,14 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
   input: z.object({
     alias: AliasInput,
     germplasmDbIds: z
-      .array(z.string())
+      .array(NonBlankString)
       .optional()
       .describe(
         'Restrict to these germplasm. Omit to pull all germplasm in the variant set (use with caution on large sets).',
       ),
-    variantSetDbId: z.string().min(1).describe('Variant set to pull calls for. Required.'),
+    variantSetDbId: NonBlankString.describe(
+      'Variant set to pull calls for. Required. List variant sets with brapi_raw_get({ path: "/variantsets" }) — add params.studyDbId to narrow to one study or genotyping project — and read variantSetDbId from the rows.',
+    ),
     format: z
       .enum(['plink', 'vcf-lite', 'matrix-json'])
       .describe(
@@ -205,6 +266,9 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       ),
   }),
   output: OutputSchema,
+  enrichment: {
+    notice: z.string().optional().describe('The matrix dataframe and the tools that read it.'),
+  },
 
   async handler(input, ctx) {
     const capabilities = getCapabilityRegistry();
@@ -292,7 +356,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     const matrix = buildMatrix(collected.rows, collected.callFormatting, maxColumns);
     if (matrix.columnsTruncated) {
       warnings.push(
-        `The variant set resolved more than ${maxColumns} distinct variants; the matrix was capped at ${maxColumns} variant columns (BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS) and the remaining variants were dropped. Every germplasm is still present — one whose calls all fall in the dropped variants appears as an all-null row. Narrow germplasmDbIds or the variant set and re-pull to capture the rest.`,
+        `The variant set resolved more than ${maxColumns} distinct variants; the matrix was capped at ${maxColumns} variant columns and the remaining variants were dropped. Every germplasm is still present — one whose calls all fall in the dropped variants appears as an all-null row. Narrow germplasmDbIds or the variant set and re-pull to capture the rest.`,
       );
     }
 
@@ -307,7 +371,10 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     // inspects the handle without reading `warnings` doesn't take the matrix as
     // whole. `maxRows` stays row-scoped: it's set only when the call pull hit the
     // row ceiling, never for a pure column cap (which doesn't reduce row count).
-    if (collected.truncated || matrix.columnsTruncated) {
+    // A pull the call deadline ended early is incomplete too.
+    const incomplete =
+      collected.truncated || collected.stopReason !== undefined || matrix.columnsTruncated;
+    if (incomplete) {
       registerInput.truncated = true;
     }
     if (collected.truncated) {
@@ -315,6 +382,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     }
     const dfResult = await bridge.registerDataframe(ctx, registerInput);
     const dataframeHandle = toDataframeHandle(dfResult);
+    ctx.enrich.notice(stagedDataframeNotice([dataframeHandle]));
 
     // For text formats, pull variant coordinate metadata and render the text.
     let vcf: string | undefined;
@@ -349,7 +417,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       variantColumnLegend: matrix.variantColumnLegend,
       callFormatting: collected.callFormatting,
       dataframe: dataframeHandle,
-      truncated: collected.truncated || matrix.columnsTruncated,
+      truncated: incomplete,
       warnings,
     };
     if (vcf !== undefined) result.vcf = vcf;
@@ -365,7 +433,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     lines.push(
       `# Genotype matrix — ${result.format} — ${result.rowCount} germplasm × ${result.columnCount} variants — \`${result.alias}\``,
     );
-    if (result.truncated) lines.push('> **Truncated.** See `warnings` for which cap fired.');
+    if (result.truncated) lines.push('> **Truncated.** See `warnings` for why.');
     lines.push('');
 
     lines.push('## Dataframe');

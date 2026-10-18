@@ -6,8 +6,9 @@
  * @module tests/tools/brapi-find-locations.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindLocations } from '@/mcp-server/tools/definitions/brapi-find-locations.tool.js';
@@ -53,6 +54,49 @@ async function connect(fetcher: MockFetcher, calls = ['locations'], serverName =
   return ctx;
 }
 
+/**
+ * Serve `rows` as a paged /locations list, answering 500 for pages at or past
+ * `failFromPage`; any other URL fails the call.
+ */
+function serveLocations(
+  fetcher: MockFetcher,
+  rows: Record<string, unknown>[],
+  failFromPage?: number,
+): void {
+  fetcher.mockImplementation(async (url: string) => {
+    const u = new URL(String(url));
+    if (u.hostname !== 'brapi.example.org' || u.pathname !== '/brapi/v2/locations') {
+      throw new Error(`unmocked fetch: ${u.href}`);
+    }
+    const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
+    if (failFromPage !== undefined && page >= failFromPage) {
+      return jsonResponse({ error: 'upstream down' }, 500);
+    }
+    const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10);
+    return jsonResponse(
+      envelope(
+        { data: rows.slice(page * pageSize, page * pageSize + pageSize) },
+        { totalCount: rows.length },
+      ),
+    );
+  });
+}
+
+/** Run the tool through `runToolContract` against the connection registered on `ctx`. */
+async function callContract(ctx: Context, input: Record<string, unknown>) {
+  const definition = {
+    ...brapiFindLocations,
+    handler: (parsed, contractCtx) =>
+      brapiFindLocations.handler(parsed, { ...contractCtx, state: ctx.state }),
+  } satisfies typeof brapiFindLocations;
+  const result = await runToolContract(definition, input, { context: { tenantId: 't1' } });
+  const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+  return { result, structured: result.structuredContent as Record<string, unknown>, text };
+}
+
+const formatText = (result: Parameters<NonNullable<typeof brapiFindLocations.format>>[0]) =>
+  (brapiFindLocations.format!(result)[0] as { text: string }).text;
+
 describe('brapi_find_locations tool', () => {
   let fetcher: MockFetcher;
 
@@ -64,7 +108,7 @@ describe('brapi_find_locations tool', () => {
     resetTestServices();
   });
 
-  it('returns rows + per-country and per-type distributions', async () => {
+  it('returns rows + per-country and per-type distributions, with name, country, and coordinates in format()', async () => {
     const ctx = await connect(fetcher);
     const rows = [
       locRow(),
@@ -81,6 +125,10 @@ describe('brapi_find_locations tool', () => {
       'Research Station': 2,
       Field: 1,
     });
+    const text = formatText(result);
+    expect(text).toContain('NCSU Station 1');
+    expect(text).toContain('USA');
+    expect(text).toContain('lat=35.78');
   });
 
   it('applies a client-side bbox filter and reflects post-filter counts', async () => {
@@ -125,49 +173,62 @@ describe('brapi_find_locations tool', () => {
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ValidationError });
   });
 
-  it('downcasts plural filters to singular when connected to a CassavaBase server', async () => {
-    const ctx = await connect(fetcher, ['locations'], 'CassavaBase');
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
-
-    await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({
-        countryCodes: ['NGA'],
-        locationTypes: ['Field'],
-      }),
-      ctx,
-    );
-
-    const url = new URL(String(fetcher.mock.calls[0]![0]));
-    expect(url.searchParams.getAll('countryCode')).toEqual(['NGA']);
-    expect(url.searchParams.getAll('locationType')).toEqual(['Field']);
-    expect(url.searchParams.has('countryCodes')).toBe(false);
-    expect(url.searchParams.has('locationTypes')).toBe(false);
-  });
-
-  it('keeps Breedbase location filters plural for Sweetpotatobase-style servers', async () => {
-    const ctx = await connect(fetcher, ['locations'], 'Sweetpotatobase');
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
-
-    await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({
-        locations: ['29'],
+  it.each([
+    [
+      'CassavaBase',
+      {
+        locations: ['3', '4'],
+        locationNames: ['Namulonge'],
+        countryNames: ['Uganda'],
+        locationTypes: ['Farm'],
+        abbreviations: ['NM', 'UB'],
+      },
+      {
+        locationDbIds: ['3', '4'],
+        locationNames: ['Namulonge'],
+        countryCodes: ['UGA'],
+        locationTypes: ['Farm'],
+        abbreviations: ['NM', 'UB'],
+      },
+      [
+        locRow({ locationDbId: '3', countryCode: 'UGA', locationType: 'Farm' }),
+        locRow({ locationDbId: '4', countryCode: 'UGA', locationType: 'Farm' }),
+      ],
+    ],
+    [
+      'Sweetpotatobase',
+      { locations: ['29'], locationNames: ['Ica'], countryCodes: ['PER'], abbreviations: ['BIO'] },
+      {
+        locationDbIds: ['29'],
         locationNames: ['Ica'],
         countryCodes: ['PER'],
         abbreviations: ['BIO'],
-      }),
-      ctx,
-    );
+      },
+      [],
+    ],
+  ])(
+    'keeps Breedbase location filters plural, multi-value intact, on a %s server',
+    async (serverName, input, expectedParams, rows) => {
+      const ctx = await connect(fetcher, ['locations'], serverName);
+      fetcher.mockResolvedValue(
+        jsonResponse(envelope({ data: rows }, { totalCount: rows.length })),
+      );
 
-    const url = new URL(String(fetcher.mock.calls[0]![0]));
-    expect(url.searchParams.getAll('locationDbIds')).toEqual(['29']);
-    expect(url.searchParams.getAll('locationNames')).toEqual(['Ica']);
-    expect(url.searchParams.getAll('countryCodes')).toEqual(['PER']);
-    expect(url.searchParams.getAll('abbreviations')).toEqual(['BIO']);
-    expect(url.searchParams.has('locationDbId')).toBe(false);
-    expect(url.searchParams.has('locationName')).toBe(false);
-    expect(url.searchParams.has('countryCode')).toBe(false);
-    expect(url.searchParams.has('abbreviation')).toBe(false);
-  });
+      await brapiFindLocations.handler(brapiFindLocations.input.parse(input), ctx);
+
+      const url = new URL(String(fetcher.mock.calls[0]![0]));
+      expect(url.pathname).toBe('/brapi/v2/locations');
+      for (const [param, values] of Object.entries(expectedParams)) {
+        expect(url.searchParams.getAll(param)).toEqual(values);
+        // The singular spelling (locationDbIds → locationDbId) is never sent.
+        expect(url.searchParams.has(param.slice(0, -1))).toBe(false);
+      }
+      const warnings = getEnrichment(ctx).warnings.join('\n');
+      expect(warnings).not.toContain('downcast');
+      expect(warnings).not.toContain('may not honor this filter');
+      expect(getEnrichment(ctx).returnedCount).toBe(rows.length);
+    },
+  );
 
   it('warns when a requested country appears but unrelated countries are also returned', async () => {
     const ctx = await connect(fetcher);
@@ -192,16 +253,6 @@ describe('brapi_find_locations tool', () => {
 
     expect(getEnrichment(ctx).warnings.join('\n')).toContain('carried other values');
     expect(getEnrichment(ctx).warnings.join('\n')).toContain('USA');
-  });
-
-  it('format() includes the location name, country, and coordinates', async () => {
-    const ctx = await connect(fetcher);
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [locRow()] }, { totalCount: 1 })));
-    const result = await brapiFindLocations.handler(brapiFindLocations.input.parse({}), ctx);
-    const text = (brapiFindLocations.format!(result)[0] as { text: string }).text;
-    expect(text).toContain('NCSU Station 1');
-    expect(text).toContain('USA');
-    expect(text).toContain('lat=35.78');
   });
 
   it('tolerates null values on optional fields and skips coords in format() (Cassavabase shape)', async () => {
@@ -293,128 +344,124 @@ describe('brapi_find_locations tool', () => {
     expect(text).toContain('lon=-76.46313');
   });
 
-  it('keeps coordinateAxisOrder="spec" when the spec reading matches and never retries with a swap', async () => {
-    const ctx = await connect(fetcher);
-    const rows = [
-      {
-        locationDbId: 'in',
-        locationName: 'Ibadan',
-        coordinates: { type: 'Feature', geometry: { type: 'Point', coordinates: [3.947, 7.378] } },
-      },
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
-    const result = await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({
-        bbox: { minLat: 0, maxLat: 30, minLon: -10, maxLon: 30 },
-      }),
-      ctx,
-    );
-    expect(result.coordinateAxisOrder).toBe('spec');
-    expect(getEnrichment(ctx).returnedCount).toBe(1);
-    expect(getEnrichment(ctx).warnings.some((w) => w.includes('[lat, lon, alt]'))).toBe(false);
+  /** One location at a single GeoJSON geometry. */
+  const geoRow = (locationDbId: string, geometry: Record<string, unknown>) => ({
+    locationDbId,
+    locationName: locationDbId,
+    coordinates: { type: 'Feature', geometry },
   });
 
-  it('keeps the verify-coordinate-convention warning when both spec and swapped readings exclude every row', async () => {
-    const ctx = await connect(fetcher);
-    // Point in Reykjavik, but the bbox covers central Africa — neither
-    // reading produces matches.
-    const rows = [
-      {
-        locationDbId: 'rey',
-        locationName: 'Reykjavik',
-        coordinates: { type: 'Feature', geometry: { type: 'Point', coordinates: [-21.9, 64.1] } },
-      },
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
-    const result = await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({
-        bbox: { minLat: 0, maxLat: 10, minLon: 0, maxLon: 10 },
+  it.each([
+    [
+      'the spec reading matches',
+      geoRow('in', { type: 'Point', coordinates: [3.947, 7.378] }),
+      { minLat: 0, maxLat: 30, minLon: -10, maxLon: 30 },
+      1,
+    ],
+    [
+      // A Reykjavik point against a central-Africa box: neither reading matches.
+      'both spec and swapped readings exclude every row',
+      geoRow('rey', { type: 'Point', coordinates: [-21.9, 64.1] }),
+      { minLat: 0, maxLat: 10, minLon: 0, maxLon: 10 },
+      0,
+    ],
+    [
+      'no row carries a Point geometry (Polygon-only)',
+      geoRow('poly', {
+        type: 'Polygon',
+        coordinates: [
+          [
+            [42.44556, -76.45888, 123],
+            [42.4415, -76.45888, 123],
+            [42.4415, -76.4632, 123],
+            [42.44556, -76.4632, 123],
+            [42.44556, -76.45888, 123],
+          ],
+        ],
       }),
-      ctx,
-    );
-    expect(result.coordinateAxisOrder).toBe('spec');
-    expect(getEnrichment(ctx).returnedCount).toBe(0);
-    const text = getEnrichment(ctx).warnings.join('\n');
-    expect(text).toContain('Verify the latitude/longitude window');
-    expect(text).not.toContain('[lat, lon, alt]');
-  });
+      { minLat: 42, maxLat: 43, minLon: -77, maxLon: -76 },
+      0,
+    ],
+  ])(
+    'keeps coordinateAxisOrder="spec" and never swaps when %s',
+    async (_label, row, bbox, returned) => {
+      const ctx = await connect(fetcher);
+      fetcher.mockResolvedValue(jsonResponse(envelope({ data: [row] }, { totalCount: 1 })));
 
-  it('does not trigger swap retry when no row carries a Point geometry (Polygon-only)', async () => {
-    const ctx = await connect(fetcher);
-    const rows = [
-      {
-        locationDbId: 'poly',
-        locationName: 'Field A',
-        coordinates: {
-          type: 'Feature',
-          geometry: {
-            type: 'Polygon',
-            coordinates: [
-              [
-                [42.44556, -76.45888, 123],
-                [42.4415, -76.45888, 123],
-                [42.4415, -76.4632, 123],
-                [42.44556, -76.4632, 123],
-                [42.44556, -76.45888, 123],
-              ],
-            ],
-          },
-        },
-      },
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
-    const result = await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({
-        bbox: { minLat: 42, maxLat: 43, minLon: -77, maxLon: -76 },
-      }),
-      ctx,
-    );
-    expect(result.coordinateAxisOrder).toBe('spec');
-    expect(getEnrichment(ctx).returnedCount).toBe(0);
-    expect(getEnrichment(ctx).warnings.some((w) => w.includes('[lat, lon, alt]'))).toBe(false);
-    expect(getEnrichment(ctx).warnings.join('\n')).toContain(
-      'Verify the latitude/longitude window',
-    );
-  });
+      const result = await brapiFindLocations.handler(
+        brapiFindLocations.input.parse({ bbox }),
+        ctx,
+      );
 
-  it('materializes the post-bbox set in the spillover dataframe (#28)', async () => {
+      expect(result.coordinateAxisOrder).toBe('spec');
+      expect(getEnrichment(ctx).returnedCount).toBe(returned);
+      const warnings = getEnrichment(ctx).warnings.join('\n');
+      expect(warnings).not.toContain('[lat, lon, alt]');
+      // Only a bbox that excludes every row carries the verify-coordinate-convention warning.
+      expect(warnings.includes('Verify the latitude/longitude window')).toBe(returned === 0);
+    },
+  );
+
+  it('returns an empty result, not a canvas error, when bbox excludes every row of a spilled set', async () => {
     const ctx = await connect(fetcher);
-    // 5 rows total; loadLimit=2 forces spillover. Two rows fall inside the
-    // bbox, three fall outside. The dataframe must hold the 2 inside rows
-    // (post-bbox), not the 5 unfiltered upstream rows — SQL on the handle
-    // must agree with the inline result.
-    const inside = [
-      locRow({ locationDbId: 'in-1', latitude: 35, longitude: -78 }),
-      locRow({ locationDbId: 'in-2', latitude: 36, longitude: -77 }),
-    ];
-    const outside = [
-      locRow({ locationDbId: 'out-1', latitude: 7, longitude: 3 }),
-      locRow({ locationDbId: 'out-2', latitude: 50, longitude: 10 }),
-      locRow({ locationDbId: 'out-3', latitude: -10, longitude: -10 }),
-    ];
-    const allRows = [...inside, ...outside];
-    fetcher.mockImplementation(async (url: string) => {
-      const u = new URL(String(url));
-      const page = Number(u.searchParams.get('page') ?? '0');
-      const pageSize = Number(u.searchParams.get('pageSize') ?? '2');
-      const start = page * pageSize;
-      const slice = allRows.slice(start, start + pageSize);
-      return jsonResponse(envelope({ data: slice }, { totalCount: allRows.length }));
+    serveLocations(fetcher, [
+      locRow({ locationDbId: 'a', latitude: 35, longitude: -78 }),
+      locRow({ locationDbId: 'b', latitude: 7, longitude: 3 }),
+      locRow({ locationDbId: 'c', latitude: 50, longitude: 10 }),
+      locRow({ locationDbId: 'd', latitude: -10, longitude: -10 }),
+    ]);
+
+    // Open ocean: no row falls inside under either axis reading.
+    const { result, structured, text } = await callContract(ctx, {
+      loadLimit: 2,
+      bbox: { minLat: -1, maxLat: 0, minLon: -150, maxLon: -149 },
     });
 
-    const result = await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({
-        bbox: { minLat: 30, maxLat: 40, minLon: -90, maxLon: -70 },
-        loadLimit: 2,
-      }),
-      ctx,
+    expect(result.isError).toBeFalsy();
+    // First page + the spill walk, which re-reads from page 0 at pageSize 10.
+    expect(fetcher.mock.calls.length).toBe(2);
+    expect(structured).toMatchObject({
+      results: [],
+      totalCount: 0,
+      returnedCount: 0,
+      hasMore: false,
+      notice: expect.stringContaining('No rows returned'),
+    });
+    expect(structured).not.toHaveProperty('dataframe');
+    expect(structured).not.toHaveProperty('refinementHint');
+    expect(text).toContain('_No rows returned._');
+    // The walk scanned all four rows, not just the two on the first page.
+    expect((structured.warnings as string[]).filter((w) => w.startsWith('bbox excluded'))).toEqual([
+      "bbox excluded all 4 upstream location(s). Verify the latitude/longitude window matches the server's coordinate convention.",
+    ]);
+    expect(text).not.toContain('returned on the first page');
+    expect(text).not.toContain('More rows');
+    expect(text).not.toContain('Table schema');
+  });
+
+  it('says how many locations a bbox scan left unchecked when the walk stops short', async () => {
+    const ctx = await connect(fetcher);
+    serveLocations(
+      fetcher,
+      Array.from({ length: 25 }, (_, i) =>
+        locRow({ locationDbId: `l${i + 1}`, latitude: 35, longitude: -78 }),
+      ),
+      1,
     );
 
-    expect(result.dataframe).toBeDefined();
-    // rowCount must reflect the in-bbox set, not the upstream union.
-    expect(result.dataframe?.rowCount).toBe(2);
-    // The inline totalCount mirrors the dataframe size — both are post-bbox.
-    expect(getEnrichment(ctx).totalCount).toBe(2);
+    const { structured } = await callContract(ctx, {
+      loadLimit: 2,
+      bbox: { minLat: -1, maxLat: 0, minLon: -150, maxLon: -149 },
+    });
+
+    expect(structured.hasMore).toBe(true);
+    expect((structured.warnings as string[]).filter((w) => w.startsWith('bbox excluded'))).toEqual([
+      "bbox excluded all 10 upstream location(s) scanned; the other 15 of 25 were not checked. Verify the latitude/longitude window matches the server's coordinate convention.",
+    ]);
+    // The spill walk's own stop warning reaches the tool's warnings too.
+    expect((structured.warnings as string[]).join('\n')).toMatch(
+      /stopped after 10 of 25 upstream row\(s\): page 1 failed/,
+    );
   });
 
   it('bbox honors GeoJSON coordinates and excludes outside-window points', async () => {
@@ -443,61 +490,130 @@ describe('brapi_find_locations tool', () => {
     );
     expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.locationDbId).toBe('in');
+    expect(getEnrichment(ctx).warnings).toContain('bbox excluded 1 of 2 upstream location(s).');
   });
 
-  it('resolves a country name to its ISO alpha-3 code and filters upstream', async () => {
+  it.each([
+    // [label, input, countryCodes sent upstream, warning fragments]
+    [
+      'resolves a country name to its ISO alpha-3 code',
+      { countryNames: ['Uganda'] },
+      ['UGA'],
+      ['"Uganda" → UGA'],
+    ],
+    [
+      'resolves case-insensitively and via aliases',
+      { countryNames: ['united states'] },
+      ['USA'],
+      [],
+    ],
+    [
+      'unions explicit countryCodes with resolved names',
+      { countryCodes: ['NGA'], countryNames: ['Uganda'] },
+      ['NGA', 'UGA'],
+      [],
+    ],
+    [
+      'warns on an unresolvable name and sends no country filter',
+      { countryNames: ['Atlantis'] },
+      [],
+      ['Could not resolve', 'Atlantis'],
+    ],
+  ])('%s', async (_label, input, codes, fragments) => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({ countryNames: ['Uganda'] }),
-      ctx,
-    );
+    await brapiFindLocations.handler(brapiFindLocations.input.parse(input), ctx);
 
     const url = new URL(String(fetcher.mock.calls[0]![0]));
-    expect(url.searchParams.getAll('countryCodes')).toEqual(['UGA']);
-    expect(getEnrichment(ctx).warnings.join('\n')).toContain('"Uganda" → UGA');
-  });
-
-  it('resolves country names case-insensitively and via aliases', async () => {
-    const ctx = await connect(fetcher);
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
-
-    await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({ countryNames: ['united states'] }),
-      ctx,
-    );
-
-    const url = new URL(String(fetcher.mock.calls[0]![0]));
-    expect(url.searchParams.getAll('countryCodes')).toEqual(['USA']);
-  });
-
-  it('warns when a country name cannot be resolved and sends no country filter', async () => {
-    const ctx = await connect(fetcher);
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
-
-    await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({ countryNames: ['Atlantis'] }),
-      ctx,
-    );
-
-    const url = new URL(String(fetcher.mock.calls[0]![0]));
-    expect(url.searchParams.has('countryCodes')).toBe(false);
+    expect(url.searchParams.getAll('countryCodes').sort()).toEqual(codes);
     const warnings = getEnrichment(ctx).warnings.join('\n');
-    expect(warnings).toContain('Could not resolve');
-    expect(warnings).toContain('Atlantis');
+    for (const fragment of fragments) expect(warnings).toContain(fragment);
+  });
+});
+
+describe('brapi_find_locations results[] over the filtered set (#66)', () => {
+  // The walk pageSize is stubbed to 10; loadLimit defaults to BRAPI_LOAD_LIMIT's 1,000.
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
   });
 
-  it('unions explicit countryCodes with codes resolved from countryNames', async () => {
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  const serve = (rows: Record<string, unknown>[]) => serveLocations(fetcher, rows);
+  const call = callContract;
+
+  const ids = (s: Record<string, unknown>) =>
+    (s.results as { locationDbId: string }[]).map((r) => r.locationDbId);
+  const NC_BBOX = { minLat: 30, maxLat: 40, minLon: -90, maxLon: -70 };
+  /** `n` locations; those whose 1-based index is in `inside` sit in NC_BBOX, the rest in Europe. */
+  const sites = (n: number, inside: number[], extra: Record<string, unknown> = {}) =>
+    Array.from({ length: n }, (_, idx) => {
+      const i = idx + 1;
+      return locRow({
+        locationDbId: `loc-${i}`,
+        ...(inside.includes(i)
+          ? { latitude: 35, longitude: -78 }
+          : { latitude: 50, longitude: 10 }),
+        ...extra,
+      });
+    });
+
+  it('returns the leading bbox matches past the first page, with hasMore over the filtered set', async () => {
     const ctx = await connect(fetcher);
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+    serve(sites(25, [3, 14, 25]));
 
-    await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({ countryCodes: ['NGA'], countryNames: ['Uganda'] }),
-      ctx,
+    const { structured } = await call(ctx, { bbox: NC_BBOX, loadLimit: 5 });
+
+    expect(ids(structured)).toEqual(['loc-3', 'loc-14', 'loc-25']);
+    expect(structured).toMatchObject({ returnedCount: 3, totalCount: 3, hasMore: false });
+    // Every match is inline, so nothing is staged.
+    for (const key of ['truncated', 'shown', 'cap', 'dataframe']) {
+      expect(structured).not.toHaveProperty(key);
+    }
+  });
+
+  it('caps the bbox matches at loadLimit, discloses it, and stages only the post-bbox set (#28)', async () => {
+    const ctx = await connect(fetcher);
+    serve(sites(25, [2, 4, 6, 8, 12, 16, 20, 24]));
+
+    const { structured } = await call(ctx, { bbox: NC_BBOX, loadLimit: 5 });
+
+    expect(ids(structured)).toEqual(['loc-2', 'loc-4', 'loc-6', 'loc-8', 'loc-12']);
+    // totalCount and the dataframe both count the 8 in-bbox rows, not the 25 upstream.
+    expect(structured).toMatchObject({
+      returnedCount: 5,
+      totalCount: 8,
+      hasMore: true,
+      truncated: true,
+      shown: 5,
+      cap: 5,
+      dataframe: { rowCount: 8 },
+    });
+  });
+
+  it('trims results[] to the byte budget and stages every location', async () => {
+    const ctx = await connect(fetcher);
+    serve(sites(8, [], { instituteAddress: 'a'.repeat(4_900) }));
+
+    const { structured, text } = await call(ctx, {});
+
+    expect(Buffer.byteLength(JSON.stringify(structured.results), 'utf8')).toBeLessThanOrEqual(
+      24_000,
     );
-
-    const url = new URL(String(fetcher.mock.calls[0]![0]));
-    expect(url.searchParams.getAll('countryCodes').sort()).toEqual(['NGA', 'UGA']);
+    expect(structured).toMatchObject({
+      returnedCount: 4,
+      totalCount: 8,
+      hasMore: true,
+      truncated: true,
+      shown: 4,
+      cap: 1_000,
+      dataframe: { rowCount: 8 },
+    });
+    expect(text).toContain('24,000-byte inline budget');
   });
 });

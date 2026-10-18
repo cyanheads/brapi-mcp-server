@@ -7,11 +7,13 @@
  * @module tests/tools/brapi-find-variables.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindVariables } from '@/mcp-server/tools/definitions/brapi-find-variables.tool.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { initOntologyResolver } from '@/services/ontology-resolver/index.js';
 import {
   BASE_URL,
@@ -327,5 +329,128 @@ describe('brapi_find_variables tool', () => {
     expect(getEnrichment(ctx).returnedCount).toBe(1);
     expect(result.results[0]?.trait?.traitClass).toBeNull();
     expect(result.results[0]?.scale?.scaleName).toBeNull();
+  });
+});
+
+describe('brapi_find_variables inline budget (#66)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+    initOntologyResolver();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetTestServices();
+  });
+
+  /** Serve a paged /variables list; any other host fails the call. */
+  function serve(rows: Record<string, unknown>[]): void {
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      if (u.hostname !== 'brapi.example.org' || u.pathname !== '/brapi/v2/variables') {
+        throw new Error(`unmocked fetch: ${u.href}`);
+      }
+      const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
+      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10);
+      return jsonResponse(
+        envelope(
+          { data: rows.slice(page * pageSize, page * pageSize + pageSize) },
+          { totalCount: rows.length },
+        ),
+      );
+    });
+  }
+
+  async function call(ctx: Context, input: Record<string, unknown>) {
+    const definition = {
+      ...brapiFindVariables,
+      handler: (parsed, contractCtx) =>
+        brapiFindVariables.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFindVariables;
+    const result = await runToolContract(definition, input, { context: { tenantId: 't1' } });
+    const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+    return { result, structured: result.structuredContent as Record<string, unknown>, text };
+  }
+
+  const ids = (s: Record<string, unknown>) =>
+    (s.results as { observationVariableDbId: string }[]).map((r) => r.observationVariableDbId);
+
+  it('budgets the ranked rows: free-text matches lead results[], every row is staged', async () => {
+    const ctx = await connect(fetcher);
+    // ~5 KB per row; the two dry-matter rows sit last upstream.
+    const description = 'x'.repeat(4_800);
+    const rows = Array.from({ length: 8 }, (_, i) => {
+      const n = i + 1;
+      const dryMatter = n > 6;
+      return varRow({
+        observationVariableDbId: `var-${n}`,
+        observationVariableName: dryMatter ? `Dry matter ${n}` : `Plant height ${n}`,
+        observationVariablePUI: `CO_334:000${n}`,
+        trait: { traitName: dryMatter ? 'Dry matter content' : 'Plant height', description },
+      });
+    });
+    serve(rows);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+
+    const { result, structured, text } = await call(ctx, { text: 'dry matter' });
+
+    expect(result.isError).toBeFalsy();
+    expect(Buffer.byteLength(JSON.stringify(structured.results), 'utf8')).toBeLessThanOrEqual(
+      24_000,
+    );
+    expect(ids(structured)).toEqual(['var-7', 'var-8', 'var-1', 'var-2']);
+    expect(structured).toMatchObject({
+      returnedCount: 4,
+      totalCount: 8,
+      hasMore: true,
+      truncated: true,
+      shown: 4,
+      cap: 1_000,
+      dataframe: { rowCount: 8 },
+    });
+    const staged = register.mock.calls[0]![1].rows as Record<string, unknown>[];
+    expect(new Set(staged.map((r) => r.observationVariableDbId)).size).toBe(8);
+    expect(text).toContain('24,000-byte inline budget');
+  });
+
+  it('measures the pruned rows it returns, staging nothing when only the empty containers overran the budget', async () => {
+    const ctx = await connect(fetcher);
+    // Each row carries a ~5 KB `method` container whose every field is null: the raw
+    // set overruns the budget, the pruned rows results[] holds do not.
+    const emptyMethod = Object.fromEntries(
+      Array.from({ length: 400 }, (_, k) => [`k${String(k).padStart(4, '0')}`, null]),
+    );
+    serve(
+      Array.from({ length: 8 }, (_, i) =>
+        varRow({ observationVariableDbId: `var-${i + 1}`, method: emptyMethod }),
+      ),
+    );
+
+    const { structured } = await call(ctx, {});
+
+    expect(ids(structured)).toHaveLength(8);
+    expect(structured.results as Record<string, unknown>[]).not.toContainEqual(
+      expect.objectContaining({ method: expect.anything() }),
+    );
+    expect(structured).toMatchObject({ returnedCount: 8, hasMore: false });
+    for (const key of ['truncated', 'shown', 'cap', 'notice', 'dataframe']) {
+      expect(structured).not.toHaveProperty(key);
+    }
+  });
+
+  it('sets no truncation fields on an empty result', async () => {
+    const ctx = await connect(fetcher);
+    serve([]);
+
+    const { result, structured } = await call(ctx, {});
+
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({ returnedCount: 0, hasMore: false, results: [] });
+    expect(structured.notice).toMatch(/^No variables matched/);
+    for (const key of ['truncated', 'shown', 'cap', 'dataframe']) {
+      expect(structured).not.toHaveProperty(key);
+    }
   });
 });
