@@ -35,6 +35,7 @@ import {
 import {
   appendPassthroughLines,
   buildRefinementHint,
+  collectFindRoutes,
   collectPassthroughParts,
   type DataframeHandle,
   discloseInlineTrim,
@@ -276,7 +277,7 @@ describe('renderDataframeHandle', () => {
   it('renders a renamedColumns line when a legend is present', () => {
     const lines = renderDataframeHandle({ ...base, columnLegend: { end_: 'end' } });
     expect(lines.join('\n')).toContain(
-      'renamedColumns: end_ → end (query using the left-hand names)',
+      'renamedColumns: end\\_ → end (query using the left-hand names)',
     );
   });
 
@@ -533,6 +534,178 @@ describe('discloseInlineTrim', () => {
     const ctx = createMockContext();
     discloseInlineTrim(ctx, { results: new Array(3) }, 10);
     expect(getEnrichment(ctx)).toEqual({});
+  });
+});
+
+describe('collectFindRoutes — shared operation bounds', () => {
+  const connection: RegisteredServer = {
+    alias: 'default',
+    authMode: 'none',
+    baseUrl: BASE_URL,
+    registeredAt: '2026-10-18T00:00:00.000Z',
+  };
+  let fetcher: MockFetcher;
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetTestServices();
+  });
+  const routes = (count: number) =>
+    Array.from({ length: count }, (_, i) => ({
+      id: `s${i}`,
+      route: {
+        kind: 'get',
+        path: '/things',
+        service: 'things',
+        filters: { studyDbId: `s${i}` },
+      } satisfies FindRoute,
+    }));
+
+  it.each([10, 10_000])(
+    'reserves a shared page and row budget at page size %s',
+    async (pageSize) => {
+      vi.stubEnv('BRAPI_PAGE_SIZE', String(pageSize));
+      resetServerConfig();
+      let scanned = 0;
+      fetcher.mockImplementation(async (url: string) => {
+        const u = new URL(url);
+        const page = Number(u.searchParams.get('page') ?? 0);
+        return jsonResponse(
+          envelope(
+            {
+              data: Array.from({ length: pageSize }, (_, i) => ({
+                id: `${u.searchParams.get('studyDbId')}-${page}-${i}`,
+              })),
+            },
+            { totalCount: 1_000_000 },
+          ),
+        );
+      });
+      const coverage = await collectFindRoutes({
+        client: getBrapiClient(),
+        connection,
+        ctx: createMockContext(),
+        routes: routes(8),
+        consume: (_id, rows) => {
+          scanned += rows.length;
+        },
+      });
+      expect(fetcher).toHaveBeenCalledTimes(pageSize === 10 ? 50 : 5);
+      expect(scanned).toBe(pageSize === 10 ? 500 : 50_000);
+      expect(coverage.reduce((sum, item) => sum + item.rowsScanned, 0)).toBe(scanned);
+      expect(coverage.every((item) => item.status !== 'complete')).toBe(true);
+      expect(
+        coverage.some((item) => item.reason === (pageSize === 10 ? 'page_cap' : 'row_cap')),
+      ).toBe(true);
+    },
+  );
+
+  it.each([false, true])(
+    'reports served page stride changes honestly (changing: %s)',
+    async (changing) => {
+      const kept: unknown[] = [];
+      fetcher.mockImplementation(async (url: string) => {
+        const page = Number(new URL(url).searchParams.get('page') ?? 0);
+        const pageSize = !changing || page === 0 ? 3 : 2;
+        const start = page * pageSize;
+        return jsonResponse({
+          metadata: { pagination: { pageSize, totalCount: 5 } },
+          result: {
+            data: Array.from({ length: Math.max(0, Math.min(pageSize, 5 - start)) }, (_, i) => ({
+              id: String(start + i),
+            })),
+          },
+        });
+      });
+      const coverage = await collectFindRoutes({
+        client: getBrapiClient(),
+        connection,
+        ctx: createMockContext(),
+        routes: routes(1),
+        consume: (_id, rows) => kept.push(...rows),
+      });
+      expect(coverage[0]).toMatchObject(
+        changing ? { status: 'partial', reason: 'page_size_changed' } : { status: 'complete' },
+      );
+      expect(kept).toEqual(
+        changing
+          ? [{ id: '0' }, { id: '1' }, { id: '2' }, { id: '2' }, { id: '3' }]
+          : [{ id: '0' }, { id: '1' }, { id: '2' }, { id: '3' }, { id: '4' }],
+      );
+    },
+  );
+
+  it('bounds concurrent requests and preserves every completed route', async () => {
+    let active = 0;
+    let peak = 0;
+    fetcher.mockImplementation(async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await Promise.resolve();
+      active--;
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+    const coverage = await collectFindRoutes({
+      client: getBrapiClient(),
+      connection,
+      ctx: createMockContext(),
+      routes: routes(12),
+      consume: () => {},
+    });
+    expect(peak).toBe(4);
+    expect(active).toBe(0);
+    expect(coverage.every((item) => item.status === 'complete')).toBe(true);
+  });
+
+  it('keeps rows from a study whose later page fails and reports partial coverage', async () => {
+    const kept: unknown[] = [];
+    fetcher.mockImplementation(async (url: string) => {
+      const page = Number(new URL(url).searchParams.get('page') ?? 0);
+      return page === 0
+        ? jsonResponse(envelope({ data: [{ id: 'real-id' }] }, { totalCount: 2 }))
+        : new Response('unavailable', { status: 503 });
+    });
+    const coverage = await collectFindRoutes({
+      client: getBrapiClient(),
+      connection,
+      ctx: createMockContext(),
+      routes: routes(1),
+      consume: (_id, rows) => kept.push(...rows),
+    });
+    expect(kept).toEqual([{ id: 'real-id' }]);
+    expect(coverage).toMatchObject([
+      { status: 'partial', rowsScanned: 1, pagesFetched: 1, reason: 'upstream_failure' },
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares one decreasing deadline across fanout and later pages', async () => {
+    let now = Date.now();
+    const ctx = createMockContext();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const client = getBrapiClient();
+    const get = vi.spyOn(client, 'get');
+    fetcher.mockImplementation(async (url: string) => {
+      const page = Number(new URL(url).searchParams.get('page') ?? 0);
+      now += 10_001;
+      return jsonResponse(envelope({ data: [{ id: `row-${page}` }] }, { totalCount: 100 }));
+    });
+    const coverage = await collectFindRoutes({
+      client,
+      connection,
+      ctx,
+      routes: routes(8),
+      consume: () => {},
+    });
+    const budgets = get.mock.calls.map((call) => call[3]?.deadlineMs ?? Infinity);
+    expect(budgets[0]).toBe(SPILL_WALK_DEADLINE_MS);
+    expect(budgets.some((value) => value < SPILL_WALK_DEADLINE_MS)).toBe(true);
+    expect(fetcher.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(
+      coverage.some((item) => item.status === 'unprocessed' && item.reason === 'deadline'),
+    ).toBe(true);
   });
 });
 

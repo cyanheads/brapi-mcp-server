@@ -43,6 +43,7 @@ import {
 import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
+import { code, prose } from './markdown-literals.js';
 
 /** True when the thrown value is an upstream 404 surfaced by the BrAPI client. */
 export function isUpstreamNotFound(err: unknown): boolean {
@@ -178,7 +179,7 @@ export const SPILL_WALK_DEADLINE_MS = 40_000;
 
 /**
  * Byte budget for a find_* tool's inline `results[]`: the UTF-8 length of the
- * array's JSON — the structuredContent copy, the larger of the two surfaces.
+ * array's JSON and its escaped rendered row section, each measured separately.
  */
 export const INLINE_RESULTS_BUDGET_BYTES = DEFAULT_OUTLINE_BUDGET_BYTES;
 
@@ -196,7 +197,11 @@ export interface InlineSelection<T> {
  * whichever binds first. Keeps the first row even when it alone overruns the
  * budget, so a non-empty match never renders an empty `results[]`.
  */
-export function selectInlineRows<T>(rows: readonly T[], loadLimit: number): InlineSelection<T> {
+export function selectInlineRows<T>(
+  rows: readonly T[],
+  loadLimit: number,
+  render?: (rows: readonly T[]) => string,
+): InlineSelection<T> {
   const limit = Math.min(rows.length, loadLimit);
   let bytes = 2; // the array's brackets
   let count = 0;
@@ -204,6 +209,20 @@ export function selectInlineRows<T>(rows: readonly T[], loadLimit: number): Inli
     const rowBytes = Buffer.byteLength(JSON.stringify(rows[count]), 'utf8') + (count > 0 ? 1 : 0); // + comma
     if (count > 0 && bytes + rowBytes > INLINE_RESULTS_BUDGET_BYTES) break;
     bytes += rowBytes;
+  }
+  if (render && count > 1) {
+    let low = 1;
+    let high = count;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      if (
+        Buffer.byteLength(JSON.stringify(render(rows.slice(0, middle)))) <=
+        INLINE_RESULTS_BUDGET_BYTES
+      )
+        low = middle;
+      else high = middle - 1;
+    }
+    count = low;
   }
   const selection: InlineSelection<T> = { rows: rows.slice(0, count) };
   if (count < rows.length) selection.bound = count < limit ? 'budget' : 'loadLimit';
@@ -284,7 +303,12 @@ export function stagedDataframeNotice(
  */
 export function renderWarningsTrailer(warnings: readonly string[] | undefined): string {
   if (!warnings || warnings.length === 0) return '';
-  return `**Warnings:**\n${warnings.map((w) => `- ${w}`).join('\n')}`;
+  return `**Warnings:**\n${warnings.map((w) => `- ${prose(w)}`).join('\n')}`;
+}
+
+/** Literal advisory text, including upstream identifiers embedded in generated hints. */
+export function renderAdvisoryTrailer(value: string | undefined): string {
+  return value === undefined ? '' : prose(value);
 }
 
 /**
@@ -301,7 +325,7 @@ export function renderAppliedFiltersTrailer(
     if (entries.length === 0) return `**Applied Filters:** ${emptyText}`;
     const lines = entries.map(([k, v]) => {
       const display = serverToUser[k] ?? k;
-      return `- **${display}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`;
+      return `- **${prose(display)}:** ${prose(Array.isArray(v) ? v.join(', ') : String(v))}`;
     });
     return `**Applied Filters:**\n${lines.join('\n')}`;
   };
@@ -823,12 +847,12 @@ export function renderFindHeader(opts: {
       : '';
     const totalPart =
       opts.totalCount !== undefined ? ` · ${opts.totalCount} total ${opts.noun}` : '';
-    return `# ${opts.returnedCount} returned · ${opts.dataframe.rowCount} in dataframe${expiry}${totalPart} — \`${opts.alias}\``;
+    return `# ${opts.returnedCount} returned · ${opts.dataframe.rowCount} in dataframe${expiry}${totalPart} — ${code(opts.alias)}`;
   }
   if (opts.totalCount !== undefined) {
-    return `# ${opts.returnedCount} of ${opts.totalCount} ${opts.noun} — \`${opts.alias}\``;
+    return `# ${opts.returnedCount} of ${opts.totalCount} ${opts.noun} — ${code(opts.alias)}`;
   }
-  return `# ${opts.returnedCount} ${opts.noun} — \`${opts.alias}\``;
+  return `# ${opts.returnedCount} ${opts.noun} — ${code(opts.alias)}`;
 }
 
 /**
@@ -913,11 +937,11 @@ export function renderDistributions(
     const entries = Object.entries(counts).sort(([, a], [, b]) => b - a);
     if (entries.length === 0) continue;
     const { text, omitted } = joinWithinBudget(
-      entries.map(([value, count]) => `${value} (${count})`),
+      entries.map(([value, count]) => `${prose(value)} (${count})`),
       MAX_LIST_LINE,
     );
     const suffix = omitted > 0 ? `, …+${omitted} more${distributionRecoveryHint(dataframe)}` : '';
-    lines.push(`- **${field}:** ${text}${suffix}`);
+    lines.push(`- **${prose(field)}:** ${text}${suffix}`);
   }
   return lines.join('\n');
 }
@@ -930,7 +954,11 @@ export interface LoadedRows<T> {
   hasMore: boolean;
   /** Pages actually consumed — useful for telemetry. */
   pagesFetched: number;
+  /** Explicit first-page request size, when decoupled from the preview limit. */
+  requestedPageSize?: number;
   rows: T[];
+  /** Page stride reported by the upstream for the loaded first page. */
+  servedPageSize?: number;
   /** Total rows advertised by the server (may be larger than `rows.length`). */
   totalCount?: number;
 }
@@ -962,9 +990,10 @@ export async function loadInitialFindPage<T>(
   route: FindRoute,
   loadLimit: number,
   ctx: Context,
-  options: { normalizeRow?: (row: T) => T } = {},
+  options: { normalizeRow?: (row: T) => T; pageSize?: number } = {},
 ): Promise<LoadedRows<T>> {
-  const envelope = await fetchFindRoutePage<T>(client, connection, route, loadLimit, 0, ctx);
+  const pageSize = options.pageSize ?? loadLimit;
+  const envelope = await fetchFindRoutePage<T>(client, connection, route, pageSize, 0, ctx);
   let rows = extractRows<T>(envelope.result);
   if (options.normalizeRow) {
     const normalize = options.normalizeRow;
@@ -975,10 +1004,148 @@ export async function loadInitialFindPage<T>(
   const hasMore =
     typeof totalCount === 'number'
       ? totalCount > rows.length && totalCount > 0
-      : isFullPage(rows.length, loadLimit, pagination);
+      : isFullPage(rows.length, pageSize, pagination);
   const result: LoadedRows<T> = { rows, hasMore, pagesFetched: 1 };
+  if (options.pageSize !== undefined) result.requestedPageSize = pageSize;
+  if (pagination?.pageSize !== undefined) result.servedPageSize = pagination.pageSize;
   if (totalCount !== undefined) result.totalCount = totalCount;
   return result;
+}
+
+/** Coverage of one route in an operation-wide bounded collection. */
+export interface FindRouteCoverage {
+  id: string;
+  pagesFetched: number;
+  reason?: string;
+  rowsScanned: number;
+  status: 'complete' | 'partial' | 'failed' | 'unprocessed';
+}
+
+/**
+ * Drain independent routes into one caller-owned union. Page reservations and
+ * row reservations are shared across workers, including requests in flight;
+ * rows are consumed immediately rather than retained separately per route.
+ * Every request, retry and search poll shares the operation's remaining time.
+ */
+export async function collectFindRoutes<T>(input: {
+  client: BrapiClient;
+  connection: RegisteredServer;
+  ctx: Context;
+  routes: { id: string; route: FindRoute }[];
+  normalizeRow?: (row: T) => T;
+  consume: (id: string, rows: T[]) => void;
+}): Promise<FindRouteCoverage[]> {
+  const config = getServerConfig();
+  const deadline = Math.min(callDeadlineAt(input.ctx), Date.now() + SPILL_WALK_DEADLINE_MS);
+  const pageSize = Math.min(config.pageSize, MAX_SPILLOVER_ROWS);
+  const tasks = input.routes.map(({ id, route }) => ({
+    route,
+    coverage: { id, status: 'unprocessed', rowsScanned: 0, pagesFetched: 0 } as FindRouteCoverage,
+  }));
+  const pending = tasks.values();
+  let pages = 0;
+  let rowsReserved = 0;
+  let firstFailure: unknown;
+  let anySucceeded = false;
+  const budgetReason = () =>
+    Date.now() >= deadline ? 'deadline' : pages >= MAX_SPILLOVER_PAGES ? 'page_cap' : 'row_cap';
+  const worker = async () => {
+    for (const entry of pending) {
+      if (input.ctx.signal.aborted)
+        throw requestCancelled('Variable collection cancelled by the caller.');
+      const item = entry.coverage;
+      let previous: string | undefined;
+      let previousPageSize: number | undefined;
+      for (let page = 0; ; page++) {
+        if (input.ctx.signal.aborted)
+          throw requestCancelled('Variable collection cancelled by the caller.');
+        const remaining = deadline - Date.now();
+        if (
+          remaining <= 0 ||
+          pages >= MAX_SPILLOVER_PAGES ||
+          rowsReserved + pageSize > MAX_SPILLOVER_ROWS
+        ) {
+          item.reason = budgetReason();
+          break;
+        }
+        pages++;
+        rowsReserved += pageSize;
+        let envelope: BrapiEnvelope<BrapiListResult<T> | T[]>;
+        try {
+          envelope = await fetchFindRoutePage<T>(
+            input.client,
+            input.connection,
+            entry.route,
+            pageSize,
+            page,
+            input.ctx,
+            {
+              timeoutMs: Math.min(config.requestTimeoutMs, remaining),
+              deadlineMs: remaining,
+              retryOnTimeout: false,
+            },
+          );
+        } catch (error) {
+          rowsReserved -= pageSize;
+          if (input.ctx.signal.aborted) throw error;
+          firstFailure ??= error;
+          item.status = item.pagesFetched === 0 ? 'failed' : 'partial';
+          item.reason =
+            error instanceof McpError && typeof error.data?.reason === 'string'
+              ? error.data.reason
+              : 'upstream_failure';
+          break;
+        }
+        const rawRows = extractRows<T>(envelope.result);
+        rowsReserved -= Math.max(0, pageSize - rawRows.length);
+        item.pagesFetched++;
+        anySucceeded = true;
+        item.status = 'partial';
+        const key = firstRowKey(rawRows);
+        if (rawRows.length > 0 && key === previous) {
+          item.reason = 'repeated_page';
+          break;
+        }
+        previous = key;
+        const rows = rawRows.slice(0, pageSize);
+        item.rowsScanned += rows.length;
+        input.consume(item.id, input.normalizeRow ? rows.map(input.normalizeRow) : rows);
+        const pagination = envelope.metadata?.pagination;
+        const total = pagination?.totalCount;
+        const servedPageSize = pagination?.pageSize ?? pageSize;
+        if (previousPageSize !== undefined && servedPageSize !== previousPageSize) {
+          item.reason = 'page_size_changed';
+          break;
+        }
+        previousPageSize = servedPageSize;
+        if (rawRows.length > pageSize) {
+          item.reason = 'oversized_page';
+          break;
+        }
+        if (
+          (total !== undefined && item.rowsScanned >= total) ||
+          (total === undefined && !isFullPage(rows.length, pageSize, pagination))
+        ) {
+          item.status = 'complete';
+          break;
+        }
+        if (rows.length === 0) {
+          item.reason = 'empty_page_before_total';
+          break;
+        }
+      }
+    }
+  };
+  // Settle every worker before propagating cancellation, so no sibling fetch
+  // continues in the background after the operation has returned.
+  const settled = await Promise.allSettled(
+    Array.from({ length: Math.min(config.maxConcurrentRequests, input.routes.length) }, worker),
+  );
+  if (input.ctx.signal.aborted)
+    throw requestCancelled('Variable collection cancelled by the caller.');
+  for (const result of settled) if (result.status === 'rejected') throw result.reason;
+  if (!anySucceeded && firstFailure !== undefined) throw firstFailure;
+  return tasks.map((task) => task.coverage);
 }
 
 /**
@@ -1051,6 +1218,10 @@ export interface SpillInput<T> {
   filters: Record<string, unknown>;
   /** First-page rows already loaded. Avoids a re-fetch. */
   firstPage: T[];
+  /** Upstream-reported stride of the reusable first page. */
+  firstPageServedSize?: number;
+  /** Request size used for firstPage; defaults to loadLimit for legacy callers. */
+  firstPageSize?: number;
   loadLimit: number;
   /**
    * Optional dialect-level per-row normalizer applied to each spilled page's
@@ -1191,7 +1362,7 @@ export type DataframeHandle = z.infer<typeof DataframeHandleSchema>;
  * populates for them at all.
  */
 export function renderDataframeHandle(handle: DataframeHandle): string[] {
-  const { text: columns, omitted } = joinWithinBudget(handle.columns, MAX_LIST_LINE);
+  const { text: columns, omitted } = joinWithinBudget(handle.columns.map(prose), MAX_LIST_LINE);
   const columnsSuffix =
     omitted > 0
       ? `, …+${omitted} more — list all columns via brapi_dataframe_query: \`SELECT * FROM ${handle.tableName} LIMIT 0\``
@@ -1205,7 +1376,7 @@ export function renderDataframeHandle(handle: DataframeHandle): string[] {
   ];
   if (handle.columnLegend && Object.keys(handle.columnLegend).length > 0) {
     const pairs = Object.entries(handle.columnLegend)
-      .map(([safe, original]) => `${safe} → ${original}`)
+      .map(([safe, original]) => `${prose(safe)} → ${prose(original)}`)
       .join(', ');
     lines.push(`- renamedColumns: ${pairs} (query using the left-hand names)`);
   }
@@ -1281,6 +1452,8 @@ export interface MaybeSpillInput<T> {
   path: string;
   /** A caller-owned completed walk stopped early; retain its partial status without fetching again. */
   preloadedStopReason?: string;
+  /** The same escaped row section the formatter emits, excluding the envelope. */
+  renderInline?: (rows: readonly T[], dataframe: DataframeHandle | undefined) => string;
   route?: FindRoute;
   /**
    * Optional client-side predicate applied to every row before persistence.
@@ -1349,8 +1522,6 @@ export async function maybeSpill<T extends Record<string, unknown>>(
   input: MaybeSpillInput<T>,
 ): Promise<MaybeSpillResult<T>> {
   const { firstPage, rowMapper, rowFilter } = input;
-  const selectInline = (rows: T[]) =>
-    selectInlineRows(input.inlineView ? input.inlineView(rows) : rows, input.loadLimit);
   const spillInput: SpillInput<T> = {
     bridge: input.bridge,
     client: input.client,
@@ -1362,6 +1533,12 @@ export async function maybeSpill<T extends Record<string, unknown>>(
     ctx: input.ctx,
     firstPage: firstPage.rows,
     totalCount: firstPage.totalCount,
+    ...(firstPage.requestedPageSize !== undefined
+      ? { firstPageSize: firstPage.requestedPageSize }
+      : {}),
+    ...(firstPage.servedPageSize !== undefined
+      ? { firstPageServedSize: firstPage.servedPageSize }
+      : {}),
   };
   if (rowMapper) spillInput.rowMapper = rowMapper;
   if (rowFilter) spillInput.rowFilter = rowFilter;
@@ -1382,8 +1559,18 @@ export async function maybeSpill<T extends Record<string, unknown>>(
         ...(input.preloadedStopReason && { stopReason: input.preloadedStopReason }),
       };
 
-  const inline = selectInline(walk.fullRows);
+  const view = input.inlineView ? input.inlineView(walk.fullRows) : walk.fullRows;
+  const renderInline = input.renderInline;
+  const selectInline = (dataframe?: DataframeHandle) =>
+    selectInlineRows(
+      view,
+      input.loadLimit,
+      renderInline ? (rows) => renderInline(rows, dataframe) : undefined,
+    );
+  let inline = selectInline();
   const dataframe = inline.bound ? await registerSpillRows(spillInput, walk) : undefined;
+  const handle = dataframe ? toDataframeHandle(dataframe, firstPage.totalCount) : undefined;
+  if (handle) inline = selectInline(handle);
   const warning = noteSpillStop(
     input.ctx,
     input.source,
@@ -1400,7 +1587,7 @@ export async function maybeSpill<T extends Record<string, unknown>>(
     scanComplete: walk.scanComplete,
   };
   if (inline.bound) result.inlineBound = inline.bound;
-  if (dataframe) result.dataframe = toDataframeHandle(dataframe, firstPage.totalCount);
+  if (handle) result.dataframe = handle;
   return result;
 }
 
@@ -1514,7 +1701,7 @@ async function walkSpillPages<T extends Record<string, unknown>>(
   // Re-fetch from page 0 at pageSize to keep offsets consistent. Reuse
   // firstPage when it already holds every row, or when loadLimit === pageSize
   // (offsets already aligned).
-  const reuseFirstPage = holdsAll || input.loadLimit === pageSize;
+  const reuseFirstPage = holdsAll || (input.firstPageSize ?? input.loadLimit) === pageSize;
   let rows: T[] = reuseFirstPage ? [...input.firstPage] : [];
   let pagesFetched = reuseFirstPage ? 1 : 0;
   let stopReason: string | undefined;
@@ -1528,6 +1715,7 @@ async function walkSpillPages<T extends Record<string, unknown>>(
       ? `this call's ${CALL_DEADLINE_MS / 1000} s deadline for upstream requests`
       : `the ${SPILL_WALK_DEADLINE_MS / 1000} s dataframe walk time budget`;
   let previousFirstRow = reuseFirstPage ? firstRowKey(input.firstPage) : undefined;
+  let previousPageSize = reuseFirstPage ? (input.firstPageServedSize ?? pageSize) : undefined;
   /** An empty page, or with no reported total a short one: the upstream has no rows past it. */
   let reachedEnd = holdsAll;
   let page = pagesFetched;
@@ -1580,6 +1768,12 @@ async function walkSpillPages<T extends Record<string, unknown>>(
     previousFirstRow = firstRow;
     rows.push(...pageRows);
     pagesFetched += 1;
+    const servedPageSize = envelope.metadata?.pagination?.pageSize ?? pageSize;
+    if (previousPageSize !== undefined && previousPageSize !== servedPageSize) {
+      stopReason = `page ${page} page size changed; page offsets may overlap or skip rows`;
+      break;
+    }
+    previousPageSize = servedPageSize;
     if (
       total === undefined &&
       !isFullPage(pageRows.length, pageSize, envelope.metadata?.pagination)
@@ -1593,7 +1787,7 @@ async function walkSpillPages<T extends Record<string, unknown>>(
   // both are prefixes of the same upstream order.
   if (rows.length < input.firstPage.length) rows = [...input.firstPage];
 
-  const scanComplete = total === undefined ? reachedEnd : rows.length >= total;
+  const scanComplete = !stopReason && (total === undefined ? reachedEnd : rows.length >= total);
   const reachedRowCap = !scanComplete && rows.length >= MAX_SPILLOVER_ROWS;
   if (!scanComplete && !stopReason) {
     if (reachedRowCap) {
@@ -2058,9 +2252,9 @@ const MAX_INLINE_JSON = 240;
  * does not contain the record.
  */
 function renderPassthroughValue(value: unknown, dataframe?: DataframeHandle): string {
-  if (typeof value !== 'object') return String(value);
+  if (typeof value !== 'object') return prose(value);
   const json = JSON.stringify(value);
-  if (json.length <= MAX_INLINE_JSON) return json;
+  if (json.length <= MAX_INLINE_JSON) return prose(json);
   const kb = (json.length / 1024).toFixed(1);
   const size = Array.isArray(value)
     ? `${value.length} entries`
@@ -2092,7 +2286,7 @@ export function collectPassthroughParts(
   const parts: string[] = [];
   for (const [key, value] of Object.entries(row)) {
     if (renderedKeys.has(key) || value === undefined || value === null) continue;
-    parts.push(`${key}=${renderPassthroughValue(value, dataframe)}`);
+    parts.push(`${prose(key)}=${renderPassthroughValue(value, dataframe)}`);
   }
   return parts;
 }
@@ -2120,7 +2314,7 @@ export function appendPassthroughLines(
 ): void {
   for (const [key, value] of Object.entries(record)) {
     if (renderedKeys.has(key) || value === undefined || value === null) continue;
-    lines.push(`- **${key}:** ${renderPassthroughValue(value)}`);
+    lines.push(`- **${prose(key)}:** ${renderPassthroughValue(value)}`);
   }
 }
 

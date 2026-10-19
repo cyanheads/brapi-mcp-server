@@ -61,6 +61,7 @@ import {
   MAX_SPILLOVER_PAGES,
   mergeFilters,
 } from './find-helpers.js';
+import { prose } from './markdown-literals.js';
 
 /** Raw BrAPI `/observations` row shape (passthrough). */
 export interface RawObservationRow {
@@ -706,11 +707,11 @@ export function renderObservationCoverage(
       : []),
     ...coverage.studies.map(
       (s) =>
-        `- ${s.studyDbId}: ${s.status} (${s.observationCount} observations)${s.reason ? ` — ${s.reason}` : ''}`,
+        `- ${prose(s.studyDbId)}: ${s.status} (${s.observationCount} observations)${s.reason ? ` — ${prose(s.reason)}` : ''}`,
     ),
     ...(coverage.scan
       ? [
-          `Unit scan: ${coverage.scan.scannedUnits}${coverage.scan.totalUnits === undefined ? '' : ` / ${coverage.scan.totalUnits}`} units · ${coverage.scan.pagesFetched} pages · ${coverage.scan.complete ? 'complete' : 'partial'}${coverage.scan.reason ? ` — ${coverage.scan.reason}` : ''}`,
+          `Unit scan: ${coverage.scan.scannedUnits}${coverage.scan.totalUnits === undefined ? '' : ` / ${coverage.scan.totalUnits}`} units · ${coverage.scan.pagesFetched} pages · ${coverage.scan.complete ? 'complete' : 'partial'}${coverage.scan.reason ? ` — ${prose(coverage.scan.reason)}` : ''}`,
         ]
       : []),
   ];

@@ -36,6 +36,7 @@ import {
   toDataframeHandle,
 } from '../shared/find-helpers.js';
 import { selectPreviewRows } from '../shared/inline-preview.js';
+import { code, prose } from '../shared/markdown-literals.js';
 import { renderPedigreeDiagram } from '../shared/pedigree-diagram.js';
 
 const DEFAULT_MAX_DEPTH = 3;
@@ -713,7 +714,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     if (result.warnings.length > 0) {
       lines.push('');
       lines.push('## Warnings');
-      for (const w of result.warnings) lines.push(`- ${w}`);
+      for (const w of result.warnings) lines.push(`- ${prose(w)}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];
@@ -728,7 +729,7 @@ function renderNodeRows(nodes: readonly PedigreeNode[]): string {
   return nodes
     .map(
       (node) =>
-        `- **${node.germplasmName ?? node.germplasmDbId}** · id=\`${node.germplasmDbId}\` · depth=${node.depth} · ${node.direction}`,
+        `- **${prose(node.germplasmName ?? node.germplasmDbId)}** · id=${code(node.germplasmDbId)} · depth=${node.depth} · ${node.direction}`,
     )
     .join('\n');
 }
@@ -737,7 +738,7 @@ function renderEdgeRows(edges: readonly PedigreeEdge[]): string {
   return edges
     .map(
       (edge) =>
-        `- \`${edge.from}\` ${edge.relationship === 'parent' ? '→' : '←'} \`${edge.to}\` · ${edge.relationship}${edge.parentType ? ` (${edge.parentType})` : ''}${edge.isCycle ? ' · isCycle' : ''}`,
+        `- ${code(edge.from)} ${edge.relationship === 'parent' ? '→' : '←'} ${code(edge.to)} · ${edge.relationship}${edge.parentType ? ` (${prose(edge.parentType)})` : ''}${edge.isCycle ? ' · isCycle' : ''}`,
     )
     .join('\n');
 }
@@ -746,7 +747,7 @@ function renderFrontierRows(frontier: readonly z.infer<typeof FrontierSchema>[])
   return frontier
     .map(
       (entry) =>
-        `- \`${entry.germplasmDbId}\` · ${entry.side} · ${entry.outcome}${entry.knownOmittedRelativeCount !== undefined ? ` · known omitted relatives=${entry.knownOmittedRelativeCount}` : ''}${entry.error ? ` · ${entry.error}` : ''}`,
+        `- ${code(entry.germplasmDbId)} · ${entry.side} · ${entry.outcome}${entry.knownOmittedRelativeCount !== undefined ? ` · known omitted relatives=${entry.knownOmittedRelativeCount}` : ''}${entry.error ? ` · ${prose(entry.error)}` : ''}`,
     )
     .join('\n');
 }

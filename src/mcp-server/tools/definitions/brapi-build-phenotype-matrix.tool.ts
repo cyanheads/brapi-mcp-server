@@ -33,10 +33,12 @@ import {
   ExtraFiltersInput,
   LoadLimitInput,
   NonBlankString,
+  renderAdvisoryTrailer,
   renderDataframeHandle,
   requireRegisteredConnection,
   stagedDataframeNotice,
 } from '../shared/find-helpers.js';
+import { literal } from '../shared/markdown-literals.js';
 import {
   describeError,
   describeTruncation,
@@ -110,6 +112,23 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     'Pull observations across one or more studies and pivot them into a germplasm × trait matrix materialized as a canvas dataframe. Returns a dataframe handle (read it with brapi_dataframe_describe and brapi_dataframe_query) plus a summary of dimensions and aggregate method. Long-form output is suitable for downstream GROUP BY analysis by study, germplasm, or variable. A study whose pull fails is named in warnings and the rest still build the matrix; the call fails only when every study failed.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
+    {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_build_phenotype_matrix.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_build_phenotype_matrix; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
@@ -230,6 +249,14 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     ),
     extraFilters: ExtraFiltersInput,
   }),
+  inputAliases: {
+    studyDbId: 'studies',
+    studyDbIds: 'studies',
+    observationVariableDbId: 'variables',
+    observationVariableDbIds: 'variables',
+    germplasmDbId: 'germplasm',
+    germplasmDbIds: 'germplasm',
+  },
   output: OutputSchema,
   enrichment: {
     truncated: z
@@ -257,6 +284,8 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
         'Guidance for reaching the observations this call left out, then the matrix dataframe and the tools that read it.',
       ),
   },
+
+  enrichmentTrailer: { notice: { render: renderAdvisoryTrailer } },
 
   async handler(input, ctx) {
     const client = getBrapiClient();
@@ -437,13 +466,13 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     const lines: string[] = [];
 
     lines.push(
-      `# Phenotype matrix — ${result.germplasmCount} germplasm × ${result.variableCount} variables — \`${result.alias}\``,
+      literal`# Phenotype matrix — ${result.germplasmCount} germplasm × ${result.variableCount} variables — \`${result.alias}\``,
     );
     lines.push('');
     lines.push(
       `Shape: **${result.shape}** · Aggregate: **${result.aggregate}** · Observations collected: ${result.observationCount}`,
     );
-    lines.push(`Studies requested: ${result.studies.join(', ')}`);
+    lines.push(literal`Studies requested: ${result.studies.join(', ')}`);
     lines.push(...renderObservationCoverage(result.coverage));
     lines.push('');
 
@@ -452,7 +481,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     if (legendEntries.length > 0) {
       lines.push('## Variable legend');
       for (const [col, name] of legendEntries) {
-        lines.push(`- \`${col}\` → ${name}`);
+        lines.push(literal`- \`${col}\` → ${name}`);
       }
       lines.push('');
     }
@@ -470,7 +499,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     if (result.warnings.length > 0) {
       lines.push('## Warnings');
       for (const w of result.warnings) {
-        lines.push(`- ${w}`);
+        lines.push(literal`- ${w}`);
       }
     }
 

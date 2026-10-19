@@ -42,6 +42,7 @@ import {
   SYSTEM_CATALOG_ACCESS_REASON,
 } from '@/services/canvas-bridge/index.js';
 import { selectPreviewRows } from '../shared/inline-preview.js';
+import { literal } from '../shared/markdown-literals.js';
 
 /**
  * Refusals that reach the caller as the typed `sql_rejected` contract reason,
@@ -395,7 +396,7 @@ function renderQuery(result: z.infer<typeof OutputSchema>): string {
   const lines: string[] = [];
   const tableHint = result.dataframe ? ` · registered as \`${result.dataframe}\`` : '';
   lines.push(`# ${result.rowCount} row(s)${tableHint}`);
-  const columnList = result.columns.map((c) => `${c.name} (${c.type})`).join(', ');
+  const columnList = result.columns.map((c) => literal`${c.name} (${c.type})`).join(', ');
   lines.push(`- columns: ${columnList}`);
   lines.push(`- returned: ${result.rows.length}`);
   if (result.rows.length === 0) {
@@ -420,7 +421,7 @@ function renderQueryRows(
       const value = row[col.name];
       if (value === undefined || value === null) continue;
       const rendered = typeof value === 'object' ? JSON.stringify(value) : String(value);
-      lines.push(`- **${col.name}:** ${rendered}`);
+      lines.push(literal`- **${col.name}:** ${rendered}`);
     }
   }
   return lines.join('\n');

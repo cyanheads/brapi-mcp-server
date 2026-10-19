@@ -96,7 +96,7 @@ describe('brapi_describe_filters tool', () => {
       // `x\|y` → `x\\\|y`: the doubled backslash renders one literal `\`, the
       // escaped pipe renders a literal `|` without splitting the cell.
       expect(text).toContain('| `a` | `string` | x\\\\\\|y | `e` |');
-      expect(text).toContain('| `b` | `string` | a\\\\*b | `e` |');
+      expect(text).toContain('| `b` | `string` | a\\\\\\*b | `e` |');
       expect(text).toContain('| `c` | `string` | trailing \\\\ | `e` |');
     });
 

@@ -51,6 +51,7 @@ import {
   maybeSpill,
   mergeFilters,
   NonBlankString,
+  renderAdvisoryTrailer,
   renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
@@ -60,6 +61,7 @@ import {
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
+import { literal } from '../shared/markdown-literals.js';
 import { collectEmbeddedObservations, type RawObservationRow } from '../shared/observations.js';
 
 const ObservationRowSchema = z
@@ -187,6 +189,37 @@ export const brapiFindObservations = tool('brapi_find_observations', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_find_observations.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_find_observations; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'missing_find_route',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Neither the GET list nor a usable POST search route is advertised',
+      recovery: 'Check brapi_server_info and choose a connection advertising this finder endpoint.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'search_endpoint_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Only a POST search route marked unusable by the active dialect is advertised',
+      recovery: 'Choose a connection with a supported GET route or a usable POST search endpoint.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
       when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
@@ -286,6 +319,24 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
+  inputAliases: {
+    studyDbId: 'studies',
+    studyDbIds: 'studies',
+    germplasmDbId: 'germplasm',
+    germplasmDbIds: 'germplasm',
+    observationVariableDbId: 'variables',
+    observationVariableDbIds: 'variables',
+    observationUnitDbId: 'observationUnits',
+    observationUnitDbIds: 'observationUnits',
+    observationDbId: 'observations',
+    observationDbIds: 'observations',
+    seasonDbId: 'seasons',
+    seasonDbIds: 'seasons',
+    programDbId: 'programs',
+    programDbIds: 'programs',
+    trialDbId: 'trials',
+    trialDbIds: 'trials',
+  },
   output: OutputSchema,
 
   // Agent-facing success-path context: pagination totals, the exact filter map
@@ -317,6 +368,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
   },
 
   enrichmentTrailer: {
+    refinementHint: { render: renderAdvisoryTrailer },
     appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
     warnings: { render: renderWarningsTrailer },
   },
@@ -497,6 +549,8 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       filters,
       route,
       source: 'find_observations',
+      renderInline: (rows, dataframe) =>
+        renderObservationsRows({ results: rows as Output['results'], dataframe }),
       loadLimit,
       ctx,
       bridge,
@@ -616,52 +670,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
-    lines.push('## Observations');
-    if (result.results.length === 0) {
-      lines.push('_No rows returned._');
-    } else {
-      const RENDERED = new Set([
-        'observationVariableName',
-        'observationVariableDbId',
-        'value',
-        'observationDbId',
-        'observationUnitName',
-        'observationUnitDbId',
-        'germplasmName',
-        'germplasmDbId',
-        'studyName',
-        'studyDbId',
-        'observationLevel',
-        'season',
-        'observationTimeStamp',
-        'collector',
-        'uploadedBy',
-      ]);
-      for (const o of result.results) {
-        const parts: string[] = [];
-        const label = o.observationVariableName ?? o.observationVariableDbId ?? '?';
-        parts.push(`**${label}**`);
-        if (o.observationVariableDbId) parts.push(`varDbId=${o.observationVariableDbId}`);
-        if (o.value !== undefined) parts.push(`= ${o.value}`);
-        if (o.observationDbId) parts.push(`id=\`${o.observationDbId}\``);
-        if (o.observationUnitName) parts.push(`unit=${o.observationUnitName}`);
-        if (o.observationUnitDbId) parts.push(`unitDbId=${o.observationUnitDbId}`);
-        if (o.germplasmName) parts.push(`germplasm=${o.germplasmName}`);
-        if (o.germplasmDbId) parts.push(`germplasmDbId=${o.germplasmDbId}`);
-        if (o.studyName) parts.push(`study=${o.studyName}`);
-        if (o.studyDbId) parts.push(`studyDbId=${o.studyDbId}`);
-        if (o.observationLevel) parts.push(`level=${o.observationLevel}`);
-        const seasonLabel = normalizeSeason(o.season);
-        if (seasonLabel) parts.push(`season=${seasonLabel}`);
-        if (o.observationTimeStamp) parts.push(`time=${o.observationTimeStamp}`);
-        if (o.collector) parts.push(`collector=${o.collector}`);
-        if (o.uploadedBy) parts.push(`uploadedBy=${o.uploadedBy}`);
-        parts.push(
-          ...collectPassthroughParts(o as Record<string, unknown>, RENDERED, result.dataframe),
-        );
-        lines.push(`- ${parts.join(' · ')}`);
-      }
-    }
+    lines.push(renderObservationsRows(result));
     if (result.dataframe) {
       lines.push('');
       lines.push('## Dataframe handle');
@@ -791,4 +800,56 @@ async function probeObservationCount(args: {
     if (isDialectAllDropped(err)) throw err;
     return null;
   }
+}
+
+/** Render the exact row section used by both formatting and preview sizing. */
+function renderObservationsRows(result: Pick<Output, 'results' | 'dataframe'>): string {
+  const lines: string[] = [];
+  lines.push('## Observations');
+  if (result.results.length === 0) {
+    lines.push('_No rows returned._');
+  } else {
+    const RENDERED = new Set([
+      'observationVariableName',
+      'observationVariableDbId',
+      'value',
+      'observationDbId',
+      'observationUnitName',
+      'observationUnitDbId',
+      'germplasmName',
+      'germplasmDbId',
+      'studyName',
+      'studyDbId',
+      'observationLevel',
+      'season',
+      'observationTimeStamp',
+      'collector',
+      'uploadedBy',
+    ]);
+    for (const o of result.results) {
+      const parts: string[] = [];
+      const label = o.observationVariableName ?? o.observationVariableDbId ?? '?';
+      parts.push(literal`**${label}**`);
+      if (o.observationVariableDbId) parts.push(literal`varDbId=${o.observationVariableDbId}`);
+      if (o.value !== undefined) parts.push(literal`= ${o.value}`);
+      if (o.observationDbId) parts.push(literal`id=\`${o.observationDbId}\``);
+      if (o.observationUnitName) parts.push(literal`unit=${o.observationUnitName}`);
+      if (o.observationUnitDbId) parts.push(literal`unitDbId=${o.observationUnitDbId}`);
+      if (o.germplasmName) parts.push(literal`germplasm=${o.germplasmName}`);
+      if (o.germplasmDbId) parts.push(literal`germplasmDbId=${o.germplasmDbId}`);
+      if (o.studyName) parts.push(literal`study=${o.studyName}`);
+      if (o.studyDbId) parts.push(literal`studyDbId=${o.studyDbId}`);
+      if (o.observationLevel) parts.push(literal`level=${o.observationLevel}`);
+      const seasonLabel = normalizeSeason(o.season);
+      if (seasonLabel) parts.push(literal`season=${seasonLabel}`);
+      if (o.observationTimeStamp) parts.push(literal`time=${o.observationTimeStamp}`);
+      if (o.collector) parts.push(literal`collector=${o.collector}`);
+      if (o.uploadedBy) parts.push(literal`uploadedBy=${o.uploadedBy}`);
+      parts.push(
+        ...collectPassthroughParts(o as Record<string, unknown>, RENDERED, result.dataframe),
+      );
+      lines.push(`- ${parts.join(' · ')}`);
+    }
+  }
+  return lines.join('\n');
 }

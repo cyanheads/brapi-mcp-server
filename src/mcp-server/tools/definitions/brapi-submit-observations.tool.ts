@@ -34,6 +34,7 @@ import {
   NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
+import { code, literal, prose } from '../shared/markdown-literals.js';
 
 const ObservationRowSchema = z
   .object({
@@ -202,6 +203,23 @@ interface RowDecision {
 }
 
 const SUBMIT_ERRORS = [
+  {
+    reason: 'upstream_not_found',
+    code: JsonRpcErrorCode.NotFound,
+    when: 'The observation write request answered HTTP 404',
+    recovery:
+      'Check brapi_server_info for supported write endpoints and verify observation identifiers before retrying.',
+    thrownBy: 'service',
+  },
+  {
+    reason: 'upstream_rate_limited',
+    code: JsonRpcErrorCode.RateLimited,
+    when: 'The study lookup or observation write exhausted retries after HTTP 429',
+    recovery:
+      'Wait before retrying brapi_submit_observations; reduce concurrent requests to this BrAPI server.',
+    retryable: true,
+    thrownBy: 'service',
+  },
   {
     reason: 'unknown_alias',
     code: JsonRpcErrorCode.NotFound,
@@ -587,7 +605,7 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
     if (output.result.mode === 'preview') {
       const r = output.result;
       lines.push(
-        `# Preview · study \`${r.studyDbId}\`${r.studyName ? ` (${r.studyName})` : ''} — \`${output.alias}\``,
+        `# Preview · study ${code(r.studyDbId)}${r.studyName ? ` (${prose(r.studyName)})` : ''} — ${code(output.alias)}`,
       );
       lines.push('');
       lines.push(`- valid: ${r.valid}`);
@@ -599,31 +617,33 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
         lines.push('');
         lines.push('## Per-row warnings');
         for (const w of r.perRowWarnings) {
-          const id = w.observationVariableDbId ? ` var=\`${w.observationVariableDbId}\`` : '';
-          const unit = w.observationUnitDbId ? ` unit=\`${w.observationUnitDbId}\`` : '';
-          lines.push(`- row ${w.rowIndex}:${id}${unit} — ${w.warning}`);
+          const id = w.observationVariableDbId
+            ? literal` var=\`${w.observationVariableDbId}\``
+            : '';
+          const unit = w.observationUnitDbId ? literal` unit=\`${w.observationUnitDbId}\`` : '';
+          lines.push(`- row ${w.rowIndex}:${id}${unit} — ${prose(w.warning)}`);
         }
       }
     } else {
       const r = output.result;
       lines.push(
-        `# Apply · study \`${r.studyDbId}\`${r.studyName ? ` (${r.studyName})` : ''} — \`${output.alias}\``,
+        `# Apply · study ${code(r.studyDbId)}${r.studyName ? ` (${prose(r.studyName)})` : ''} — ${code(output.alias)}`,
       );
       lines.push('');
       lines.push(`- posted: ${r.posted.length}`);
       lines.push(`- updated: ${r.updated.length}`);
       lines.push(`- studyObservationCount: ${r.studyObservationCount ?? '—'}`);
-      lines.push(`- latestObservationTimestamp: ${r.latestObservationTimestamp ?? '—'}`);
+      lines.push(literal`- latestObservationTimestamp: ${r.latestObservationTimestamp ?? '—'}`);
       lines.push('- mode: apply');
       if (r.posted.length > 0) {
         lines.push('');
         lines.push('## Posted (new observations)');
         for (const p of r.posted) {
           const parts: string[] = [];
-          if (p.observationDbId) parts.push(`id=\`${p.observationDbId}\``);
-          if (p.observationVariableDbId) parts.push(`var=${p.observationVariableDbId}`);
-          if (p.observationUnitDbId) parts.push(`unit=${p.observationUnitDbId}`);
-          if (p.value !== undefined) parts.push(`value=${p.value}`);
+          if (p.observationDbId) parts.push(literal`id=\`${p.observationDbId}\``);
+          if (p.observationVariableDbId) parts.push(literal`var=${p.observationVariableDbId}`);
+          if (p.observationUnitDbId) parts.push(literal`unit=${p.observationUnitDbId}`);
+          if (p.value !== undefined) parts.push(literal`value=${p.value}`);
           lines.push(`- ${parts.join(' · ') || '_(server returned no fields)_'}`);
         }
       }
@@ -631,10 +651,10 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
         lines.push('');
         lines.push('## Updated');
         for (const u of r.updated) {
-          const parts: string[] = [`id=\`${u.observationDbId}\``];
-          if (u.observationVariableDbId) parts.push(`var=${u.observationVariableDbId}`);
-          if (u.observationUnitDbId) parts.push(`unit=${u.observationUnitDbId}`);
-          if (u.value !== undefined) parts.push(`value=${u.value}`);
+          const parts: string[] = [literal`id=\`${u.observationDbId}\``];
+          if (u.observationVariableDbId) parts.push(literal`var=${u.observationVariableDbId}`);
+          if (u.observationUnitDbId) parts.push(literal`unit=${u.observationUnitDbId}`);
+          if (u.value !== undefined) parts.push(literal`value=${u.value}`);
           lines.push(`- ${parts.join(' · ')}`);
         }
       }
@@ -642,16 +662,18 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
         lines.push('');
         lines.push('## Per-row warnings');
         for (const w of r.perRowWarnings) {
-          const id = w.observationVariableDbId ? ` var=\`${w.observationVariableDbId}\`` : '';
-          const unit = w.observationUnitDbId ? ` unit=\`${w.observationUnitDbId}\`` : '';
-          lines.push(`- row ${w.rowIndex}:${id}${unit} — ${w.warning}`);
+          const id = w.observationVariableDbId
+            ? literal` var=\`${w.observationVariableDbId}\``
+            : '';
+          const unit = w.observationUnitDbId ? literal` unit=\`${w.observationUnitDbId}\`` : '';
+          lines.push(`- row ${w.rowIndex}:${id}${unit} — ${prose(w.warning)}`);
         }
       }
       if (r.warnings && r.warnings.length > 0) {
         lines.push('');
         lines.push('## Warnings');
         for (const w of r.warnings) {
-          lines.push(`- ${w}`);
+          lines.push(literal`- ${w}`);
         }
       }
     }

@@ -28,6 +28,7 @@ import {
   renderWarningsTrailer,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
+import { fenced, literal } from '../shared/markdown-literals.js';
 import { previewRawResult } from '../shared/raw-preview.js';
 import { suggestForSearch } from '../shared/raw-routing-hints.js';
 
@@ -77,6 +78,23 @@ export const brapiRawSearch = tool('brapi_raw_search', {
     'Passthrough to BrAPI POST /search/{noun}, polling async search IDs. Sends loadLimit as the initial pageSize unless body.page/pageSize drives explicit paging. List previews fit loadLimit and a 24,000-byte budget on each serialized row representation; an oversized first row returns no inline rows. Every fetched row omitted inline stays in a dataframe readable with brapi_dataframe_describe and brapi_dataframe_query. Explicit paging fetches only the requested page, staging it if trimmed. Non-list results and envelope siblings are preserved; no distributions or foreign-key resolution.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
+    {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_raw_search.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_raw_search; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
@@ -289,10 +307,10 @@ export const brapiRawSearch = tool('brapi_raw_search', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`# POST /search/${result.noun} (${result.kind}) — \`${result.alias}\``);
+    lines.push(literal`# POST /search/${result.noun} (${result.kind}) — \`${result.alias}\``);
     if (result.searchResultsDbId) {
       lines.push('');
-      lines.push(`**searchResultsDbId:** \`${result.searchResultsDbId}\``);
+      lines.push(literal`**searchResultsDbId:** \`${result.searchResultsDbId}\``);
     }
     const pagination = result.metadata.pagination;
     if (pagination) {
@@ -306,7 +324,7 @@ export const brapiRawSearch = tool('brapi_raw_search', {
     }
     if (result.suggestion) {
       lines.push('');
-      lines.push(`**Suggestion:** ${result.suggestion}`);
+      lines.push(literal`**Suggestion:** ${result.suggestion}`);
     }
     if (result.dataframe) {
       lines.push('');
@@ -315,9 +333,7 @@ export const brapiRawSearch = tool('brapi_raw_search', {
     }
     lines.push('');
     lines.push('## Raw result');
-    lines.push('```json');
-    lines.push(JSON.stringify(result.result, null, 2));
-    lines.push('```');
+    lines.push(fenced(JSON.stringify(result.result, null, 2), 'json'));
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

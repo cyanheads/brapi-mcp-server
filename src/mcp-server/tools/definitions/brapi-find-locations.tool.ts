@@ -38,6 +38,7 @@ import {
   maybeSpill,
   mergeFilters,
   NonBlankString,
+  renderAdvisoryTrailer,
   renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
@@ -47,6 +48,7 @@ import {
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const LocationRowSchema = z
   .object({
@@ -134,6 +136,37 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Countries filter by ISO 3166-1 alpha-3 code via countryCodes, or by free-form English country name via countryNames (resolved client-side to alpha-3 — "Uganda" → "UGA"). Optional bbox parameter restricts rows to a latitude/longitude window. When no first-page row falls inside it under the spec GeoJSON [lon, lat, alt] reading and a row carries a Point geometry, bbox is retried with axes swapped; if that matches, the swapped reading is used (non-conformant servers store [lat, lon, alt]) with a warning and `coordinateAxisOrder: "swapped"`. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
+    {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_find_locations.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_find_locations; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'missing_find_route',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Neither the GET list nor a usable POST search route is advertised',
+      recovery: 'Check brapi_server_info and choose a connection advertising this finder endpoint.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'search_endpoint_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Only a POST search route marked unusable by the active dialect is advertised',
+      recovery: 'Choose a connection with a supported GET route or a usable POST search endpoint.',
+      thrownBy: 'service',
+    },
     {
       reason: 'invalid_bbox',
       code: JsonRpcErrorCode.ValidationError,
@@ -278,6 +311,10 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
+  inputAliases: {
+    locationDbId: 'locations',
+    locationDbIds: 'locations',
+  },
   output: OutputSchema,
 
   // Agent-facing success-path context: pagination totals, the exact filter map
@@ -311,6 +348,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
   },
 
   enrichmentTrailer: {
+    refinementHint: { render: renderAdvisoryTrailer },
     appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
     warnings: { render: renderWarningsTrailer },
   },
@@ -441,6 +479,8 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       filters,
       route,
       source: 'find_locations',
+      renderInline: (rows, dataframe) =>
+        renderLocationsRows({ results: rows as Output['results'], dataframe, coordinateAxisOrder }),
       loadLimit,
       ctx,
       bridge,
@@ -555,50 +595,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
-    lines.push('## Locations');
-    if (result.results.length === 0) {
-      lines.push('_No rows returned._');
-    } else {
-      // `coordinates` intentionally excluded: passthrough helper renders the full
-      // GeoJSON object so text-only clients see it alongside the extracted lat/lon.
-      const RENDERED = new Set([
-        'locationName',
-        'locationDbId',
-        'abbreviation',
-        'locationType',
-        'countryCode',
-        'countryName',
-        'latitude',
-        'longitude',
-        'altitude',
-        'instituteName',
-        'instituteAddress',
-        'documentationURL',
-      ]);
-      for (const loc of result.results) {
-        const parts: string[] = [`**${loc.locationName ?? loc.locationDbId}**`];
-        parts.push(`id=\`${loc.locationDbId}\``);
-        if (loc.abbreviation) parts.push(`abbr=${loc.abbreviation}`);
-        if (loc.locationType) parts.push(`type=${loc.locationType}`);
-        if (loc.countryCode) parts.push(`country=${loc.countryCode}`);
-        if (loc.countryName) parts.push(`countryName=${loc.countryName}`);
-        const coords = extractCoordinates(loc, result.coordinateAxisOrder);
-        if (coords) {
-          parts.push(`lat=${coords.latitude}`);
-          parts.push(`lon=${coords.longitude}`);
-          if (coords.altitude != null) parts.push(`alt=${coords.altitude}`);
-        } else if (loc.altitude != null) {
-          parts.push(`alt=${loc.altitude}`);
-        }
-        if (loc.instituteName) parts.push(`institute=${loc.instituteName}`);
-        if (loc.instituteAddress) parts.push(`addr=${loc.instituteAddress}`);
-        if (loc.documentationURL) parts.push(`docs=${loc.documentationURL}`);
-        parts.push(
-          ...collectPassthroughParts(loc as Record<string, unknown>, RENDERED, result.dataframe),
-        );
-        lines.push(`- ${parts.join(' · ')}`);
-      }
-    }
+    lines.push(renderLocationsRows(result));
     if (result.dataframe) {
       lines.push('');
       lines.push('## Dataframe handle');
@@ -697,4 +694,56 @@ function resolveCountryCodes(
   const resolvedCodes = resolved.map((p) => p.code);
   if (!countryCodes && resolvedCodes.length === 0) return;
   return [...new Set([...(countryCodes ?? []), ...resolvedCodes])];
+}
+
+/** Render the exact row section used by both formatting and preview sizing. */
+function renderLocationsRows(
+  result: Pick<Output, 'results' | 'dataframe' | 'coordinateAxisOrder'>,
+): string {
+  const lines: string[] = [];
+  lines.push('## Locations');
+  if (result.results.length === 0) {
+    lines.push('_No rows returned._');
+  } else {
+    // `coordinates` intentionally excluded: passthrough helper renders the full
+    // GeoJSON object so text-only clients see it alongside the extracted lat/lon.
+    const RENDERED = new Set([
+      'locationName',
+      'locationDbId',
+      'abbreviation',
+      'locationType',
+      'countryCode',
+      'countryName',
+      'latitude',
+      'longitude',
+      'altitude',
+      'instituteName',
+      'instituteAddress',
+      'documentationURL',
+    ]);
+    for (const loc of result.results) {
+      const parts: string[] = [literal`**${loc.locationName ?? loc.locationDbId}**`];
+      parts.push(literal`id=\`${loc.locationDbId}\``);
+      if (loc.abbreviation) parts.push(literal`abbr=${loc.abbreviation}`);
+      if (loc.locationType) parts.push(literal`type=${loc.locationType}`);
+      if (loc.countryCode) parts.push(literal`country=${loc.countryCode}`);
+      if (loc.countryName) parts.push(literal`countryName=${loc.countryName}`);
+      const coords = extractCoordinates(loc, result.coordinateAxisOrder);
+      if (coords) {
+        parts.push(`lat=${coords.latitude}`);
+        parts.push(`lon=${coords.longitude}`);
+        if (coords.altitude != null) parts.push(`alt=${coords.altitude}`);
+      } else if (loc.altitude != null) {
+        parts.push(`alt=${loc.altitude}`);
+      }
+      if (loc.instituteName) parts.push(literal`institute=${loc.instituteName}`);
+      if (loc.instituteAddress) parts.push(literal`addr=${loc.instituteAddress}`);
+      if (loc.documentationURL) parts.push(literal`docs=${loc.documentationURL}`);
+      parts.push(
+        ...collectPassthroughParts(loc as Record<string, unknown>, RENDERED, result.dataframe),
+      );
+      lines.push(`- ${parts.join(' · ')}`);
+    }
+  }
+  return lines.join('\n');
 }

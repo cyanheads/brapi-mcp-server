@@ -36,6 +36,7 @@ import {
   maybeSpill,
   mergeFilters,
   NonBlankString,
+  renderAdvisoryTrailer,
   renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
@@ -46,6 +47,7 @@ import {
   resolveFindRoute,
   spillWalkCeiling,
 } from '../shared/find-helpers.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const GermplasmRowSchema = z
   .object({
@@ -155,6 +157,37 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_find_germplasm.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_find_germplasm; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'missing_find_route',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Neither the GET list nor a usable POST search route is advertised',
+      recovery: 'Check brapi_server_info and choose a connection advertising this finder endpoint.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'search_endpoint_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Only a POST search route marked unusable by the active dialect is advertised',
+      recovery: 'Choose a connection with a supported GET route or a usable POST search endpoint.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
       when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
@@ -253,6 +286,9 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
+  inputAliases: {
+    germplasmDbId: 'germplasmDbIds',
+  },
   output: OutputSchema,
 
   // Agent-facing success-path context: pagination totals, the exact filter map
@@ -280,6 +316,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   },
 
   enrichmentTrailer: {
+    refinementHint: { render: renderAdvisoryTrailer },
     appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
     warnings: { render: renderWarningsTrailer },
   },
@@ -335,7 +372,10 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       route,
       loadLimit,
       ctx,
-      normalizeRow ? { normalizeRow } : {},
+      {
+        ...(normalizeRow ? { normalizeRow } : {}),
+        ...(input.text ? { pageSize: config.pageSize } : {}),
+      },
     );
 
     // Free-text matching is client-side. No BrAPI server reliably honors a
@@ -368,6 +408,8 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       filters,
       route,
       source: 'find_germplasm',
+      renderInline: (rows, dataframe) =>
+        renderGermplasmRows({ results: rows as Output['results'], dataframe }),
       loadLimit,
       ctx,
       bridge,
@@ -489,62 +531,7 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
-    lines.push('## Germplasm');
-    if (result.results.length === 0) {
-      lines.push('_No rows returned._');
-    } else {
-      const RENDERED = new Set([
-        'germplasmName',
-        'defaultDisplayName',
-        'germplasmDbId',
-        'germplasmPUI',
-        'accessionNumber',
-        'commonCropName',
-        'genus',
-        'species',
-        'subtaxa',
-        'countryOfOriginCode',
-        'collection',
-        'instituteCode',
-        'instituteName',
-        'germplasmOrigin',
-        'biologicalStatusOfAccessionDescription',
-        'pedigree',
-        'synonyms',
-      ]);
-      for (const g of result.results) {
-        const parts: string[] = [
-          `**${g.germplasmName ?? g.defaultDisplayName ?? g.germplasmDbId}**`,
-        ];
-        parts.push(`id=\`${g.germplasmDbId}\``);
-        if (g.germplasmPUI) parts.push(`pui=${g.germplasmPUI}`);
-        if (g.accessionNumber) parts.push(`accession=${g.accessionNumber}`);
-        if (g.commonCropName) parts.push(`crop=${g.commonCropName}`);
-        if (g.genus) parts.push(`genus=${g.genus}`);
-        if (g.species) parts.push(`species=${g.species}`);
-        if (g.subtaxa) parts.push(`subtaxa=${g.subtaxa}`);
-        if (g.countryOfOriginCode) parts.push(`country=${g.countryOfOriginCode}`);
-        if (g.collection) parts.push(`collection=${g.collection}`);
-        if (g.instituteCode) parts.push(`institute=${g.instituteCode}`);
-        if (g.instituteName) parts.push(`instituteName=${g.instituteName}`);
-        if (g.germplasmOrigin?.length)
-          parts.push(`germplasmOrigin=${JSON.stringify(g.germplasmOrigin)}`);
-        if (g.biologicalStatusOfAccessionDescription)
-          parts.push(`status=${g.biologicalStatusOfAccessionDescription}`);
-        if (g.pedigree) parts.push(`pedigree=${g.pedigree}`);
-        if (g.defaultDisplayName) parts.push(`displayName=${g.defaultDisplayName}`);
-        if (g.synonyms?.length) {
-          const synStr = g.synonyms
-            .map((s) => `${s.synonym ?? '?'}${s.type ? ` (${s.type})` : ''}`)
-            .join(',');
-          parts.push(`synonyms=${synStr}`);
-        }
-        parts.push(
-          ...collectPassthroughParts(g as Record<string, unknown>, RENDERED, result.dataframe),
-        );
-        lines.push(`- ${parts.join(' · ')}`);
-      }
-    }
+    lines.push(renderGermplasmRows(result));
     if (result.dataframe) {
       lines.push('');
       lines.push('## Dataframe handle');
@@ -611,4 +598,66 @@ function rowMatchesText(row: Record<string, unknown>, text: string): boolean {
     }
   }
   return false;
+}
+
+/** Render the exact row section used by both formatting and preview sizing. */
+function renderGermplasmRows(result: Pick<Output, 'results' | 'dataframe'>): string {
+  const lines: string[] = [];
+  lines.push('## Germplasm');
+  if (result.results.length === 0) {
+    lines.push('_No rows returned._');
+  } else {
+    const RENDERED = new Set([
+      'germplasmName',
+      'defaultDisplayName',
+      'germplasmDbId',
+      'germplasmPUI',
+      'accessionNumber',
+      'commonCropName',
+      'genus',
+      'species',
+      'subtaxa',
+      'countryOfOriginCode',
+      'collection',
+      'instituteCode',
+      'instituteName',
+      'germplasmOrigin',
+      'biologicalStatusOfAccessionDescription',
+      'pedigree',
+      'synonyms',
+    ]);
+    for (const g of result.results) {
+      const parts: string[] = [
+        literal`**${g.germplasmName ?? g.defaultDisplayName ?? g.germplasmDbId}**`,
+      ];
+      parts.push(literal`id=\`${g.germplasmDbId}\``);
+      if (g.germplasmPUI) parts.push(literal`pui=${g.germplasmPUI}`);
+      if (g.accessionNumber) parts.push(literal`accession=${g.accessionNumber}`);
+      if (g.commonCropName) parts.push(literal`crop=${g.commonCropName}`);
+      if (g.genus) parts.push(literal`genus=${g.genus}`);
+      if (g.species) parts.push(literal`species=${g.species}`);
+      if (g.subtaxa) parts.push(literal`subtaxa=${g.subtaxa}`);
+      if (g.countryOfOriginCode) parts.push(literal`country=${g.countryOfOriginCode}`);
+      if (g.collection) parts.push(literal`collection=${g.collection}`);
+      if (g.instituteCode) parts.push(literal`institute=${g.instituteCode}`);
+      if (g.instituteName) parts.push(literal`instituteName=${g.instituteName}`);
+      if (g.germplasmOrigin?.length)
+        parts.push(literal`germplasmOrigin=${JSON.stringify(g.germplasmOrigin)}`);
+      if (g.biologicalStatusOfAccessionDescription)
+        parts.push(literal`status=${g.biologicalStatusOfAccessionDescription}`);
+      if (g.pedigree) parts.push(literal`pedigree=${g.pedigree}`);
+      if (g.defaultDisplayName) parts.push(literal`displayName=${g.defaultDisplayName}`);
+      if (g.synonyms?.length) {
+        const synStr = g.synonyms
+          .map((s) => `${s.synonym ?? '?'}${s.type ? ` (${s.type})` : ''}`)
+          .join(',');
+        parts.push(literal`synonyms=${synStr}`);
+      }
+      parts.push(
+        ...collectPassthroughParts(g as Record<string, unknown>, RENDERED, result.dataframe),
+      );
+      lines.push(`- ${parts.join(' · ')}`);
+    }
+  }
+  return lines.join('\n');
 }

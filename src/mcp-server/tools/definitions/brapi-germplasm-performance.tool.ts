@@ -40,6 +40,7 @@ import {
   NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
+import { code, literal, prose } from '../shared/markdown-literals.js';
 import {
   collectEmbeddedObservations,
   describeError,
@@ -146,6 +147,23 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_germplasm_performance.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_germplasm_performance; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
       when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
@@ -236,6 +254,11 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
         'Optional subset of observationVariableDbIds to aggregate. Omit to include every variable observed for the germplasm.',
       ),
   }),
+  inputAliases: {
+    studyDbId: 'studyDbIds',
+    observationVariableDbId: 'variables',
+    observationVariableDbIds: 'variables',
+  },
   output: OutputSchema,
 
   async handler(input, ctx) {
@@ -420,13 +443,13 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
   format: (result) => {
     const lines: string[] = [];
     lines.push(
-      `# Germplasm performance — ${result.germplasmName ?? result.germplasmDbId} — \`${result.alias}\``,
+      literal`# Germplasm performance — ${result.germplasmName ?? result.germplasmDbId} — \`${result.alias}\``,
     );
     lines.push('');
     lines.push(
-      `germplasmDbId: \`${result.germplasmDbId}\` · studies: ${result.studyCount} · variables: ${result.perVariable.length}`,
+      literal`germplasmDbId: \`${result.germplasmDbId}\` · studies: ${result.studyCount} · variables: ${result.perVariable.length}`,
     );
-    lines.push(`studyDbIds: ${result.studyDbIds.join(', ') || '—'}`);
+    lines.push(literal`studyDbIds: ${result.studyDbIds.join(', ') || '—'}`);
     lines.push(...renderObservationCoverage(result.coverage));
     lines.push('');
 
@@ -439,13 +462,13 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
         if (v.mean !== undefined) stats.push(`mean=${fmtNum(v.mean)}`);
         if (v.median !== undefined) stats.push(`median=${fmtNum(v.median)}`);
         if (v.sd !== undefined) stats.push(`sd=${fmtNum(v.sd)}`);
-        if (v.min !== undefined) stats.push(`min=${v.min}`);
-        if (v.max !== undefined) stats.push(`max=${v.max}`);
+        if (v.min !== undefined) stats.push(literal`min=${v.min}`);
+        if (v.max !== undefined) stats.push(literal`max=${v.max}`);
         stats.push(`studies=${v.studyCount}`);
-        if (v.studyDbIds.length > 0) stats.push(`studyDbIds=${v.studyDbIds.join(',')}`);
-        if (v.seasons.length > 0) stats.push(`seasons=${v.seasons.join('/')}`);
+        if (v.studyDbIds.length > 0) stats.push(literal`studyDbIds=${v.studyDbIds.join(',')}`);
+        if (v.seasons.length > 0) stats.push(literal`seasons=${v.seasons.join('/')}`);
         lines.push(
-          `- **${v.observationVariableName ?? v.observationVariableDbId}** (\`${v.observationVariableDbId}\`): ${stats.join(' · ')}`,
+          `- **${prose(v.observationVariableName ?? v.observationVariableDbId)}** (${code(v.observationVariableDbId)}): ${stats.join(' · ')}`,
         );
       }
     }
@@ -453,7 +476,7 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
     if (result.warnings.length > 0) {
       lines.push('');
       lines.push('## Warnings');
-      for (const w of result.warnings) lines.push(`- ${w}`);
+      for (const w of result.warnings) lines.push(literal`- ${w}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

@@ -94,7 +94,7 @@ export const brapiConnect = tool('brapi_connect', {
 
 ### Tool — find with dataframe spillover
 
-`find_*` tools share a pattern: pull one page capped at `loadLimit`, walk the remaining pages when it shows more exist (the upstream `totalCount` exceeds it, or, with no `totalCount`, it came back full), compute distributions across the full matched set, and return the leading rows within both `loadLimit` and the 24,000-byte inline budget (`INLINE_RESULTS_BUDGET_BYTES`, via `selectInlineRows`). Whenever `results` holds fewer rows than matched, `maybeSpill` materializes the matched set as a canvas dataframe and returns a handle; `discloseInlineTrim` reports the cut as `truncated` / `shown` / `cap` plus one notice naming the bound that fired and, via `stagedDataframeNotice`, the staged table with `brapi_dataframe_describe` / `brapi_dataframe_query`. Every tool that stages a dataframe carries that pointer in its `notice`. `brapi_find_genotype_calls` already uses `truncated` for its pull cap, so it reports the cut through `shown` / `cap` and `inlineTrimNotice`. Spilled rows live in DuckDB only — there is no parallel JSON store. Canvas is mandatory: startup fails closed when `core.canvas` is undefined.
+`find_*` tools share a pattern: pull one page (usually capped at `loadLimit`; germplasm text scans use configured `pageSize`), walk the remaining pages when it shows more exist (the upstream `totalCount` exceeds it, or, with no `totalCount`, it came back full), compute distributions across the full matched set, and return the leading rows within both `loadLimit` and the 24,000-byte inline budget (`INLINE_RESULTS_BUDGET_BYTES`, via `selectInlineRows`). Whenever `results` holds fewer rows than matched, `maybeSpill` materializes the matched set as a canvas dataframe and returns a handle; `discloseInlineTrim` reports the cut as `truncated` / `shown` / `cap` plus one notice naming the bound that fired and, via `stagedDataframeNotice`, the staged table with `brapi_dataframe_describe` / `brapi_dataframe_query`. Every tool that stages a dataframe carries that pointer in its `notice`. `brapi_find_genotype_calls` already uses `truncated` for its pull cap, so it reports the cut through `shown` / `cap` and `inlineTrimNotice`. Spilled rows live in DuckDB only — there is no parallel JSON store. Canvas is mandatory: startup fails closed when `core.canvas` is undefined.
 
 ```ts
 // src/mcp-server/tools/definitions/brapi-find-germplasm.tool.ts (abbreviated)
@@ -119,7 +119,8 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
     const merged = mergeFilters(/* named + extraFilters */, warnings);
     const { filters } = applyDialectFiltersOrFail(ctx, dialect, 'germplasm', merged, warnings);
     const route = resolveFindRoute({ profile, dialect, endpoint: 'germplasm', filters, searchBody: merged, warnings });
-    const firstPage = await loadInitialFindPage(client, connection, route, loadLimit, ctx);
+    const firstPage = await loadInitialFindPage(client, connection, route, loadLimit, ctx,
+      input.text ? { pageSize: getServerConfig().pageSize } : {});
 
     const spill = await maybeSpill({
       firstPage, client, connection, bridge, warnings, route,

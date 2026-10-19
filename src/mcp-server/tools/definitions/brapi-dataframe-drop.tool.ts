@@ -12,6 +12,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const InputSchema = z.object({
   dataframe: z
@@ -46,8 +47,8 @@ export const brapiDataframeDrop = tool('brapi_dataframe_drop', {
     {
       type: 'text',
       text: result.dropped
-        ? `# Dropped \`${result.dataframe}\`\n- dropped: true`
-        : `# No-op — \`${result.dataframe}\` not found\n- dropped: false`,
+        ? literal`# Dropped \`${result.dataframe}\`\n- dropped: true`
+        : literal`# No-op — \`${result.dataframe}\` not found\n- dropped: false`,
     },
   ],
 });

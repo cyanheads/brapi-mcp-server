@@ -6,8 +6,19 @@
 import { describe, expect, it } from 'vitest';
 import { selectInlineRows } from '@/mcp-server/tools/shared/find-helpers.js';
 import { renderRawRows, selectPreviewRows } from '@/mcp-server/tools/shared/inline-preview.js';
+import { prose } from '@/mcp-server/tools/shared/markdown-literals.js';
 
 describe('strict inline previews', () => {
+  it('measures finder escaped row text while retaining its first-row exception', () => {
+    const rows = Array.from({ length: 12 }, () => ({ value: '*'.repeat(1000) }));
+    const render = (prefix: readonly { value: string }[]) =>
+      prefix.map((r) => prose(r.value)).join('\n');
+    const selection = selectInlineRows(rows, 12, render);
+    expect(selection.rows.length).toBeLessThan(12);
+    expect(Buffer.byteLength(JSON.stringify(render(selection.rows)))).toBeLessThanOrEqual(24_000);
+    const oversized = [{ value: '*'.repeat(24_000) }];
+    expect(selectInlineRows(oversized, 12, render).rows).toEqual(oversized);
+  });
   it.each(['a', 'é', '\\"\n'])('bounds both surfaces for %j including repeated rows', (value) => {
     const repeated = { value: value.repeat(1000) };
     const rows = Array.from({ length: 30 }, () => repeated);

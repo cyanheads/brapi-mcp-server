@@ -24,6 +24,7 @@ import {
   NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
+import { literal, prose } from '../shared/markdown-literals.js';
 
 const GermplasmSchema = z
   .object({
@@ -126,6 +127,15 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     'Fetch a single germplasm by DbId with attributes and direct parents. Response companions report study count, direct parent count, and direct descendant count — signals for pedigree depth and observation coverage.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   errors: [
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_get_germplasm; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
@@ -344,34 +354,36 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
       'instituteName',
       'synonyms',
     ]);
-    lines.push(`# ${g.germplasmName ?? g.defaultDisplayName ?? g.germplasmDbId}`);
+    lines.push(literal`# ${g.germplasmName ?? g.defaultDisplayName ?? g.germplasmDbId}`);
     lines.push('');
-    lines.push(`- **germplasmDbId:** \`${g.germplasmDbId}\``);
-    if (g.germplasmName) lines.push(`- **germplasmName:** ${g.germplasmName}`);
-    if (g.germplasmPUI) lines.push(`- **germplasmPUI:** ${g.germplasmPUI}`);
-    if (g.commonCropName) lines.push(`- **commonCropName:** ${g.commonCropName}`);
-    if (g.accessionNumber) lines.push(`- **accessionNumber:** ${g.accessionNumber}`);
-    if (g.genus) lines.push(`- **genus:** ${g.genus}`);
-    if (g.species) lines.push(`- **species:** ${g.species}`);
-    if (g.subtaxa) lines.push(`- **subtaxa:** ${g.subtaxa}`);
-    if (g.defaultDisplayName) lines.push(`- **defaultDisplayName:** ${g.defaultDisplayName}`);
-    if (g.pedigree) lines.push(`- **pedigree (string):** ${g.pedigree}`);
+    lines.push(literal`- **germplasmDbId:** \`${g.germplasmDbId}\``);
+    if (g.germplasmName) lines.push(literal`- **germplasmName:** ${g.germplasmName}`);
+    if (g.germplasmPUI) lines.push(literal`- **germplasmPUI:** ${g.germplasmPUI}`);
+    if (g.commonCropName) lines.push(literal`- **commonCropName:** ${g.commonCropName}`);
+    if (g.accessionNumber) lines.push(literal`- **accessionNumber:** ${g.accessionNumber}`);
+    if (g.genus) lines.push(literal`- **genus:** ${g.genus}`);
+    if (g.species) lines.push(literal`- **species:** ${g.species}`);
+    if (g.subtaxa) lines.push(literal`- **subtaxa:** ${g.subtaxa}`);
+    if (g.defaultDisplayName)
+      lines.push(literal`- **defaultDisplayName:** ${g.defaultDisplayName}`);
+    if (g.pedigree) lines.push(literal`- **pedigree (string):** ${g.pedigree}`);
     if (g.biologicalStatusOfAccessionDescription)
-      lines.push(`- **biologicalStatus:** ${g.biologicalStatusOfAccessionDescription}`);
+      lines.push(literal`- **biologicalStatus:** ${g.biologicalStatusOfAccessionDescription}`);
     if (g.germplasmOrigin?.length)
-      lines.push(`- **germplasmOrigin:** ${JSON.stringify(g.germplasmOrigin)}`);
-    if (g.countryOfOriginCode) lines.push(`- **countryOfOriginCode:** ${g.countryOfOriginCode}`);
-    if (g.collection) lines.push(`- **collection:** ${g.collection}`);
-    if (g.instituteCode) lines.push(`- **instituteCode:** ${g.instituteCode}`);
-    if (g.instituteName) lines.push(`- **instituteName:** ${g.instituteName}`);
+      lines.push(literal`- **germplasmOrigin:** ${JSON.stringify(g.germplasmOrigin)}`);
+    if (g.countryOfOriginCode)
+      lines.push(literal`- **countryOfOriginCode:** ${g.countryOfOriginCode}`);
+    if (g.collection) lines.push(literal`- **collection:** ${g.collection}`);
+    if (g.instituteCode) lines.push(literal`- **instituteCode:** ${g.instituteCode}`);
+    if (g.instituteName) lines.push(literal`- **instituteName:** ${g.instituteName}`);
     if (g.synonyms?.length) {
       const synStr = g.synonyms
         .map((s) => `${s.synonym ?? '?'}${s.type ? ` (${s.type})` : ''}`)
         .join(', ');
-      lines.push(`- **synonyms:** ${synStr}`);
+      lines.push(literal`- **synonyms:** ${synStr}`);
     }
     appendPassthroughLines(lines, g as Record<string, unknown>, GERMPLASM_RENDERED);
-    lines.push(`- **alias:** ${result.alias}`);
+    lines.push(literal`- **alias:** ${result.alias}`);
 
     lines.push('');
     lines.push(`## Parents (${result.directParentCount})`);
@@ -381,9 +393,9 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
       const PARENT_RENDERED = new Set(['germplasmDbId', 'germplasmName', 'parentType']);
       for (const p of result.parents) {
         const parts: string[] = [];
-        if (p.germplasmName) parts.push(p.germplasmName);
-        if (p.germplasmDbId) parts.push(`id=\`${p.germplasmDbId}\``);
-        if (p.parentType) parts.push(`type=${p.parentType}`);
+        if (p.germplasmName) parts.push(prose(p.germplasmName));
+        if (p.germplasmDbId) parts.push(literal`id=\`${p.germplasmDbId}\``);
+        if (p.parentType) parts.push(literal`type=${p.parentType}`);
         parts.push(...collectPassthroughParts(p as Record<string, unknown>, PARENT_RENDERED));
         lines.push(`- ${parts.join(' · ')}`);
       }
@@ -402,10 +414,10 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
       ]);
       for (const a of result.attributes) {
         const parts: string[] = [];
-        if (a.attributeName) parts.push(a.attributeName);
-        if (a.attributeDbId) parts.push(`(id=\`${a.attributeDbId}\`)`);
-        if (a.attributeValue != null) parts.push(`= ${a.attributeValue}`);
-        if (a.determinedDate) parts.push(`[determined ${a.determinedDate}]`);
+        if (a.attributeName) parts.push(prose(a.attributeName));
+        if (a.attributeDbId) parts.push(literal`(id=\`${a.attributeDbId}\`)`);
+        if (a.attributeValue != null) parts.push(literal`= ${a.attributeValue}`);
+        if (a.determinedDate) parts.push(literal`[determined ${a.determinedDate}]`);
         parts.push(...collectPassthroughParts(a as Record<string, unknown>, ATTR_RENDERED));
         lines.push(`- ${parts.join(' ')}`);
       }
@@ -420,7 +432,7 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     if (result.warnings.length > 0) {
       lines.push('');
       lines.push('## Warnings');
-      for (const w of result.warnings) lines.push(`- ${w}`);
+      for (const w of result.warnings) lines.push(literal`- ${w}`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

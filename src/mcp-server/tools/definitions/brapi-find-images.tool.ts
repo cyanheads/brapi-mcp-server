@@ -34,6 +34,7 @@ import {
   maybeSpill,
   mergeFilters,
   NonBlankString,
+  renderAdvisoryTrailer,
   renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
@@ -43,6 +44,7 @@ import {
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const ImageRowSchema = z
   .object({
@@ -146,6 +148,37 @@ export const brapiFindImages = tool('brapi_find_images', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_find_images.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_find_images; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'missing_find_route',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Neither the GET list nor a usable POST search route is advertised',
+      recovery: 'Check brapi_server_info and choose a connection advertising this finder endpoint.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'search_endpoint_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Only a POST search route marked unusable by the active dialect is advertised',
+      recovery: 'Choose a connection with a supported GET route or a usable POST search endpoint.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
       when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
@@ -242,6 +275,16 @@ export const brapiFindImages = tool('brapi_find_images', {
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
+  inputAliases: {
+    imageDbId: 'images',
+    imageDbIds: 'images',
+    studyDbId: 'studies',
+    studyDbIds: 'studies',
+    observationUnitDbId: 'observationUnits',
+    observationUnitDbIds: 'observationUnits',
+    observationDbId: 'observations',
+    observationDbIds: 'observations',
+  },
   output: OutputSchema,
 
   // Agent-facing success-path context: pagination totals, the exact filter map
@@ -269,6 +312,7 @@ export const brapiFindImages = tool('brapi_find_images', {
   },
 
   enrichmentTrailer: {
+    refinementHint: { render: renderAdvisoryTrailer },
     appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
     warnings: { render: renderWarningsTrailer },
   },
@@ -333,6 +377,8 @@ export const brapiFindImages = tool('brapi_find_images', {
       filters,
       route,
       source: 'find_images',
+      renderInline: (rows, dataframe) =>
+        renderImagesRows({ results: rows as Output['results'], dataframe }),
       loadLimit,
       ctx,
       bridge,
@@ -426,56 +472,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
-    lines.push('## Images');
-    if (result.results.length === 0) {
-      lines.push('_No rows returned._');
-    } else {
-      const RENDERED = new Set([
-        'imageName',
-        'imageFileName',
-        'imageDbId',
-        'mimeType',
-        'imageWidth',
-        'imageHeight',
-        'imageFileSize',
-        'observationUnitName',
-        'observationUnitDbId',
-        'observationDbIds',
-        'studyName',
-        'studyDbId',
-        'descriptiveOntologyTerms',
-        'imageTimeStamp',
-        'imageURL',
-        'copyright',
-        'description',
-      ]);
-      for (const img of result.results) {
-        const parts: string[] = [`**${img.imageName ?? img.imageFileName ?? img.imageDbId}**`];
-        parts.push(`id=\`${img.imageDbId}\``);
-        if (img.imageFileName) parts.push(`file=${img.imageFileName}`);
-        if (img.mimeType) parts.push(`mime=${img.mimeType}`);
-        if (img.imageWidth && img.imageHeight) {
-          parts.push(`${img.imageWidth}×${img.imageHeight}`);
-        }
-        if (img.imageFileSize) parts.push(`size=${img.imageFileSize}B`);
-        if (img.observationUnitName) parts.push(`unit=${img.observationUnitName}`);
-        if (img.observationUnitDbId) parts.push(`unitDbId=${img.observationUnitDbId}`);
-        if (img.observationDbIds?.length) parts.push(`obs=${img.observationDbIds.join(',')}`);
-        if (img.studyName) parts.push(`study=${img.studyName}`);
-        if (img.studyDbId) parts.push(`studyDbId=${img.studyDbId}`);
-        if (img.descriptiveOntologyTerms?.length) {
-          parts.push(`terms=${img.descriptiveOntologyTerms.join(',')}`);
-        }
-        if (img.imageTimeStamp) parts.push(`time=${img.imageTimeStamp}`);
-        if (img.imageURL) parts.push(`url=${img.imageURL}`);
-        if (img.copyright) parts.push(`©${img.copyright}`);
-        if (img.description) parts.push(`desc=${img.description}`);
-        parts.push(
-          ...collectPassthroughParts(img as Record<string, unknown>, RENDERED, result.dataframe),
-        );
-        lines.push(`- ${parts.join(' · ')}`);
-      }
-    }
+    lines.push(renderImagesRows(result));
     if (result.dataframe) {
       lines.push('');
       lines.push('## Dataframe handle');
@@ -484,3 +481,59 @@ export const brapiFindImages = tool('brapi_find_images', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** Render the exact row section used by both formatting and preview sizing. */
+function renderImagesRows(result: Pick<Output, 'results' | 'dataframe'>): string {
+  const lines: string[] = [];
+  lines.push('## Images');
+  if (result.results.length === 0) {
+    lines.push('_No rows returned._');
+  } else {
+    const RENDERED = new Set([
+      'imageName',
+      'imageFileName',
+      'imageDbId',
+      'mimeType',
+      'imageWidth',
+      'imageHeight',
+      'imageFileSize',
+      'observationUnitName',
+      'observationUnitDbId',
+      'observationDbIds',
+      'studyName',
+      'studyDbId',
+      'descriptiveOntologyTerms',
+      'imageTimeStamp',
+      'imageURL',
+      'copyright',
+      'description',
+    ]);
+    for (const img of result.results) {
+      const parts: string[] = [literal`**${img.imageName ?? img.imageFileName ?? img.imageDbId}**`];
+      parts.push(literal`id=\`${img.imageDbId}\``);
+      if (img.imageFileName) parts.push(literal`file=${img.imageFileName}`);
+      if (img.mimeType) parts.push(literal`mime=${img.mimeType}`);
+      if (img.imageWidth && img.imageHeight) {
+        parts.push(`${img.imageWidth}×${img.imageHeight}`);
+      }
+      if (img.imageFileSize) parts.push(`size=${img.imageFileSize}B`);
+      if (img.observationUnitName) parts.push(literal`unit=${img.observationUnitName}`);
+      if (img.observationUnitDbId) parts.push(literal`unitDbId=${img.observationUnitDbId}`);
+      if (img.observationDbIds?.length) parts.push(literal`obs=${img.observationDbIds.join(',')}`);
+      if (img.studyName) parts.push(literal`study=${img.studyName}`);
+      if (img.studyDbId) parts.push(literal`studyDbId=${img.studyDbId}`);
+      if (img.descriptiveOntologyTerms?.length) {
+        parts.push(literal`terms=${img.descriptiveOntologyTerms.join(',')}`);
+      }
+      if (img.imageTimeStamp) parts.push(literal`time=${img.imageTimeStamp}`);
+      if (img.imageURL) parts.push(literal`url=${img.imageURL}`);
+      if (img.copyright) parts.push(literal`©${img.copyright}`);
+      if (img.description) parts.push(literal`desc=${img.description}`);
+      parts.push(
+        ...collectPassthroughParts(img as Record<string, unknown>, RENDERED, result.dataframe),
+      );
+      lines.push(`- ${parts.join(' · ')}`);
+    }
+  }
+  return lines.join('\n');
+}

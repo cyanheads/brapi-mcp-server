@@ -17,6 +17,7 @@ import { config } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { joinWithinBudget, MAX_LIST_LINE } from '../shared/find-helpers.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const ColumnSchema = z.object({
   name: z.string().describe('Column name.'),
@@ -100,7 +101,7 @@ export const brapiDataframeDescribe = tool('brapi_dataframe_describe', {
 
 function renderDescribe(tables: z.infer<typeof DescribedTableSchema>[]): string {
   const lines: string[] = [];
-  lines.push(`# ${tables.length} dataframe(s)`);
+  lines.push(literal`# ${tables.length} dataframe(s)`);
   if (tables.length === 0) {
     lines.push('');
     lines.push(
@@ -110,12 +111,12 @@ function renderDescribe(tables: z.infer<typeof DescribedTableSchema>[]): string 
   }
   for (const table of tables) {
     lines.push('');
-    lines.push(`## \`${table.name}\``);
-    lines.push(`- rowCount: ${table.rowCount}`);
+    lines.push(literal`## \`${table.name}\``);
+    lines.push(literal`- rowCount: ${table.rowCount}`);
     if (table.approxSizeBytes !== undefined) {
-      lines.push(`- approxSizeBytes: ${table.approxSizeBytes}`);
+      lines.push(literal`- approxSizeBytes: ${table.approxSizeBytes}`);
     }
-    lines.push(`- columns: ${table.columns.length}`);
+    lines.push(literal`- columns: ${table.columns.length}`);
     // Width-aware budget on the per-column listing: a normal find_* dataframe
     // (~18 columns) renders every column with its type, while a wide genotype
     // matrix (one column per variant, up to hundreds of thousands) caps instead
@@ -130,7 +131,7 @@ function renderDescribe(tables: z.infer<typeof DescribedTableSchema>[]): string 
     const shownCount = table.columns.length - omitted;
     for (const col of table.columns.slice(0, shownCount)) {
       const nullable = col.nullable === undefined ? '' : ` (nullable: ${col.nullable})`;
-      lines.push(`  - ${col.name}: ${col.type}${nullable}`);
+      lines.push(literal`  - ${col.name}: ${col.type}${nullable}`);
     }
     if (omitted > 0) {
       lines.push(
@@ -139,11 +140,11 @@ function renderDescribe(tables: z.infer<typeof DescribedTableSchema>[]): string 
     }
     if (table.provenance) {
       lines.push('- provenance:');
-      lines.push(`  - source: ${table.provenance.source}`);
-      lines.push(`  - baseUrl: ${table.provenance.baseUrl}`);
-      lines.push(`  - createdAt: ${table.provenance.createdAt}`);
-      lines.push(`  - expiresAt: ${table.provenance.expiresAt}`);
-      lines.push(`  - query: \`${JSON.stringify(table.provenance.query)}\``);
+      lines.push(literal`  - source: ${table.provenance.source}`);
+      lines.push(literal`  - baseUrl: ${table.provenance.baseUrl}`);
+      lines.push(literal`  - createdAt: ${table.provenance.createdAt}`);
+      lines.push(literal`  - expiresAt: ${table.provenance.expiresAt}`);
+      lines.push(literal`  - query: \`${JSON.stringify(table.provenance.query)}\``);
     }
   }
   return lines.join('\n');

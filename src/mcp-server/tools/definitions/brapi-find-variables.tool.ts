@@ -9,7 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, serializationError } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
@@ -27,6 +27,7 @@ import {
   buildExtraFilterChecks,
   buildRefinementHint,
   checkFilterMatchRates,
+  collectFindRoutes,
   collectPassthroughParts,
   computeDistribution,
   DataframeHandleSchema,
@@ -40,6 +41,7 @@ import {
   maybeSpill,
   mergeFilters,
   NonBlankString,
+  renderAdvisoryTrailer,
   renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
@@ -49,6 +51,7 @@ import {
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const VariableRowSchema = z
   .object({
@@ -56,6 +59,10 @@ const VariableRowSchema = z
       .string()
       .describe('Server-side identifier for the observation variable.'),
     observationVariableName: z.string().nullish().describe('Display name.'),
+    studyDbIds: z
+      .array(z.string().describe('Study ID.'))
+      .nullish()
+      .describe('Requested studies containing this union row.'),
     observationVariablePUI: z
       .string()
       .nullish()
@@ -129,10 +136,26 @@ const CandidateSchema = z
 
 const OutputSchema = z.object({
   alias: z.string().describe('Connection alias the call used.'),
+  studyCoverage: z
+    .array(
+      z
+        .object({
+          id: z.string().describe('Requested study ID.'),
+          status: z
+            .enum(['complete', 'partial', 'failed', 'unprocessed'])
+            .describe('Scan outcome.'),
+          rowsScanned: z.number().int().nonnegative().describe('Rows examined.'),
+          pagesFetched: z.number().int().nonnegative().describe('Successful pages.'),
+          reason: z.string().optional().describe('Stop/failure reason.'),
+        })
+        .describe('One study.'),
+    )
+    .optional()
+    .describe('Multi-study coverage; incomplete studies may omit variables.'),
   results: z
     .array(VariableRowSchema)
     .describe(
-      'Leading observation variable rows, up to loadLimit and a 24,000-byte budget, whichever binds first. Rows matching `text` are promoted to the top when the free-text query produces candidates; nested objects with no non-empty field are omitted.',
+      'Leading variables, capped by loadLimit and 24,000 bytes. Text candidates lead; nested objects with no non-empty field are omitted.',
     ),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
@@ -150,11 +173,9 @@ const OutputSchema = z.object({
     .describe('Value frequency per field across every matched row fetched.'),
   ontologyCandidates: z
     .array(CandidateSchema)
-    .describe(
-      'Top ranked candidates from the free-text query (if any). Empty when `text` was not supplied.',
-    ),
+    .describe('Ranked free-text candidates; empty without text.'),
   dataframe: DataframeHandleSchema.optional().describe(
-    'The matched rows, staged as a dataframe when results[] holds fewer.',
+    'Matched rows, staged when results[] holds fewer.',
   ),
 });
 
@@ -187,6 +208,37 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     'Find observation variables (traits) by name, trait class, ontology term, or free-text query. Free-text queries are ranked against every fetched row by PUI, name, synonym, and trait text; a candidate carries the ontology PUI of its row as termId when the row has one. results[] holds the leading rows up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
+    {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_find_variables.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_find_variables; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'missing_find_route',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Neither the GET list nor a usable POST search route is advertised',
+      recovery: 'Check brapi_server_info and choose a connection advertising this finder endpoint.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'search_endpoint_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Only a POST search route marked unusable by the active dialect is advertised',
+      recovery: 'Choose a connection with a supported GET route or a usable POST search endpoint.',
+      thrownBy: 'service',
+    },
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
@@ -279,7 +331,9 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     studies: z
       .array(NonBlankString)
       .optional()
-      .describe('Filter by studyDbId. /variables takes one, so only the first value is sent.'),
+      .describe(
+        'Filter by studyDbId. Multiple distinct studies are collected under shared page, row and time budgets and unioned by variable ID with studyDbIds provenance; studyCoverage reports incomplete studies.',
+      ),
     methods: z.array(NonBlankString).optional().describe('Filter by methodDbIds.'),
     scales: z.array(NonBlankString).optional().describe('Filter by scaleDbIds.'),
     crop: NonBlankString.optional().describe('Filter by common crop name (single value).'),
@@ -289,6 +343,18 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
+  inputAliases: {
+    observationVariableDbId: 'variables',
+    observationVariableDbIds: 'variables',
+    ontologyDbId: 'ontologies',
+    ontologyDbIds: 'ontologies',
+    studyDbId: 'studies',
+    studyDbIds: 'studies',
+    methodDbId: 'methods',
+    methodDbIds: 'methods',
+    scaleDbId: 'scales',
+    scaleDbIds: 'scales',
+  },
   output: OutputSchema,
 
   // Agent-facing success-path context: pagination totals, the exact filter map
@@ -316,6 +382,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
   },
 
   enrichmentTrailer: {
+    refinementHint: { render: renderAdvisoryTrailer },
     appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
     warnings: { render: renderWarningsTrailer },
   },
@@ -365,11 +432,6 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
     });
 
-    if ((input.studies?.length ?? 0) > 1) {
-      warnings.push(
-        'BrAPI /variables accepts only one studyDbId per call; using the first value from `studies`.',
-      );
-    }
     if (input.text && !hasOntologyEndpoint) {
       warnings.push(
         'Server does not expose /ontologies — free-text matching uses substring + synonym matching on the fetched rows.',
@@ -378,14 +440,69 @@ export const brapiFindVariables = tool('brapi_find_variables', {
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
     const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'variables');
-    const firstPage = await loadInitialFindPage<Record<string, unknown>>(
-      client,
-      connection,
-      route,
-      loadLimit,
-      ctx,
-      normalizeRow ? { normalizeRow } : {},
-    );
+    const effectiveStudies = [...new Set(input.studies ?? [])];
+    const union = new Map<string, Record<string, unknown>>();
+    const studyCoverage =
+      effectiveStudies.length > 1
+        ? await collectFindRoutes<Record<string, unknown>>({
+            client,
+            connection,
+            ctx,
+            routes: effectiveStudies.map((id) => {
+              const studyFilters = { ...merged, studyDbId: id };
+              const studyAdapted = applyDialectFiltersOrFail(
+                ctx,
+                dialect,
+                'variables',
+                studyFilters,
+                warnings,
+              );
+              return {
+                id,
+                route: resolveFindRoute({
+                  profile,
+                  dialect,
+                  endpoint: 'variables',
+                  filters: studyAdapted.filters,
+                  searchBody: studyFilters,
+                  warnings,
+                  ...(studyAdapted.requiresEscalation ? { requiresEscalation: true } : {}),
+                }),
+              };
+            }),
+            ...(normalizeRow ? { normalizeRow } : {}),
+            consume: (id, rows) => {
+              for (const row of rows) {
+                const variableId = row.observationVariableDbId;
+                if (typeof variableId !== 'string' || !variableId)
+                  throw serializationError(
+                    'Upstream variable row is missing observationVariableDbId.',
+                  );
+                const existing = union.get(variableId);
+                if (existing) {
+                  const provenance = existing.studyDbIds as string[];
+                  if (!provenance.includes(id)) provenance.push(id);
+                } else union.set(variableId, { ...row, studyDbIds: [id] });
+              }
+            },
+          })
+        : undefined;
+    const incomplete = studyCoverage?.some((item) => item.status !== 'complete');
+    const firstPage = studyCoverage
+      ? {
+          rows: [...union.values()],
+          hasMore: false,
+          pagesFetched: studyCoverage.reduce((sum, item) => sum + item.pagesFetched, 0),
+          totalCount: union.size,
+        }
+      : await loadInitialFindPage<Record<string, unknown>>(
+          client,
+          connection,
+          route,
+          loadLimit,
+          ctx,
+          normalizeRow ? { normalizeRow } : {},
+        );
 
     const text = input.text;
     let candidates: OntologyCandidate[] = [];
@@ -394,13 +511,18 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       client,
       connection,
       path: '/variables',
-      filters,
+      filters: studyCoverage ? { ...filters, studyDbId: effectiveStudies } : filters,
       route,
       source: 'find_variables',
+      renderInline: (rows, dataframe) =>
+        renderVariablesRows({ results: rows as Output['results'], dataframe }),
       loadLimit,
       ctx,
       bridge,
       warnings,
+      ...(incomplete
+        ? { preloadedStopReason: 'multi-study coverage incomplete; see studyCoverage' }
+        : {}),
       ...(normalizeRow ? { normalizeRow } : {}),
       /**
        * results[] carries free-text matches first, with empty nested containers
@@ -459,7 +581,11 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       ],
     });
 
-    const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
+    const appliedFilters = studyCoverage
+      ? { ...(route.kind === 'search' ? route.searchBody : filters), studyDbId: effectiveStudies }
+      : route.kind === 'search'
+        ? route.searchBody
+        : filters;
     ctx.enrich({
       totalCount,
       returnedCount: results.length,
@@ -482,6 +608,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       distributions,
       ontologyCandidates: candidates,
     };
+    if (studyCoverage) result.studyCoverage = studyCoverage;
     if (dataframe) result.dataframe = dataframe;
     return result;
   },
@@ -497,20 +624,28 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       }),
     );
     lines.push('');
+    if (result.studyCoverage) {
+      lines.push('## Study coverage');
+      for (const item of result.studyCoverage)
+        lines.push(
+          literal`- studyDbId=\`${item.id}\`: ${item.status}; ${item.rowsScanned} row(s), ${item.pagesFetched} page(s)${item.reason ? `; ${item.reason}` : ''}`,
+        );
+      lines.push('');
+    }
     const moreRows = renderMoreRowsLine(result);
     if (moreRows) lines.push(moreRows, '');
     if (result.ontologyCandidates.length > 0) {
       lines.push('## Ontology candidates (ranked)');
       for (const c of result.ontologyCandidates) {
         const parts: string[] = [];
-        if (c.name) parts.push(`**${c.name}**`);
+        if (c.name) parts.push(literal`**${c.name}**`);
         if (c.observationVariableDbId)
-          parts.push(`observationVariableDbId=\`${c.observationVariableDbId}\``);
-        if (c.termId) parts.push(`termId=\`${c.termId}\``);
-        if (c.ontologyDbId) parts.push(`ontology=${c.ontologyDbId}`);
+          parts.push(literal`observationVariableDbId=\`${c.observationVariableDbId}\``);
+        if (c.termId) parts.push(literal`termId=\`${c.termId}\``);
+        if (c.ontologyDbId) parts.push(literal`ontology=${c.ontologyDbId}`);
         parts.push(`source=${c.source}`);
-        if (c.description) parts.push(`desc=${c.description}`);
-        if (c.synonyms?.length) parts.push(`synonyms=${c.synonyms.join(',')}`);
+        if (c.description) parts.push(literal`desc=${c.description}`);
+        if (c.synonyms?.length) parts.push(literal`synonyms=${c.synonyms.join(',')}`);
         lines.push(`- ${parts.join(' · ')}`);
       }
       lines.push('');
@@ -520,37 +655,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
-    lines.push('## Variables');
-    if (result.results.length === 0) {
-      lines.push('_No rows returned._');
-    } else {
-      const RENDERED = new Set([
-        'observationVariableName',
-        'observationVariableDbId',
-        'observationVariablePUI',
-        'ontologyDbId',
-        'ontologyName',
-        'commonCropName',
-        'trait',
-        'scale',
-        'method',
-      ]);
-      for (const v of result.results) {
-        const parts: string[] = [`**${v.observationVariableName ?? v.observationVariableDbId}**`];
-        parts.push(`id=\`${v.observationVariableDbId}\``);
-        if (v.observationVariablePUI) parts.push(`pui=${v.observationVariablePUI}`);
-        if (v.ontologyDbId) parts.push(`ontology=${v.ontologyDbId}`);
-        if (v.ontologyName) parts.push(`ontologyName=${v.ontologyName}`);
-        if (v.commonCropName) parts.push(`crop=${v.commonCropName}`);
-        if (v.trait) parts.push(`trait=${JSON.stringify(v.trait)}`);
-        if (v.scale) parts.push(`scale=${JSON.stringify(v.scale)}`);
-        if (v.method) parts.push(`method=${JSON.stringify(v.method)}`);
-        parts.push(
-          ...collectPassthroughParts(v as Record<string, unknown>, RENDERED, result.dataframe),
-        );
-        lines.push(`- ${parts.join(' · ')}`);
-      }
-    }
+    lines.push(renderVariablesRows(result));
     if (result.dataframe) {
       lines.push('');
       lines.push('## Dataframe handle');
@@ -618,4 +723,45 @@ function pruneEmptyNestedObjects(row: Record<string, unknown>): Record<string, u
     out[key] = value;
   }
   return changed ? out : row;
+}
+
+/** Render the exact row section used by both formatting and preview sizing. */
+function renderVariablesRows(result: Pick<Output, 'results' | 'dataframe'>): string {
+  const lines: string[] = [];
+  lines.push('## Variables');
+  if (result.results.length === 0) {
+    lines.push('_No rows returned._');
+  } else {
+    const RENDERED = new Set([
+      'observationVariableName',
+      'studyDbIds',
+      'observationVariableDbId',
+      'observationVariablePUI',
+      'ontologyDbId',
+      'ontologyName',
+      'commonCropName',
+      'trait',
+      'scale',
+      'method',
+    ]);
+    for (const v of result.results) {
+      const parts: string[] = [
+        literal`**${v.observationVariableName ?? v.observationVariableDbId}**`,
+      ];
+      parts.push(literal`id=\`${v.observationVariableDbId}\``);
+      if (v.studyDbIds) parts.push(literal`studies=${v.studyDbIds.join(', ')}`);
+      if (v.observationVariablePUI) parts.push(literal`pui=${v.observationVariablePUI}`);
+      if (v.ontologyDbId) parts.push(literal`ontology=${v.ontologyDbId}`);
+      if (v.ontologyName) parts.push(literal`ontologyName=${v.ontologyName}`);
+      if (v.commonCropName) parts.push(literal`crop=${v.commonCropName}`);
+      if (v.trait) parts.push(literal`trait=${JSON.stringify(v.trait)}`);
+      if (v.scale) parts.push(literal`scale=${JSON.stringify(v.scale)}`);
+      if (v.method) parts.push(literal`method=${JSON.stringify(v.method)}`);
+      parts.push(
+        ...collectPassthroughParts(v as Record<string, unknown>, RENDERED, result.dataframe),
+      );
+      lines.push(`- ${parts.join(' · ')}`);
+    }
+  }
+  return lines.join('\n');
 }

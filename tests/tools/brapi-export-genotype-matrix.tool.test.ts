@@ -363,6 +363,126 @@ describe('brapi_export_genotype_matrix tool', () => {
     expect(result.rowCount).toBeLessThanOrEqual(3);
   });
 
+  it('characterizes missing coordinate placeholders on both contract surfaces', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) =>
+      jsonResponse(envelope({ data: pathnameOf(url).endsWith('/search/calls') ? [call()] : [] })),
+    );
+    const definition = {
+      ...brapiExportGenotypeMatrix,
+      handler: (input, contractCtx) =>
+        brapiExportGenotypeMatrix.handler(input, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiExportGenotypeMatrix;
+    const result = await runToolContract(
+      definition,
+      { variantSetDbId: 'vs', format: 'vcf-lite' },
+      { context: { tenantId: 't1' } },
+    );
+    expect(result.isError).toBeFalsy();
+    expect((result.structuredContent as { vcf: string }).vcf).toContain('.\t.\tv-1\t.\t.');
+    expect(JSON.stringify(result.content)).toContain('v-1');
+  });
+
+  for (const format of ['vcf-lite', 'plink'] as const) {
+    it(`${format}: converts valid zero-based starts and preserves missing/invalid coordinates`, async () => {
+      const starts = [
+        0,
+        500,
+        '0',
+        '500',
+        ' 500 ',
+        '5e2',
+        '00500',
+        null,
+        undefined,
+        '',
+        'oops',
+        -1,
+        1.5,
+        '-1',
+        '1.5',
+        '0x10',
+        Number.MAX_SAFE_INTEGER,
+        Number.MAX_SAFE_INTEGER - 1,
+      ];
+      const expected = [
+        '1',
+        '501',
+        '1',
+        '501',
+        '501',
+        '501',
+        '501',
+        ...Array(10).fill(format === 'vcf-lite' ? '.' : '0'),
+        String(Number.MAX_SAFE_INTEGER),
+      ];
+      const ctx = await connect(fetcher);
+      const calls = starts.map((_, i) => call({ variantDbId: `v-${i}` }));
+      const variants = starts.map((start, i) => ({
+        variantDbId: `v-${i}`,
+        referenceName: 'chr1',
+        ...(start === undefined ? {} : { start }),
+      }));
+      fetcher.mockImplementation(async (url: string) =>
+        jsonResponse(
+          envelope({ data: pathnameOf(url).endsWith('/search/calls') ? calls : variants }),
+        ),
+      );
+      const definition = {
+        ...brapiExportGenotypeMatrix,
+        handler: (input, contractCtx) =>
+          brapiExportGenotypeMatrix.handler(input, { ...contractCtx, state: ctx.state }),
+      } satisfies typeof brapiExportGenotypeMatrix;
+      const result = await runToolContract(
+        definition,
+        { variantSetDbId: 'vs', format },
+        { context: { tenantId: 't1' } },
+      );
+      expect(result.isError).toBeFalsy();
+      const structured = result.structuredContent as { vcf?: string; map?: string };
+      const lines = (format === 'vcf-lite' ? structured.vcf! : structured.map!)
+        .split('\n')
+        .slice(format === 'vcf-lite' ? 1 : 0);
+      expect(lines.map((line) => line.split('\t')[format === 'vcf-lite' ? 1 : 3])).toEqual(
+        expected,
+      );
+      const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+      expect(text).toContain(format === 'vcf-lite' ? 'chr1\t1\tv-0' : 'chr1\tv-0\t0\t1');
+      expect(text).toContain(format === 'vcf-lite' ? 'chr1\t501\tv-1' : 'chr1\tv-1\t0\t501');
+      expect(text).toContain(format === 'vcf-lite' ? 'chr1\t.\tv-7' : 'chr1\tv-7\t0\t0');
+      expect(text).toContain(format === 'vcf-lite' ? 'chr1\t.\tv-11' : 'chr1\tv-11\t0\t0');
+    });
+  }
+
+  it('converts metadata after the first page, including array-shaped upstream results', async () => {
+    const ctx = await connect(fetcher);
+    const first = Array.from({ length: 1000 }, (_, i) => ({
+      variantDbId: i === 0 ? 'v-0' : `unused-${i}`,
+      start: 0,
+    }));
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      if (u.pathname.endsWith('/search/calls'))
+        return jsonResponse(
+          envelope({ data: [call({ variantDbId: 'v-0' }), call({ variantDbId: 'v-1' })] }),
+        );
+      const page = Number(u.searchParams.get('page'));
+      return jsonResponse({
+        metadata: { pagination: { totalPages: 2 } },
+        result: page === 0 ? { data: first } : [{ variantDbId: 'v-1', start: '500' }],
+      });
+    });
+    const result = await brapiExportGenotypeMatrix.handler(
+      brapiExportGenotypeMatrix.input.parse({ variantSetDbId: 'vs', format: 'plink' }),
+      ctx,
+    );
+    expect(result.map).toBe('0\tv-0\t0\t1\n0\tv-1\t0\t501');
+    expect(JSON.stringify(brapiExportGenotypeMatrix.format(result))).toContain('501');
+    expect(
+      fetcher.mock.calls.filter(([url]) => pathnameOf(url).endsWith('/variants')),
+    ).toHaveLength(2);
+  });
+
   it('vcf-lite: renders VCF text with CHROM/POS/REF/ALT from /variants and a genotype column per sample', async () => {
     const ctx = await connect(fetcher);
     const callRows = [
@@ -427,8 +547,8 @@ describe('brapi_export_genotype_matrix tool', () => {
     expect(result.vcf).toBeDefined();
     const vcfLines = (result.vcf ?? '').split('\n');
     expect(vcfLines[0]).toBe('#CHROM\tPOS\tID\tREF\tALT\tS1\tS2');
-    expect(vcfLines).toContain('chr1\t1000\tvariant01\tA\tT\t0/0\t1/1');
-    expect(vcfLines).toContain('chr1\t2000\tvariant02\tC\tG\t0/1\t0/0');
+    expect(vcfLines).toContain('chr1\t1001\tvariant01\tA\tT\t0/0\t1/1');
+    expect(vcfLines).toContain('chr1\t2001\tvariant02\tC\tG\t0/1\t0/0');
     expect(result.ped).toBeUndefined();
     expect(result.map).toBeUndefined();
   });
@@ -513,8 +633,8 @@ describe('brapi_export_genotype_matrix tool', () => {
     expect(result.map).toBeDefined();
     expect(result.ped).toBeDefined();
     const mapLines = (result.map ?? '').split('\n');
-    expect(mapLines).toContain('chr1\tvariant01\t0\t1000');
-    expect(mapLines).toContain('chr1\tvariant02\t0\t2000');
+    expect(mapLines).toContain('chr1\tvariant01\t0\t1001');
+    expect(mapLines).toContain('chr1\tvariant02\t0\t2001');
     // FID IID PAT MAT SEX PHENO + biallelic pairs (variant01 A/A → A A, variant02 A/G → A G)
     expect(result.ped).toBe('0\tS1\t0\t0\t0\t0\tA\tA\tA\tG');
     expect(result.vcf).toBeUndefined();

@@ -181,7 +181,7 @@ describe('brapi_find_variants tool', () => {
     expect(result.dataframe?.columnLegend).toMatchObject({ end_: 'end' });
     // format() surfaces the rename so the agent writes correct SQL.
     const text = (brapiFindVariants.format!(result)[0] as { text: string }).text;
-    expect(text).toContain('end_ → end');
+    expect(text).toContain('end\\_ → end');
   });
 });
 

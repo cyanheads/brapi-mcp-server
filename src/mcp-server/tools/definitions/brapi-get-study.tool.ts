@@ -27,6 +27,7 @@ import {
   NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const StudySchema = z
   .object({
@@ -161,6 +162,15 @@ export const brapiGetStudy = tool('brapi_get_study', {
     'Fetch a single study by DbId with its program, trial, and location records resolved where those lookups succeed. Response includes cheap observation/observation-unit/variable counts as drill-down signals.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   errors: [
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_get_study; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
@@ -438,28 +448,29 @@ export const brapiGetStudy = tool('brapi_get_study', {
       'studyCode',
       'studyPUI',
     ]);
-    lines.push(`# ${study.studyName ?? study.studyDbId}`);
+    lines.push(literal`# ${study.studyName ?? study.studyDbId}`);
     lines.push('');
-    lines.push(`- **studyDbId:** \`${study.studyDbId}\``);
-    if (study.studyName) lines.push(`- **studyName:** ${study.studyName}`);
-    if (study.studyType) lines.push(`- **studyType:** ${study.studyType}`);
-    if (study.studyDescription) lines.push(`- **studyDescription:** ${study.studyDescription}`);
-    if (study.programDbId) lines.push(`- **programDbId:** ${study.programDbId}`);
-    if (study.programName) lines.push(`- **programName:** ${study.programName}`);
-    if (study.trialDbId) lines.push(`- **trialDbId:** ${study.trialDbId}`);
-    if (study.trialName) lines.push(`- **trialName:** ${study.trialName}`);
-    if (study.locationDbId) lines.push(`- **locationDbId:** ${study.locationDbId}`);
-    if (study.locationName) lines.push(`- **locationName:** ${study.locationName}`);
-    if (study.commonCropName) lines.push(`- **commonCropName:** ${study.commonCropName}`);
+    lines.push(literal`- **studyDbId:** \`${study.studyDbId}\``);
+    if (study.studyName) lines.push(literal`- **studyName:** ${study.studyName}`);
+    if (study.studyType) lines.push(literal`- **studyType:** ${study.studyType}`);
+    if (study.studyDescription)
+      lines.push(literal`- **studyDescription:** ${study.studyDescription}`);
+    if (study.programDbId) lines.push(literal`- **programDbId:** ${study.programDbId}`);
+    if (study.programName) lines.push(literal`- **programName:** ${study.programName}`);
+    if (study.trialDbId) lines.push(literal`- **trialDbId:** ${study.trialDbId}`);
+    if (study.trialName) lines.push(literal`- **trialName:** ${study.trialName}`);
+    if (study.locationDbId) lines.push(literal`- **locationDbId:** ${study.locationDbId}`);
+    if (study.locationName) lines.push(literal`- **locationName:** ${study.locationName}`);
+    if (study.commonCropName) lines.push(literal`- **commonCropName:** ${study.commonCropName}`);
     const cleanSeasons = asStringArray(study.seasons);
-    if (cleanSeasons?.length) lines.push(`- **seasons:** ${cleanSeasons.join(', ')}`);
-    if (study.active != null) lines.push(`- **active:** ${study.active}`);
-    if (study.startDate) lines.push(`- **startDate:** ${study.startDate}`);
-    if (study.endDate) lines.push(`- **endDate:** ${study.endDate}`);
-    if (study.studyCode) lines.push(`- **studyCode:** ${study.studyCode}`);
-    if (study.studyPUI) lines.push(`- **studyPUI:** ${study.studyPUI}`);
+    if (cleanSeasons?.length) lines.push(literal`- **seasons:** ${cleanSeasons.join(', ')}`);
+    if (study.active != null) lines.push(literal`- **active:** ${study.active}`);
+    if (study.startDate) lines.push(literal`- **startDate:** ${study.startDate}`);
+    if (study.endDate) lines.push(literal`- **endDate:** ${study.endDate}`);
+    if (study.studyCode) lines.push(literal`- **studyCode:** ${study.studyCode}`);
+    if (study.studyPUI) lines.push(literal`- **studyPUI:** ${study.studyPUI}`);
     appendPassthroughLines(lines, study as Record<string, unknown>, STUDY_RENDERED);
-    lines.push(`- **alias:** ${result.alias}`);
+    lines.push(literal`- **alias:** ${result.alias}`);
 
     if (result.program) {
       lines.push('');
@@ -477,24 +488,24 @@ export const brapiGetStudy = tool('brapi_get_study', {
       renderKeyValues(lines, result.location);
       const coords = extractCoordinates(result.location);
       if (coords && result.location.latitude == null && result.location.longitude == null) {
-        lines.push(`- **latitude:** ${coords.latitude}`);
-        lines.push(`- **longitude:** ${coords.longitude}`);
+        lines.push(literal`- **latitude:** ${coords.latitude}`);
+        lines.push(literal`- **longitude:** ${coords.longitude}`);
         if (coords.altitude != null && result.location.altitude == null) {
-          lines.push(`- **altitude:** ${coords.altitude}`);
+          lines.push(literal`- **altitude:** ${coords.altitude}`);
         }
       }
     }
 
     lines.push('');
     lines.push('## Drill-down signals');
-    lines.push(`- observationCount: ${result.observationCount ?? '—'}`);
-    lines.push(`- observationUnitCount: ${result.observationUnitCount ?? '—'}`);
-    lines.push(`- variableCount: ${result.variableCount ?? '—'}`);
+    lines.push(literal`- observationCount: ${result.observationCount ?? '—'}`);
+    lines.push(literal`- observationUnitCount: ${result.observationUnitCount ?? '—'}`);
+    lines.push(literal`- variableCount: ${result.variableCount ?? '—'}`);
 
     if (result.warnings.length > 0) {
       lines.push('');
       lines.push('## Warnings');
-      for (const w of result.warnings) lines.push(`- ${w}`);
+      for (const w of result.warnings) lines.push(literal`- ${w}`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },
@@ -530,12 +541,12 @@ function renderKeyValues(lines: string[], record: Record<string, unknown>): void
       if (value.some((entry) => entry !== null && typeof entry === 'object')) {
         appendPassthroughLines(lines, { [key]: value }, new Set());
       } else {
-        lines.push(`- **${key}:** ${value.join(', ')}`);
+        lines.push(literal`- **${key}:** ${value.join(', ')}`);
       }
     } else if (typeof value === 'object') {
-      lines.push(`- **${key}:** ${JSON.stringify(value)}`);
+      lines.push(literal`- **${key}:** ${JSON.stringify(value)}`);
     } else {
-      lines.push(`- **${key}:** ${value}`);
+      lines.push(literal`- **${key}:** ${value}`);
     }
   }
 }

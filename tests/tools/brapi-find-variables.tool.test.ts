@@ -23,6 +23,7 @@ import {
   type MockFetcher,
   pathnameOf,
   resetTestServices,
+  withCallRemaining,
 } from './_tool-test-helpers.js';
 
 function varRow(extra: Record<string, unknown> = {}): Record<string, unknown> {
@@ -200,18 +201,52 @@ describe('brapi_find_variables tool', () => {
     expect(result.results[0]?.observationVariableDbId).toBe('var-dm');
   });
 
-  it('warns when more than one studyDbId is supplied (BrAPI accepts only one)', async () => {
+  it('preserves a single study filter and empty-result behavior', async () => {
     const ctx = await connect(fetcher);
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
-    await brapiFindVariables.handler(
-      brapiFindVariables.input.parse({ studies: ['s-1', 's-2'] }),
-      ctx,
-    );
+    await brapiFindVariables.handler(brapiFindVariables.input.parse({ studies: ['s-1'] }), ctx);
 
-    expect(getEnrichment(ctx).warnings.join('\n')).toContain('only one studyDbId');
     const url = new URL(String(fetcher.mock.calls[0]![0]));
     expect(url.searchParams.get('studyDbId')).toBe('s-1');
+    expect(getEnrichment(ctx).returnedCount).toBe(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('unions overlapping studies by actual variable ID with provenance', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const study = new URL(url).searchParams.get('studyDbId');
+      const rows =
+        study === '4494'
+          ? [
+              varRow({ observationVariableDbId: '76736' }),
+              varRow({ observationVariableDbId: '76745' }),
+            ]
+          : [
+              varRow({ observationVariableDbId: '76736' }),
+              varRow({ observationVariableDbId: '76745' }),
+              varRow({ observationVariableDbId: '76742' }),
+            ];
+      return jsonResponse(envelope({ data: rows }, { totalCount: rows.length }));
+    });
+    const result = await brapiFindVariables.handler(
+      brapiFindVariables.input.parse({ studies: ['4494', '4505', '4494'] }),
+      ctx,
+    );
+    expect(result.results.map((row) => row.observationVariableDbId)).toEqual([
+      '76736',
+      '76745',
+      '76742',
+    ]);
+    expect(result.results[0]).toMatchObject({ studyDbIds: ['4494', '4505'] });
+    expect(result.results[2]).toMatchObject({ studyDbIds: ['4505'] });
+    expect(getEnrichment(ctx).totalCount).toBe(3);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(result.distributions.ontologyDbId).toEqual({ CO_334: 3 });
+    expect(brapiFindVariables.format!(result)[0]).toMatchObject({
+      text: expect.stringContaining('4505'),
+    });
   });
 
   it('warns when free-text is supplied but /ontologies is unavailable', async () => {
@@ -220,6 +255,214 @@ describe('brapi_find_variables tool', () => {
 
     await brapiFindVariables.handler(brapiFindVariables.input.parse({ text: 'dry matter' }), ctx);
     expect(getEnrichment(ctx).warnings.join('\n')).toContain('does not expose /ontologies');
+  });
+
+  it('paginates distinct studies under one page budget and stages the union once', async () => {
+    const ctx = await connect(fetcher);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const study = u.searchParams.get('studyDbId');
+      const page = Number(u.searchParams.get('page') ?? 0);
+      return jsonResponse(
+        envelope(
+          {
+            data: Array.from({ length: 10 }, (_, i) => ({
+              observationVariableDbId: `${study}-${page * 10 + i}`,
+            })),
+          },
+          { totalCount: 10_000 },
+        ),
+      );
+    });
+    const result = await brapiFindVariables.handler(
+      brapiFindVariables.input.parse({ studies: ['a', 'b', 'c'], loadLimit: 5 }),
+      ctx,
+    );
+    expect(fetcher).toHaveBeenCalledTimes(50);
+    expect(register).toHaveBeenCalledTimes(1);
+    const staged = register.mock.calls[0]![1].rows as Record<string, unknown>[];
+    expect(staged).toHaveLength(500);
+    expect(new Set(staged.map((row) => row.observationVariableDbId)).size).toBe(500);
+    expect(result.studyCoverage?.every((item) => item.status === 'partial')).toBe(true);
+    expect(result.dataframe?.truncated).toBe(true);
+    expect(result.hasMore).toBe(true);
+    const described = await getCanvasBridge().describe(ctx);
+    expect(described).toHaveLength(1);
+    expect(described[0]?.provenance?.query).toMatchObject({ studyDbId: ['a', 'b', 'c'] });
+    vi.restoreAllMocks();
+  });
+
+  it.each([undefined, null])(
+    'preserves upstream studyDbIds passthrough without union (value: %s)',
+    async (studyDbIds) => {
+      const ctx = await connect(fetcher);
+      fetcher.mockImplementation(async () =>
+        jsonResponse(envelope({ data: [varRow({ studyDbIds })] }, { totalCount: 1 })),
+      );
+      const definition = {
+        ...brapiFindVariables,
+        handler: (parsed, contractCtx) =>
+          brapiFindVariables.handler(parsed, { ...contractCtx, state: ctx.state }),
+      } satisfies typeof brapiFindVariables;
+      const result = await runToolContract(definition, {}, { context: { tenantId: 't1' } });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        results: [{ observationVariableDbId: 'var-1' }],
+      });
+      expect(result.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: expect.stringContaining('var-1') }),
+        ]),
+      );
+    },
+  );
+
+  it('discloses changing study strides on both surfaces and stages only discovered identities', async () => {
+    const ctx = await connect(fetcher);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      if (u.searchParams.get('studyDbId') === 'empty')
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      const page = Number(u.searchParams.get('page') ?? 0);
+      const pageSize = page === 0 ? 3 : 2;
+      return jsonResponse({
+        metadata: { pagination: { totalCount: 5, pageSize } },
+        result: {
+          data: Array.from({ length: pageSize }, (_, i) =>
+            varRow({ observationVariableDbId: String(page * pageSize + i) }),
+          ),
+        },
+      });
+    });
+    const definition = {
+      ...brapiFindVariables,
+      handler: (parsed, contractCtx) =>
+        brapiFindVariables.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFindVariables;
+    const result = await runToolContract(
+      definition,
+      { studies: ['changing', 'empty'], loadLimit: 1 },
+      { context: { tenantId: 't1' } },
+    );
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      hasMore: true,
+      studyCoverage: [
+        { id: 'changing', status: 'partial', reason: 'page_size_changed' },
+        { id: 'empty', status: 'complete' },
+      ],
+      dataframe: { rowCount: 4, truncated: true },
+    });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining('page_size_changed') }),
+      ]),
+    );
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(register.mock.calls[0]?.[1].rows.map((row) => row.observationVariableDbId)).toEqual([
+      '0',
+      '1',
+      '2',
+      '3',
+    ]);
+    vi.restoreAllMocks();
+  });
+
+  it('returns failed and empty-study coverage alongside successful rows on both surfaces', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const study = new URL(url).searchParams.get('studyDbId');
+      if (study === 'bad') return jsonResponse({ message: 'upstream failed' }, 500);
+      const rows = study === 'empty' ? [] : [varRow()];
+      return jsonResponse(envelope({ data: rows }, { totalCount: rows.length }));
+    });
+    const definition = {
+      ...brapiFindVariables,
+      handler: (parsed, contractCtx) =>
+        brapiFindVariables.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFindVariables;
+    const result = await runToolContract(
+      definition,
+      { studies: ['ok', 'bad', 'empty'] },
+      { context: { tenantId: 't1' } },
+    );
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      results: [{ observationVariableDbId: 'var-1', studyDbIds: ['ok'] }],
+      hasMore: true,
+      studyCoverage: [
+        { id: 'ok', status: 'complete' },
+        { id: 'bad', status: 'failed' },
+        { id: 'empty', status: 'complete' },
+      ],
+    });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining('`bad`: failed') }),
+      ]),
+    );
+  });
+
+  it('raises the upstream failure when every attempted study fails', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async () => new Response('unavailable', { status: 503 }));
+    await expect(
+      brapiFindVariables.handler(
+        brapiFindVariables.input.parse({ studies: ['bad', 'also-bad'] }),
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+  });
+
+  it('reports deadline-skipped studies without dispatching requests', async () => {
+    const ctx = await connect(fetcher);
+    const result = await brapiFindVariables.handler(
+      brapiFindVariables.input.parse({ studies: ['a', 'b'] }),
+      withCallRemaining(ctx, 0),
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(result.studyCoverage).toEqual([
+      { id: 'a', status: 'unprocessed', reason: 'deadline', rowsScanned: 0, pagesFetched: 0 },
+      { id: 'b', status: 'unprocessed', reason: 'deadline', rowsScanned: 0, pagesFetched: 0 },
+    ]);
+    expect(result.hasMore).toBe(true);
+  });
+
+  it('propagates caller cancellation without scheduling later studies', async () => {
+    const connected = await connect(fetcher);
+    const controller = new AbortController();
+    const ctx = { ...connected, signal: controller.signal };
+    fetcher.mockImplementation(async () => {
+      controller.abort();
+      throw new Error('cancelled');
+    });
+    await expect(
+      brapiFindVariables.handler(
+        brapiFindVariables.input.parse({ studies: ['a', 'b', 'c', 'd', 'e'] }),
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    expect(fetcher.mock.calls.length).toBeLessThanOrEqual(4);
+  });
+
+  it('preserves named-study precedence over extraFilters before fanout', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async () => jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+    const result = await brapiFindVariables.handler(
+      brapiFindVariables.input.parse({
+        studies: ['a', 'b'],
+        extraFilters: { studyDbId: 'override' },
+      }),
+      ctx,
+    );
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(
+      fetcher.mock.calls.map((call) => new URL(String(call[0])).searchParams.get('studyDbId')),
+    ).toEqual(['a', 'b']);
+    expect(result.studyCoverage).toHaveLength(2);
+    expect(getEnrichment(ctx).appliedFilters).toMatchObject({ studyDbId: ['a', 'b'] });
   });
 
   it('throws ValidationError when /variables is not advertised', async () => {

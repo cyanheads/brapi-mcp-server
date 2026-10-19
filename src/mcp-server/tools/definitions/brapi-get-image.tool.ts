@@ -22,6 +22,7 @@ import {
   NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const MAX_IMAGES_PER_CALL = 5;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -182,6 +183,9 @@ export const brapiGetImage = tool('brapi_get_image', {
       .describe(`1–${MAX_IMAGES_PER_CALL} image identifiers.`),
     alias: AliasInput,
   }),
+  inputAliases: {
+    imageDbId: 'imageDbIds',
+  },
   output: OutputSchema,
 
   async handler(input, ctx) {
@@ -236,12 +240,12 @@ export const brapiGetImage = tool('brapi_get_image', {
   format: (result) => {
     const blocks: { type: 'text'; text: string }[] = [];
     const header: string[] = [];
-    header.push(`# ${result.images.length} image(s) loaded — \`${result.alias}\``);
+    header.push(literal`# ${result.images.length} image(s) loaded — \`${result.alias}\``);
     if (result.errors.length > 0) {
-      header.push(`⚠ ${result.errors.length} failed — see below.`);
+      header.push(literal`⚠ ${result.errors.length} failed — see below.`);
     }
     if (result.warnings.length > 0) {
-      header.push(`⚠ ${result.warnings.length} suspect — see warnings below.`);
+      header.push(literal`⚠ ${result.warnings.length} suspect — see warnings below.`);
     }
     blocks.push({ type: 'text', text: header.join('\n') });
 
@@ -265,40 +269,40 @@ export const brapiGetImage = tool('brapi_get_image', {
       const meta = img.metadata;
       const lines: string[] = [];
       const label = meta.imageName ?? meta.imageFileName ?? img.imageDbId;
-      lines.push(`## ${label}`);
-      lines.push(`- imageDbId: \`${img.imageDbId}\``);
-      lines.push(`- mimeType: ${img.mimeType}`);
-      lines.push(`- sizeBytes: ${img.sizeBytes}`);
-      lines.push(`- source: ${img.source}`);
-      lines.push(`- metadata.imageDbId: \`${meta.imageDbId}\``);
-      if (meta.mimeType) lines.push(`- metadata.mimeType: ${meta.mimeType}`);
-      if (meta.imageFileName) lines.push(`- imageFileName: ${meta.imageFileName}`);
+      lines.push(literal`## ${label}`);
+      lines.push(literal`- imageDbId: \`${img.imageDbId}\``);
+      lines.push(literal`- mimeType: ${img.mimeType}`);
+      lines.push(literal`- sizeBytes: ${img.sizeBytes}`);
+      lines.push(literal`- source: ${img.source}`);
+      lines.push(literal`- metadata.imageDbId: \`${meta.imageDbId}\``);
+      if (meta.mimeType) lines.push(literal`- metadata.mimeType: ${meta.mimeType}`);
+      if (meta.imageFileName) lines.push(literal`- imageFileName: ${meta.imageFileName}`);
       if (meta.imageWidth && meta.imageHeight) {
-        lines.push(`- dimensions: ${meta.imageWidth}×${meta.imageHeight}`);
+        lines.push(literal`- dimensions: ${meta.imageWidth}×${meta.imageHeight}`);
       }
       if (meta.observationUnitName)
-        lines.push(`- observationUnitName: ${meta.observationUnitName}`);
+        lines.push(literal`- observationUnitName: ${meta.observationUnitName}`);
       if (meta.observationUnitDbId)
-        lines.push(`- observationUnitDbId: ${meta.observationUnitDbId}`);
-      if (meta.studyName) lines.push(`- studyName: ${meta.studyName}`);
-      if (meta.studyDbId) lines.push(`- studyDbId: ${meta.studyDbId}`);
-      if (meta.imageTimeStamp) lines.push(`- imageTimeStamp: ${meta.imageTimeStamp}`);
-      if (meta.imageURL) lines.push(`- imageURL: ${meta.imageURL}`);
-      if (meta.copyright) lines.push(`- copyright: ${meta.copyright}`);
-      if (meta.description) lines.push(`- description: ${meta.description}`);
+        lines.push(literal`- observationUnitDbId: ${meta.observationUnitDbId}`);
+      if (meta.studyName) lines.push(literal`- studyName: ${meta.studyName}`);
+      if (meta.studyDbId) lines.push(literal`- studyDbId: ${meta.studyDbId}`);
+      if (meta.imageTimeStamp) lines.push(literal`- imageTimeStamp: ${meta.imageTimeStamp}`);
+      if (meta.imageURL) lines.push(literal`- imageURL: ${meta.imageURL}`);
+      if (meta.copyright) lines.push(literal`- copyright: ${meta.copyright}`);
+      if (meta.description) lines.push(literal`- description: ${meta.description}`);
       appendPassthroughLines(lines, meta as Record<string, unknown>, META_RENDERED);
       blocks.push({ type: 'text', text: lines.join('\n') });
     }
     for (const err of result.errors) {
       blocks.push({
         type: 'text',
-        text: `\n### ${err.imageDbId} — failed\n- error: ${err.error}`,
+        text: literal`\n### ${err.imageDbId} — failed\n- error: ${err.error}`,
       });
     }
     for (const w of result.warnings) {
       blocks.push({
         type: 'text',
-        text: `\n### ${w.imageDbId} — warning\n- ${w.warning}`,
+        text: literal`\n### ${w.imageDbId} — warning\n- ${w.warning}`,
       });
     }
     return blocks;

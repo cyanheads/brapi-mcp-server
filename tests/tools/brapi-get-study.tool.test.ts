@@ -72,8 +72,8 @@ describe('brapi_get_study tool', () => {
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toMatchObject({ trial, program, location });
     const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
-    expect(text).toContain('- **contacts:** [{"name":"Breeder","roles":["lead"]}]');
-    expect(text).toContain('["Lead",{"name":"Program breeder"}]');
+    expect(text).toContain('- **contacts:** \\[{"name":"Breeder","roles":\\["lead"\\]}\\]');
+    expect(text).toContain('\\["Lead",{"name":"Program breeder"}\\]');
     expect(text).toContain('- **tags:** a, b');
     expect(text).not.toContain('**empty:**');
     expect(text).not.toContain('[object Object]');

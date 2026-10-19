@@ -27,6 +27,7 @@ import {
   renderWarningsTrailer,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
+import { fenced, literal } from '../shared/markdown-literals.js';
 import { previewRawResult } from '../shared/raw-preview.js';
 import { suggestForGet } from '../shared/raw-routing-hints.js';
 
@@ -72,6 +73,23 @@ export const brapiRawGet = tool('brapi_raw_get', {
     'Passthrough to BrAPI GET /{path} without foreign-key resolution. List results (result array or result.data) return a leading preview within loadLimit and a 24,000-byte budget on each serialized row representation; an oversized first row returns no inline rows. Omitted fetched rows remain in a dataframe readable with brapi_dataframe_describe and brapi_dataframe_query. Explicit params.page/pageSize fetches only that upstream page, staging it if trimmed. Non-list results and envelope siblings are preserved. Emits a suggestion when a curated tool covers the endpoint.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
+    {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_raw_get.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_raw_get; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
@@ -254,9 +272,9 @@ export const brapiRawGet = tool('brapi_raw_get', {
 
   format: (result) => {
     const lines: string[] = [];
-    lines.push(`# GET ${result.path} — \`${result.alias}\``);
+    lines.push(literal`# GET ${result.path} — \`${result.alias}\``);
     lines.push('');
-    lines.push(`URL: ${result.url}`);
+    lines.push(literal`URL: ${result.url}`);
     const pagination = result.metadata.pagination;
     if (pagination) {
       const parts = [
@@ -269,7 +287,7 @@ export const brapiRawGet = tool('brapi_raw_get', {
     }
     if (result.suggestion) {
       lines.push('');
-      lines.push(`**Suggestion:** ${result.suggestion}`);
+      lines.push(literal`**Suggestion:** ${result.suggestion}`);
     }
     if (result.dataframe) {
       lines.push('');
@@ -278,9 +296,7 @@ export const brapiRawGet = tool('brapi_raw_get', {
     }
     lines.push('');
     lines.push('## Raw result');
-    lines.push('```json');
-    lines.push(JSON.stringify(result.result, null, 2));
-    lines.push('```');
+    lines.push(fenced(JSON.stringify(result.result, null, 2), 'json'));
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

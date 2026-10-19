@@ -25,6 +25,7 @@ import type { ExportResult } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const ColumnNameSchema = z
   .string()
@@ -262,12 +263,12 @@ async function sweepStaleExports(dir: string, ttlSeconds: number, ctx: Context):
 
 function renderExport(result: z.infer<typeof OutputSchema>): string {
   const lines: string[] = [];
-  lines.push(`# Exported \`${result.dataframe}\` → \`${result.filename}\``);
-  lines.push(`- format: ${result.format}`);
-  lines.push(`- path: ${result.path}`);
-  lines.push(`- rows: ${result.rowCount}`);
-  lines.push(`- bytes: ${result.sizeBytes}`);
-  lines.push(`- columns: ${result.columns.map((c) => `${c.name} (${c.type})`).join(', ')}`);
-  lines.push(`- expiresAt: ${result.expiresAt}`);
+  lines.push(literal`# Exported \`${result.dataframe}\` → \`${result.filename}\``);
+  lines.push(literal`- format: ${result.format}`);
+  lines.push(literal`- path: ${result.path}`);
+  lines.push(literal`- rows: ${result.rowCount}`);
+  lines.push(literal`- bytes: ${result.sizeBytes}`);
+  lines.push(literal`- columns: ${result.columns.map((c) => `${c.name} (${c.type})`).join(', ')}`);
+  lines.push(literal`- expiresAt: ${result.expiresAt}`);
   return lines.join('\n');
 }

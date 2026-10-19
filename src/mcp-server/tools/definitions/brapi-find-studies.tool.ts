@@ -37,6 +37,7 @@ import {
   maybeSpill,
   mergeFilters,
   NonBlankString,
+  renderAdvisoryTrailer,
   renderAppliedFiltersTrailer,
   renderDataframeHandle,
   renderDistributions,
@@ -46,6 +47,7 @@ import {
   requireRegisteredConnection,
   resolveFindRoute,
 } from '../shared/find-helpers.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const StudyRowSchema = z
   .object({
@@ -147,6 +149,37 @@ export const brapiFindStudies = tool('brapi_find_studies', {
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_find_studies.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_find_studies; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'missing_find_route',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Neither the GET list nor a usable POST search route is advertised',
+      recovery: 'Check brapi_server_info and choose a connection advertising this finder endpoint.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'search_endpoint_disabled',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Only a POST search route marked unusable by the active dialect is advertised',
+      recovery: 'Choose a connection with a supported GET route or a usable POST search endpoint.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
       when: 'No connection is registered under the requested alias, and the server has no base URL configured for it to connect on first use',
@@ -240,6 +273,16 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
+  inputAliases: {
+    seasonDbId: 'seasons',
+    seasonDbIds: 'seasons',
+    locationDbId: 'locations',
+    locationDbIds: 'locations',
+    programDbId: 'programs',
+    programDbIds: 'programs',
+    trialDbId: 'trials',
+    trialDbIds: 'trials',
+  },
   output: OutputSchema,
 
   // Agent-facing success-path context: pagination totals, the exact filter map
@@ -273,6 +316,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
   },
 
   enrichmentTrailer: {
+    refinementHint: { render: renderAdvisoryTrailer },
     appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER, 'none sent upstream') },
     // Enriched right after appliedFilters, so these bullets continue its list.
     clientSideFilters: {
@@ -280,7 +324,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         Object.entries(filters ?? {})
           .map(
             ([k, v]) =>
-              `- **${k}:** ${v.join(', ')} _(applied client-side: this server ignores it, so it was not sent upstream)_`,
+              literal`- **${k}:** ${v.join(', ')} _(applied client-side: this server ignores it, so it was not sent upstream)_`,
           )
           .join('\n'),
     },
@@ -361,6 +405,8 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       filters,
       route,
       source: 'find_studies',
+      renderInline: (rows, dataframe) =>
+        renderStudiesRows({ results: rows as Output['results'], dataframe }),
       loadLimit,
       ctx,
       bridge,
@@ -487,54 +533,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     const rendered = renderDistributions(result.distributions, result.dataframe);
     lines.push(rendered || '_No values to summarize._');
     lines.push('');
-    lines.push('## Studies');
-    if (result.results.length === 0) {
-      lines.push('_No rows returned._');
-    } else {
-      const RENDERED = new Set([
-        'studyName',
-        'studyDbId',
-        'studyType',
-        'programName',
-        'programDbId',
-        'trialName',
-        'trialDbId',
-        'locationName',
-        'locationDbId',
-        'seasons',
-        'commonCropName',
-        'active',
-        'startDate',
-        'endDate',
-        'studyCode',
-        'studyPUI',
-        'studyDescription',
-      ]);
-      for (const study of result.results) {
-        const parts: string[] = [`**${study.studyName ?? study.studyDbId}**`];
-        parts.push(`id=\`${study.studyDbId}\``);
-        if (study.studyType) parts.push(`type=${study.studyType}`);
-        if (study.programName) parts.push(`program=${study.programName}`);
-        if (study.programDbId) parts.push(`programDbId=${study.programDbId}`);
-        if (study.trialName) parts.push(`trial=${study.trialName}`);
-        if (study.trialDbId) parts.push(`trialDbId=${study.trialDbId}`);
-        if (study.locationName) parts.push(`location=${study.locationName}`);
-        if (study.locationDbId) parts.push(`locationDbId=${study.locationDbId}`);
-        const cleanSeasons = asStringArray(study.seasons);
-        if (cleanSeasons?.length) parts.push(`seasons=${cleanSeasons.join(',')}`);
-        if (study.commonCropName) parts.push(`crop=${study.commonCropName}`);
-        if (study.active != null) parts.push(`active=${study.active}`);
-        if (study.startDate) parts.push(`start=${study.startDate}`);
-        if (study.endDate) parts.push(`end=${study.endDate}`);
-        if (study.studyCode) parts.push(`code=${study.studyCode}`);
-        if (study.studyPUI) parts.push(`pui=${study.studyPUI}`);
-        if (study.studyDescription) parts.push(`desc=${study.studyDescription}`);
-        parts.push(
-          ...collectPassthroughParts(study as Record<string, unknown>, RENDERED, result.dataframe),
-        );
-        lines.push(`- ${parts.join(' · ')}`);
-      }
-    }
+    lines.push(renderStudiesRows(result));
     if (result.dataframe) {
       lines.push('');
       lines.push('## Dataframe handle');
@@ -543,3 +542,57 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** Render the exact row section used by both formatting and preview sizing. */
+function renderStudiesRows(result: Pick<Output, 'results' | 'dataframe'>): string {
+  const lines: string[] = [];
+  lines.push('## Studies');
+  if (result.results.length === 0) {
+    lines.push('_No rows returned._');
+  } else {
+    const RENDERED = new Set([
+      'studyName',
+      'studyDbId',
+      'studyType',
+      'programName',
+      'programDbId',
+      'trialName',
+      'trialDbId',
+      'locationName',
+      'locationDbId',
+      'seasons',
+      'commonCropName',
+      'active',
+      'startDate',
+      'endDate',
+      'studyCode',
+      'studyPUI',
+      'studyDescription',
+    ]);
+    for (const study of result.results) {
+      const parts: string[] = [literal`**${study.studyName ?? study.studyDbId}**`];
+      parts.push(literal`id=\`${study.studyDbId}\``);
+      if (study.studyType) parts.push(literal`type=${study.studyType}`);
+      if (study.programName) parts.push(literal`program=${study.programName}`);
+      if (study.programDbId) parts.push(literal`programDbId=${study.programDbId}`);
+      if (study.trialName) parts.push(literal`trial=${study.trialName}`);
+      if (study.trialDbId) parts.push(literal`trialDbId=${study.trialDbId}`);
+      if (study.locationName) parts.push(literal`location=${study.locationName}`);
+      if (study.locationDbId) parts.push(literal`locationDbId=${study.locationDbId}`);
+      const cleanSeasons = asStringArray(study.seasons);
+      if (cleanSeasons?.length) parts.push(literal`seasons=${cleanSeasons.join(',')}`);
+      if (study.commonCropName) parts.push(literal`crop=${study.commonCropName}`);
+      if (study.active != null) parts.push(`active=${study.active}`);
+      if (study.startDate) parts.push(literal`start=${study.startDate}`);
+      if (study.endDate) parts.push(literal`end=${study.endDate}`);
+      if (study.studyCode) parts.push(literal`code=${study.studyCode}`);
+      if (study.studyPUI) parts.push(literal`pui=${study.studyPUI}`);
+      if (study.studyDescription) parts.push(literal`desc=${study.studyDescription}`);
+      parts.push(
+        ...collectPassthroughParts(study as Record<string, unknown>, RENDERED, result.dataframe),
+      );
+      lines.push(`- ${parts.join(' · ')}`);
+    }
+  }
+  return lines.join('\n');
+}

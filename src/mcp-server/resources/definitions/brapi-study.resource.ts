@@ -18,6 +18,15 @@ export const brapiStudyResource = resource('brapi://study/{studyDbId}', {
   mimeType: 'application/json',
   errors: [
     {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying this resource; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
       when: 'No default BrAPI connection is registered, and the server has no default base URL configured to connect on first use',

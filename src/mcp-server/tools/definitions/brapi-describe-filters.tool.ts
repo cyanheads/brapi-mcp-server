@@ -11,6 +11,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getFilterCatalog, listFilterEndpoints } from '@/services/brapi-filters/index.js';
+import { code, prose } from '../shared/markdown-literals.js';
 
 const ENDPOINT_VALUES = listFilterEndpoints();
 
@@ -85,13 +86,9 @@ export const brapiDescribeFilters = tool('brapi_describe_filters', {
     lines.push('| Name | Type | Description | Example |');
     lines.push('|:-----|:-----|:------------|:--------|');
     for (const filter of result.filters) {
-      // Backslashes first, so the `\` added before each pipe is not doubled.
-      const description = filter.description.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
-      // A backslash is already literal inside a code span, but a bare `|` still
-      // splits the row there: code-span cells escape pipes only.
-      const name = filter.name.replace(/\|/g, '\\|');
-      const example = filter.example.replace(/\|/g, '\\|');
-      lines.push(`| \`${name}\` | \`${filter.type}\` | ${description} | \`${example}\` |`);
+      lines.push(
+        `| ${code(filter.name, true)} | ${code(filter.type, true)} | ${prose(filter.description)} | ${code(filter.example, true)} |`,
+      );
     }
     lines.push('');
     lines.push(

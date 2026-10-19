@@ -4,6 +4,7 @@
  */
 
 import { INLINE_RESULTS_BUDGET_BYTES, type InlineSelection } from './find-helpers.js';
+import { fenced } from './markdown-literals.js';
 
 /** Select a prefix fitting both the JSON array and serialized rendered row section. */
 export function selectPreviewRows<T>(
@@ -31,5 +32,5 @@ export function selectPreviewRows<T>(
 
 /** Render the raw list's row section, excluding envelope siblings. */
 export function renderRawRows(rows: readonly unknown[], nested = false): string {
-  return `\`\`\`json\n${JSON.stringify(nested ? { data: rows } : rows, null, 2)}\n\`\`\``;
+  return fenced(JSON.stringify(nested ? { data: rows } : rows, null, 2), 'json');
 }

@@ -28,6 +28,7 @@ import type {
 import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 import { hasFindRoute } from './find-helpers.js';
+import { literal } from './markdown-literals.js';
 
 /**
  * Finders an agent can open with from nothing but an alias, in suggestion
@@ -450,19 +451,21 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
   // the headline; use "Registered" to signal "alias is bound, server is
   // not responding usefully."
   const headlineVerb = envelope.capabilities.supportedCount === 0 ? 'Registered' : 'Connected';
-  lines.push(`# ${headlineVerb}: ${title}`);
+  lines.push(literal`# ${headlineVerb}: ${title}`);
   lines.push('');
-  lines.push(`- **Alias:** ${envelope.alias}`);
-  lines.push(`- **Base URL:** ${envelope.baseUrl}`);
-  lines.push(`- **BrAPI version:** ${envelope.server.brapiVersion ?? 'unknown'}`);
+  lines.push(literal`- **Alias:** ${envelope.alias}`);
+  lines.push(literal`- **Base URL:** ${envelope.baseUrl}`);
+  lines.push(literal`- **BrAPI version:** ${envelope.server.brapiVersion ?? 'unknown'}`);
   if (envelope.server.organizationName)
-    lines.push(`- **Organization:** ${envelope.server.organizationName}`);
-  if (envelope.server.description) lines.push(`- **Description:** ${envelope.server.description}`);
+    lines.push(literal`- **Organization:** ${envelope.server.organizationName}`);
+  if (envelope.server.description)
+    lines.push(literal`- **Description:** ${envelope.server.description}`);
   if (envelope.server.documentationURL)
-    lines.push(`- **Docs:** ${envelope.server.documentationURL}`);
-  if (envelope.server.contactEmail) lines.push(`- **Contact:** ${envelope.server.contactEmail}`);
+    lines.push(literal`- **Docs:** ${envelope.server.documentationURL}`);
+  if (envelope.server.contactEmail)
+    lines.push(literal`- **Contact:** ${envelope.server.contactEmail}`);
   if (envelope.server.organizationURL)
-    lines.push(`- **Organization URL:** ${envelope.server.organizationURL}`);
+    lines.push(literal`- **Organization URL:** ${envelope.server.organizationURL}`);
 
   lines.push('');
   lines.push(
@@ -473,7 +476,7 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
   lines.push('## Capabilities');
   lines.push(`- ${envelope.capabilities.supportedCount} service(s) advertised`);
   if (envelope.capabilities.supported.length > 0) {
-    lines.push(`- Supported: ${envelope.capabilities.supported.join(', ')}`);
+    lines.push(literal`- Supported: ${envelope.capabilities.supported.join(', ')}`);
   }
   if (envelope.capabilities.notableGaps.length > 0) {
     lines.push(
@@ -501,14 +504,14 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
     );
   }
   if (envelope.dialect.notes.length > 0) {
-    for (const note of envelope.dialect.notes) lines.push(`- ${note}`);
+    for (const note of envelope.dialect.notes) lines.push(literal`- ${note}`);
   }
 
   lines.push('');
   lines.push('## Content');
   if (envelope.content.crops.length > 0) {
     lines.push(
-      `- **Crops (${envelope.content.crops.length}):** ${envelope.content.crops.join(', ')}`,
+      literal`- **Crops (${envelope.content.crops.length}):** ${envelope.content.crops.join(', ')}`,
     );
   } else {
     lines.push('- Crops: — (none reported by /commoncropnames)');
@@ -525,9 +528,9 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
   if (envelope.attribution) {
     lines.push('');
     lines.push('## Attribution');
-    lines.push(`- **License:** ${envelope.attribution.license}`);
-    lines.push(`- **Homepage:** ${envelope.attribution.homepage}`);
-    lines.push(`- **Citation:** ${envelope.attribution.citation}`);
+    lines.push(literal`- **License:** ${envelope.attribution.license}`);
+    lines.push(literal`- **Homepage:** ${envelope.attribution.homepage}`);
+    lines.push(literal`- **Citation:** ${envelope.attribution.citation}`);
     if (envelope.attribution.isDemo)
       lines.push('- **Demo dataset** — sample data, not production.');
   }
@@ -541,14 +544,14 @@ export function formatOrientationEnvelope(envelope: OrientationEnvelope): string
   }
   for (const suggestion of envelope.nextToolSuggestions) {
     lines.push(
-      `- \`${suggestion.toolName}\` \`${JSON.stringify(suggestion.args)}\` — ${suggestion.reason}`,
+      literal`- \`${suggestion.toolName}\` \`${JSON.stringify(suggestion.args)}\` — ${suggestion.reason}`,
     );
   }
 
   if (envelope.notes.length > 0) {
     lines.push('');
     lines.push('## Notes');
-    for (const note of envelope.notes) lines.push(`- ${note}`);
+    for (const note of envelope.notes) lines.push(literal`- ${note}`);
   }
 
   lines.push('');

@@ -41,6 +41,7 @@ import {
   toDataframeHandle,
 } from '../shared/find-helpers.js';
 import { buildCallsSearchBody, collectCalls } from '../shared/genotype-calls.js';
+import { literal } from '../shared/markdown-literals.js';
 
 const CallRowSchema = z
   .object({
@@ -140,6 +141,23 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     'Pull genotype calls for a germplasm × variant set. Filter to bound cost — at minimum, set `variantSetDbId` or `germplasmDbIds`. The upstream pull is capped by deployment policy; when the pull is truncated, narrow the filters. results[] holds the leading calls up to `loadLimit` and a 24,000-byte budget; when it holds fewer than were collected, every collected call is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL) instead of paging row-by-row.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
+    {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_find_genotype_calls.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_find_genotype_calls; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
@@ -253,6 +271,11 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         'Cap on rows returned inline. Omit for the deployment default. results[] also stops at a 24,000-byte budget, whichever bound comes first, and keeps at least one row when any call was collected. When results[] holds fewer rows than were collected, every collected call lands in a dataframe — query it with brapi_dataframe_query (SQL) for the rest. Upstream pageSize is fixed for genotype calls, so this knob only affects the inline preview here (no spillover capacity tradeoff).',
       ),
   }),
+  inputAliases: {
+    germplasmDbId: 'germplasmDbIds',
+    callSetDbId: 'callSetDbIds',
+    variantDbId: 'variantDbIds',
+  },
   output: OutputSchema,
 
   // Agent-facing success-path context: total collected count, in-context count,
@@ -306,7 +329,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         const entries = Object.entries(filters);
         if (entries.length === 0) return '**Search body:** none';
         const lines = entries.map(
-          ([k, v]) => `- **${k}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`,
+          ([k, v]) => literal`- **${k}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`,
         );
         return `**Search body:**\n${lines.join('\n')}`;
       },
@@ -367,7 +390,9 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       warnings,
     });
 
-    const inline = selectInlineRows(collected.rows, loadLimit);
+    let inline = selectInlineRows(collected.rows, loadLimit, (rows) =>
+      renderCallRows({ results: rows as Output['results'] }),
+    );
     const distributions = {
       callSetName: computeDistribution(collected.rows, (r) => asString(r.callSetName)),
       variantName: computeDistribution(collected.rows, (r) => asString(r.variantName)),
@@ -387,6 +412,9 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         stoppedEarly,
         maxRows: maxCalls,
       });
+      inline = selectInlineRows(collected.rows, loadLimit, (rows) =>
+        renderCallRows({ results: rows as Output['results'], dataframe: dataframeHandle }),
+      );
     }
 
     ctx.enrich({
@@ -437,45 +465,16 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     lines.push('## Call formatting');
     const f = result.callFormatting;
     lines.push(`- expandHomozygotes: ${f.expandHomozygotes ?? '—'}`);
-    lines.push(`- unknownString: ${f.unknownString ?? '—'}`);
-    lines.push(`- sepPhased: ${f.sepPhased ?? '—'}`);
-    lines.push(`- sepUnphased: ${f.sepUnphased ?? '—'}`);
+    lines.push(literal`- unknownString: ${f.unknownString ?? '—'}`);
+    lines.push(literal`- sepPhased: ${f.sepPhased ?? '—'}`);
+    lines.push(literal`- sepUnphased: ${f.sepUnphased ?? '—'}`);
     lines.push('');
     lines.push('## Distributions');
     lines.push(
       renderDistributions(result.distributions, result.dataframe) || '_No values to summarize._',
     );
     lines.push('');
-    lines.push('## Calls');
-    if (result.results.length === 0) {
-      lines.push('_No calls returned._');
-    } else {
-      const RENDERED = new Set([
-        'callSetName',
-        'callSetDbId',
-        'variantName',
-        'variantDbId',
-        'variantSetDbId',
-        'genotype',
-        'genotypeValue',
-        'phaseSet',
-      ]);
-      for (const call of result.results) {
-        const parts: string[] = [];
-        parts.push(`**${call.callSetName ?? call.callSetDbId ?? '?'}**`);
-        if (call.callSetDbId) parts.push(`callSetDbId=${call.callSetDbId}`);
-        parts.push(`variant=${call.variantName ?? call.variantDbId ?? '?'}`);
-        if (call.variantDbId) parts.push(`variantDbId=${call.variantDbId}`);
-        if (call.variantSetDbId) parts.push(`set=${call.variantSetDbId}`);
-        if (call.genotype) parts.push(`genotype=${JSON.stringify(call.genotype)}`);
-        if (call.genotypeValue) parts.push(`genotypeValue=${call.genotypeValue}`);
-        if (call.phaseSet) parts.push(`phaseSet=${call.phaseSet}`);
-        parts.push(
-          ...collectPassthroughParts(call as Record<string, unknown>, RENDERED, result.dataframe),
-        );
-        lines.push(`- ${parts.join(' · ')}`);
-      }
-    }
+    lines.push(renderCallRows(result));
     if (result.dataframe) {
       lines.push('');
       lines.push('## Dataframe handle');
@@ -522,4 +521,40 @@ async function spillCalls(input: SpillCallsInput): Promise<z.infer<typeof Datafr
   if (input.pullCapped) registerInput.maxRows = input.maxRows;
   const result = await input.bridge.registerDataframe(input.ctx, registerInput);
   return toDataframeHandle(result);
+}
+
+/** Render the exact row section used by both formatting and preview sizing. */
+function renderCallRows(result: Pick<Output, 'results' | 'dataframe'>): string {
+  const lines: string[] = [];
+  lines.push('## Calls');
+  if (result.results.length === 0) {
+    lines.push('_No calls returned._');
+  } else {
+    const RENDERED = new Set([
+      'callSetName',
+      'callSetDbId',
+      'variantName',
+      'variantDbId',
+      'variantSetDbId',
+      'genotype',
+      'genotypeValue',
+      'phaseSet',
+    ]);
+    for (const call of result.results) {
+      const parts: string[] = [];
+      parts.push(literal`**${call.callSetName ?? call.callSetDbId ?? '?'}**`);
+      if (call.callSetDbId) parts.push(literal`callSetDbId=${call.callSetDbId}`);
+      parts.push(literal`variant=${call.variantName ?? call.variantDbId ?? '?'}`);
+      if (call.variantDbId) parts.push(literal`variantDbId=${call.variantDbId}`);
+      if (call.variantSetDbId) parts.push(literal`set=${call.variantSetDbId}`);
+      if (call.genotype) parts.push(literal`genotype=${JSON.stringify(call.genotype)}`);
+      if (call.genotypeValue) parts.push(literal`genotypeValue=${call.genotypeValue}`);
+      if (call.phaseSet) parts.push(literal`phaseSet=${call.phaseSet}`);
+      parts.push(
+        ...collectPassthroughParts(call as Record<string, unknown>, RENDERED, result.dataframe),
+      );
+      lines.push(`- ${parts.join(' · ')}`);
+    }
+  }
+  return lines.join('\n');
 }

@@ -47,7 +47,12 @@ async function connect(fetcher: MockFetcher, serverName = 'Test') {
 function serveGermplasm(
   fetcher: MockFetcher,
   rows: Record<string, unknown>[],
-  options: { failFromPage?: number; omitTotal?: boolean } = {},
+  options: {
+    failFromPage?: number;
+    omitTotal?: boolean;
+    clamp?: number;
+    reportedTotal?: number;
+  } = {},
 ): void {
   fetcher.mockImplementation(async (url: string) => {
     const u = new URL(String(url));
@@ -56,11 +61,20 @@ function serveGermplasm(
     if (options.failFromPage !== undefined && page >= options.failFromPage) {
       return jsonResponse({ error: 'upstream down' }, 500);
     }
-    const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10);
-    const data = rows.slice(page * pageSize, page * pageSize + pageSize);
-    return jsonResponse(
-      options.omitTotal ? envelope({ data }) : envelope({ data }, { totalCount: rows.length }),
+    const pageSize = Math.min(
+      Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10),
+      options.clamp ?? Infinity,
     );
+    const data = rows.slice(page * pageSize, page * pageSize + pageSize);
+    return jsonResponse({
+      metadata: {
+        pagination: {
+          pageSize,
+          ...(options.omitTotal ? {} : { totalCount: options.reportedTotal ?? rows.length }),
+        },
+      },
+      result: { data },
+    });
   });
 }
 
@@ -308,6 +322,72 @@ describe('brapi_find_germplasm free-text scan scope', () => {
 
   const isUg = (i: number) => i >= 111 && i <= 210;
 
+  it('scans configured first-page depth independently of a five-row preview above the ceiling', async () => {
+    const ctx = await connect(fetcher);
+    const rows = germplasm(20, (i) => i === 8);
+    fetcher.mockImplementation(async (url: string) => {
+      const size = Number(new URL(url).searchParams.get('pageSize'));
+      return jsonResponse(envelope({ data: rows.slice(0, size) }, { totalCount: 842_000 }));
+    });
+    const { structured, text } = await call(ctx, { text: 'UG1201', loadLimit: 5 });
+    expect(
+      (structured.results as { germplasmDbId: string }[]).map((row) => row.germplasmDbId),
+    ).toEqual(['g8']);
+    expect(new URL(String(fetcher.mock.calls[0]![0])).searchParams.get('pageSize')).toBe('10');
+    expect(text).toContain('g8');
+  });
+
+  it.each([false, true])(
+    'keeps first/second/last/past-end identities aligned under a served-size clamp (unknown total: %s)',
+    async (omitTotal) => {
+      const ctx = await connect(fetcher);
+      const rows = germplasm(9, () => true);
+      serveGermplasm(fetcher, rows, { clamp: 3, omitTotal });
+      const { structured, text } = await call(ctx, { text: 'UG1201', loadLimit: 20 });
+      expect(
+        (structured.results as { germplasmDbId: string }[]).map((row) => row.germplasmDbId),
+      ).toEqual(rows.map((row) => row.germplasmDbId));
+      expect(
+        fetcher.mock.calls.map((call) =>
+          Number(new URL(String(call[0])).searchParams.get('page') ?? 0),
+        ),
+      ).toEqual(omitTotal ? [0, 1, 2, 3] : [0, 1, 2]);
+      expect(structured.hasMore).toBe(false);
+      expect(text).toContain('9 of 9 row(s) scanned');
+    },
+  );
+
+  it('discloses an upstream stride change instead of declaring a complete text scan', async () => {
+    const ctx = await connect(fetcher);
+    const rows = germplasm(5, () => true);
+    fetcher.mockImplementation(async (url: string) => {
+      const page = Number(new URL(url).searchParams.get('page') ?? 0);
+      const pageSize = page === 0 ? 3 : 2;
+      return jsonResponse({
+        metadata: { pagination: { pageSize, totalCount: 5 } },
+        result: { data: rows.slice(page * pageSize, (page + 1) * pageSize) },
+      });
+    });
+    const { structured, text } = await call(ctx, { text: 'UG1201', loadLimit: 20 });
+    expect(structured.hasMore).toBe(true);
+    expect(text).toContain('page size changed');
+    expect(text).not.toContain('5 of 5 row(s) scanned');
+  });
+
+  it('keeps an above-ceiling clamped miss to one request and reports actual scanned rows', async () => {
+    const ctx = await connect(fetcher);
+    serveGermplasm(
+      fetcher,
+      germplasm(20, () => false),
+      { clamp: 3, reportedTotal: 842_000 },
+    );
+    const { structured, text } = await call(ctx, { text: 'NOPE', loadLimit: 5 });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(structured.results).toEqual([]);
+    expect(structured.hasMore).toBe(true);
+    expect(text).toContain('first 3 row(s) scanned out of 842000');
+  });
+
   it('scans the whole set when it fits one spill walk, staging only the matches and pointing at them', async () => {
     const ctx = await connect(fetcher);
     serve(germplasm(479, isUg));
@@ -315,8 +395,8 @@ describe('brapi_find_germplasm free-text scan scope', () => {
     const { result, structured, text } = await call(ctx, { text: 'UG1201', loadLimit: 50 });
 
     expect(result.isError).toBeFalsy();
-    // First page + 48 walk pages of 10 cover all 479 rows.
-    expect(fetcher.mock.calls.length).toBe(1 + 48);
+    // First page is walk page 0: 48 pages of 10 cover all 479 rows.
+    expect(fetcher.mock.calls.length).toBe(48);
     expect(structured.returnedCount).toBe(50);
     expect(structured.totalCount).toBe(479);
     expect(structured.hasMore).toBe(true);
@@ -361,7 +441,7 @@ describe('brapi_find_germplasm free-text scan scope', () => {
     const { result, structured, text } = await call(ctx, { text: 'NOPE', loadLimit: 50 });
 
     expect(result.isError).toBeFalsy();
-    expect(fetcher.mock.calls.length).toBe(1 + 48);
+    expect(fetcher.mock.calls.length).toBe(48);
     expect(structured.results).toEqual([]);
     expect(structured).not.toHaveProperty('dataframe');
     expect(structured).not.toHaveProperty('refinementHint');
@@ -385,7 +465,7 @@ describe('brapi_find_germplasm free-text scan scope', () => {
 
     const { structured } = await call(ctx, { text: 'UG1201', loadLimit: 5 });
 
-    expect(fetcher.mock.calls.length).toBe(1 + 50);
+    expect(fetcher.mock.calls.length).toBe(50);
     expect(structured.returnedCount).toBe(1);
     expect(structured.hasMore).toBe(true);
     // The one match is inline, so nothing is staged; the page-cap warning carries the stop.

@@ -83,6 +83,8 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 
 ## Capability reference
 
+Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where equivalent: for example, `imageDbId` for `imageDbIds`, `studyDbIds` for `studies`, and `observationVariableDbIds` for `variables`. Array filters accept a lone string or multiple IDs. Supply one spelling per filter; conflicting spellings are rejected.
+
 ### `brapi_connect` <sub>tool</sub>
 
 - `baseUrl` and `auth` are optional: omitted values come from `BRAPI_<ALIAS>_*` env vars, the built-in aliases, then `BRAPI_DEFAULT_*` (see [Per-alias credentials](#per-alias-credentials)); `alias` (default `default`, pattern `^[a-zA-Z0-9_-]+$`) keeps several servers registered at once; `auth.mode` is `none`, `bearer`, `api_key`, `sgn` (Breedbase `/token` exchange), or `oauth2` (client credentials)
@@ -124,7 +126,7 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 
 ### `brapi_find_germplasm` <sub>tool</sub>
 
-- Filters: `names`, `germplasmDbIds`, `germplasmPUIs`, `accessionNumbers`, `crops`, `synonyms`, `collections`, `genus`, `species`; `text` is a client-side substring match on name, PUI, accession, display name, and synonyms that drops non-matching rows; it scans every upstream row when the set fits one dataframe walk (50,000 rows at the default page size), and above that a first-page miss stops the scan, so pair it with a server-side filter
+- Filters: `names`, `germplasmDbIds`, `germplasmPUIs`, `accessionNumbers`, `crops`, `synonyms`, `collections`, `genus`, `species`; `text` is a client-side substring match on name, PUI, accession, display name, and synonyms that drops non-matching rows. Its first request uses `BRAPI_PAGE_SIZE` independently of inline `loadLimit`; it scans every upstream row when the set fits one dataframe walk (50,000 rows at the default page size). Above that, a first-page miss stops after one request and reports the actual rows scanned; it does not establish absence from the catalog, so pair it with a server-side filter.
 - `distributions` over `commonCropName`, `genus`, `species`, `collection`, `countryOfOriginCode`
 
 ---
@@ -151,7 +153,7 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 
 ### `brapi_find_variables` <sub>tool</sub>
 
-- Filters: `variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`, `studies` (first value only; BrAPI `/variables` takes one study), `methods`, `scales`, `crop`
+- Filters: `variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`, `studies`, `methods`, `scales`, `crop`. Multiple distinct studies are unioned by variable ID with `studyDbIds` provenance under one shared page, row and time budget. `studyCoverage` reports complete, partial, failed and unprocessed studies; successful studies remain available when another fails.
 - `text` ranks every fetched row and moves matches to the top without dropping the rest; `ontologyCandidates` lists the ranked matches, each with `source` (`puiMatch`, `nameMatch`, `synonymMatch`, `traitClassMatch`)
 - `distributions` over `ontologyDbId`, `traitClass`, `scaleName`
 
@@ -258,6 +260,7 @@ Every resource reads the `default` connection and mirrors a tool; tool-only clie
 
 - `variantSetDbId` required (`no_filters` otherwise; list sets with `brapi_raw_get({ path: "/variantsets" })`), optional `germplasmDbIds`; `format` is `matrix-json`, `vcf-lite` (adds `vcf` text), or `plink` (adds `ped` / `map` text), and every format registers the germplasm × variant dataframe
 - `variantColumnLegend` maps SQL-safe column names back to variant IDs; `search_endpoint_disabled` when the active dialect marks `POST /search/calls` as dead
+- VCF POS and PLINK base-pair positions are one-based: valid zero-based BrAPI `start` values 0 and 500 export as 1 and 501. Missing or invalid positions retain `.` (VCF) / `0` (PLINK) placeholders.
 - `maxCalls` / `maxColumns` can lower `BRAPI_GENOTYPE_CALLS_MAX_PULL` / `BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS` but never raise them; `truncated` means a ceiling fired or the call's 50 s upstream deadline ended the call pull early, and `warnings` names which
 
 ---
@@ -345,7 +348,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 BrAPI-specific:
 
-- Shared finder contract: the seven filter finders (studies, germplasm, variables, observations, images, locations, variants) take `alias`, `loadLimit`, and `extraFilters` (keys from `brapi_describe_filters`), and return `results`, `hasMore`, `distributions`, and an optional `dataframe` handle; `results` stops at `loadLimit` or a 24,000-byte budget, whichever binds first, and `truncated` / `shown` / `cap` report the cut
+- Shared finder contract: the seven filter finders (studies, germplasm, variables, observations, images, locations, variants) take `alias`, `loadLimit`, and `extraFilters` (keys from `brapi_describe_filters`), and return `results`, `hasMore`, `distributions`, and an optional `dataframe` handle; `results` stops at `loadLimit` or 24,000 bytes on either array JSON or serialized escaped row text, whichever binds first, retaining the first matched row even when it alone exceeds the budget. `truncated` / `shown` / `cap` report the cut
 - Dataframe spillover: when `results` holds fewer rows than matched, finders stage the matched set (paging the rest of the result, up to 50 pages and 50,000 rows) in a DuckDB `df_<uuid>` table and return its handle
 - Dialect adapters (`spec`, `brapi-test`, `breedbase`, `cassavabase`, `bms`), detected per connection, translate v2.1 plural filters into the form each server family honors, drop filters it ignores, and switch to `POST /search/{noun}` when a `GET` would narrow a multi-value filter; `BRAPI_<ALIAS>_DIALECT` pins one
 - Several connections at once under named aliases, with three public Breedbase servers built in and credentials resolved per alias from env vars, so they stay out of the LLM context
@@ -353,6 +356,7 @@ BrAPI-specific:
 
 Agent-friendly output:
 
+- Upstream names, identifiers, and advisory fields render as literal text. Structured values and generated pedigree diagrams retain their original semantics
 - Typed failures: every connection-scoped tool and resource fails with `unknown_alias` for an alias that is neither registered nor configured on the server (a configured alias connects on first use) and with `private_address_blocked`, caching and registering nothing, when its base URL is a private or reserved address the server may not reach; a filter finder fails with `all_filters_dropped` instead of widening to an unfiltered pull when the dialect drops every filter supplied, and `brapi_build_phenotype_matrix` fails with `dialect_all_filters_dropped` when the dialect drops the study filter for every requested study
 - An empty or whitespace-only ID or filter value fails at the input schema instead of reaching the upstream, where a blank filter widens the pull and a blank ID malforms the request path; an empty `text` still means no text filter
 - Query echo on every finder: `totalCount`, `returnedCount`, and `appliedFilters`; embedded observation pulls separate upstream requests from client-side criteria, and `brapi_find_studies` lists client-side `locations` separately. A `refinementHint` points at a complete dataframe or suggests narrower filters when the scan stopped short; empty results carry a `notice`, and `warnings` disclose limitations

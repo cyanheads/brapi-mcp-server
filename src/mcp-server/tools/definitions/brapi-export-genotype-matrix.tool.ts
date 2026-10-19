@@ -62,6 +62,7 @@ import {
   collectCalls,
   renderGenotypeString,
 } from '../shared/genotype-calls.js';
+import { fenced, literal } from '../shared/markdown-literals.js';
 
 /** Per-variant coordinate metadata used to populate VCF/PLINK position columns. */
 interface VariantMeta {
@@ -115,7 +116,7 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe(
-      'VCF-lite text — header `#CHROM POS ID REF ALT` plus one genotype column per sample, one row per variant. Present only when format="vcf-lite". CHROM/POS/REF/ALT come from /variants metadata; "." when the server does not provide them.',
+      'VCF-lite text — header `#CHROM POS ID REF ALT` plus genotype columns. One-based POS is BrAPI start + 1; missing/invalid coordinates use ".". Present for format="vcf-lite".',
     ),
   ped: z
     .string()
@@ -127,7 +128,7 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe(
-      'PLINK .map text — chromosome, variant-id, genetic-distance (0 placeholder), base-pair position, one row per variant. Present only when format="plink". Chromosome/position come from /variants metadata; `0` when absent.',
+      'PLINK .map text — chromosome, variant ID, genetic-distance placeholder 0, and one-based position (BrAPI start + 1). Missing/invalid coordinates use `0`. Present for format="plink".',
     ),
   truncated: z
     .boolean()
@@ -145,9 +146,26 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
   description:
-    'Pull genotype calls for a germplasm × variant set and pivot them into a matrix. `format` controls the output: `matrix-json` registers a wide germplasm × variant canvas dataframe for SQL analysis; `vcf-lite` returns VCF-subset text (in the `vcf` field) and also registers the dataframe; `plink` returns .ped/.map text (in the `ped`/`map` fields) and also registers the dataframe. vcf-lite/plink pull /variants metadata for CHROM/POS/REF/ALT (`.`/`0` when the server lacks them). Read the dataframe with brapi_dataframe_describe and brapi_dataframe_query (SQL). Column names are SQL-safe identifiers; `variantColumnLegend` maps them back to original variant IDs.',
+    'Pull genotype calls for a germplasm × variant set and pivot them into a matrix. `matrix-json` registers a wide canvas dataframe; `vcf-lite` adds VCF-subset text in `vcf`; `plink` adds .ped/.map text in `ped`/`map`. Text formats pull /variants metadata and convert zero-based BrAPI start to one-based positions; missing/invalid positions use `.`/`0`. Read the dataframe with brapi_dataframe_describe and brapi_dataframe_query (SQL). `variantColumnLegend` maps SQL-safe columns to original variant IDs.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
+    {
+      reason: 'upstream_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'An uncaught BrAPI data request answered HTTP 404',
+      recovery:
+        'Check brapi_server_info for supported endpoints and verify the requested identifiers before retrying brapi_export_genotype_matrix.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'upstream_rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'An uncaught BrAPI data request exhausted retries after HTTP 429',
+      recovery:
+        'Wait before retrying brapi_export_genotype_matrix; reduce concurrent requests to this BrAPI server.',
+      retryable: true,
+      thrownBy: 'service',
+    },
     {
       reason: 'unknown_alias',
       code: JsonRpcErrorCode.NotFound,
@@ -265,6 +283,9 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
         'Lower the distinct-variant column cap for this call. Omit to use the deployment ceiling. Cannot raise it: a value above the deployment ceiling is clamped down to it. When the variant set resolves more distinct variants than the effective cap, the matrix is capped at that many variant columns, `truncated` is set, and the effective cap is reported in `warnings`. Independent of `maxCalls`, which bounds the row (call) pull.',
       ),
   }),
+  inputAliases: {
+    germplasmDbId: 'germplasmDbIds',
+  },
   output: OutputSchema,
   enrichment: {
     notice: z.string().optional().describe('The matrix dataframe and the tools that read it.'),
@@ -431,7 +452,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     const lines: string[] = [];
 
     lines.push(
-      `# Genotype matrix — ${result.format} — ${result.rowCount} germplasm × ${result.columnCount} variants — \`${result.alias}\``,
+      literal`# Genotype matrix — ${result.format} — ${result.rowCount} germplasm × ${result.columnCount} variants — \`${result.alias}\``,
     );
     if (result.truncated) lines.push('> **Truncated.** See `warnings` for why.');
     lines.push('');
@@ -443,9 +464,9 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     lines.push('## Call formatting');
     const f = result.callFormatting;
     lines.push(`- expandHomozygotes: ${f.expandHomozygotes ?? '—'}`);
-    lines.push(`- unknownString: ${f.unknownString ?? '—'}`);
-    lines.push(`- sepPhased: ${f.sepPhased ?? '—'}`);
-    lines.push(`- sepUnphased: ${f.sepUnphased ?? '—'}`);
+    lines.push(literal`- unknownString: ${f.unknownString ?? '—'}`);
+    lines.push(literal`- sepPhased: ${f.sepPhased ?? '—'}`);
+    lines.push(literal`- sepUnphased: ${f.sepUnphased ?? '—'}`);
     lines.push('');
 
     const legendEntries = Object.entries(result.variantColumnLegend);
@@ -458,7 +479,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
         // decoding for columns the `## Dataframe` section above already names.
         lines.push('## Column name remappings (sanitized → original)');
         for (const [col, orig] of remapped) {
-          lines.push(`- \`${col}\` → \`${orig}\``);
+          lines.push(literal`- \`${col}\` → \`${orig}\``);
         }
         lines.push('');
       }
@@ -486,7 +507,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
 
     if (result.warnings.length > 0) {
       lines.push('## Warnings');
-      for (const w of result.warnings) lines.push(`- ${w}`);
+      for (const w of result.warnings) lines.push(literal`- ${w}`);
       lines.push('');
     }
 
@@ -526,7 +547,7 @@ function renderTextPreview(opts: {
 }): string[] {
   const allLines = opts.text.split('\n');
   const preview = allLines.slice(0, FORMAT_PREVIEW_LINES);
-  const out = [`## ${opts.label}`, '```', ...preview, '```'];
+  const out = [`## ${opts.label}`, fenced(preview.join('\n'))];
   if (allLines.length > FORMAT_PREVIEW_LINES) {
     out.push(
       `… ${allLines.length - FORMAT_PREVIEW_LINES} more line(s) not shown. Complete text: \`structuredContent.${opts.field}\`. Every germplasm × variant genotype is also in dataframe \`${opts.tableName}\` — query it with brapi_dataframe_query; it carries genotypes only, not the CHROM/POS/REF/ALT coordinates shown above.`,
@@ -805,12 +826,8 @@ function extractVariantMeta(r: Record<string, unknown>): VariantMeta {
   const meta: VariantMeta = {};
   const chrom = asString(r.referenceName);
   if (chrom) meta.chrom = chrom;
-  const start = r.start;
-  if (typeof start === 'number') meta.pos = String(start);
-  else {
-    const startStr = asString(start);
-    if (startStr) meta.pos = startStr;
-  }
+  const position = exportPosition(r.start);
+  if (position !== undefined) meta.pos = String(position);
   const ref = asString(r.referenceBases);
   if (ref) meta.ref = ref;
   const altRaw = r.alternateBases;
@@ -822,4 +839,22 @@ function extractVariantMeta(r: Record<string, unknown>): VariantMeta {
     if (alt) meta.alt = alt;
   }
   return meta;
+}
+
+/** BrAPI Variant.start is zero-based; VCF POS and PLINK base-pair positions are one-based. */
+function exportPosition(start: unknown): number | undefined {
+  let value = start;
+  if (typeof start === 'string') {
+    const text = start.trim();
+    if (!text || ['0x', '0o', '0b'].includes(text.slice(0, 2).toLowerCase())) return;
+    value = Number(text);
+  }
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value >= Number.MAX_SAFE_INTEGER
+  )
+    return;
+  return value + 1;
 }
