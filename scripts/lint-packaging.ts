@@ -34,11 +34,13 @@
  *      patterns cannot reach: dependency-shipped agent docs at an installed
  *      package's root (`framework-skills/`, `skills/`, `.claude/`, `.agents/`,
  *      `AGENTS.md`, `CLAUDE.md`) and `SKILL.md` anywhere (issues #230/#794/#820),
- *      platform-specific native bindings (issue #274), node-gyp build output
+ *      node-gyp build output
  *      beside a `binding.gyp` (issue #783), and build-only package files —
  *      mcp-ts-core's `changelog/`, `config/`, `scripts/`, `templates/`,
  *      `biome.json`, `vitest.config.base.mjs`, better-sqlite3's `deps/` and
  *      `src/` (issue #791). Each class reports its count and a sample.
+ *      Every platform binding declared by the installed DuckDB loader must
+ *      ship with its package manifest, native addon, and shared library.
  *   9. Identity: `name`/`title` literals in `createApp()` /
  *      `createWorkerHandler()` (src/index.ts, src/worker.ts) and manifest
  *      `display_name` must equal the unscoped package name; a partial
@@ -141,6 +143,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { missingDuckDbBindingEntries } from './mcpb-duckdb-bindings.ts';
 
 interface ServerJsonEnvVar {
   default?: string;
@@ -250,16 +253,6 @@ export const CRITICAL_RUNTIME_PATHS = [
  */
 export const AGENT_DOC_ENTRY =
   /^node_modules\/(?:.+\/node_modules\/)?(?:@[^/]+\/[^/]+|[^@/][^/]*)\/(?:(?:framework-skills|skills|\.claude|\.agents)\/|(?:AGENTS|CLAUDE)\.md$)|^node_modules\/.*\/SKILL\.md$/;
-
-/**
- * Platform-specific native binding packages that must not ship in a bundle.
- * KEEP IN SYNC with `NATIVE_BINDING_ENTRY` in `scripts/clean-mcpb.ts` (the
- * strip step this check verifies) — edit both literals together. The assertion
- * that they match lives in the mcp-ts-core repository's own test suite;
- * `tests/` is not part of the published package, so nothing enforces the pair
- * in a server these scripts were copied into.
- */
-export const NATIVE_BINDING_ENTRY = /^node_modules\/@duckdb\/node-bindings-[^/]+\//;
 
 /**
  * node-gyp output, matched against an entry's path below a `build/` directory
@@ -440,10 +433,8 @@ export async function checkBundleContent(raw: string): Promise<string[]> {
 }
 
 /**
- * Check 8: a built bundle must contain zero `node_modules/**` agent-doc
- * entries, platform-specific native bindings, node-gyp build output, and
- * build-only package files. `scripts/clean-mcpb.ts` (wired into the `bundle`
- * script) strips all four after `mcpb pack`. One error per class.
+ * Check 8: a built bundle must contain all DuckDB platform packages and no
+ * dependency agent docs, node-gyp build output, or build-only package files.
  */
 export function checkBundleEntries(entries: string[], bundleLabel: string): string[] {
   const sampleOf = (offending: string[]) =>
@@ -463,12 +454,11 @@ export function checkBundleEntries(entries: string[], bundleLabel: string): stri
     );
   }
 
-  const natives = entries.filter((entry) => NATIVE_BINDING_ENTRY.test(entry));
-  if (natives.length > 0) {
+  const missingBindings = missingDuckDbBindingEntries(entries);
+  if (missingBindings.length > 0) {
     errors.push(
-      `${bundleLabel} contains ${natives.length} platform-specific native binding entries — ` +
-        `the bundle would run only on the platform it was packed on. Re-run the \`bundle\` ` +
-        `script (scripts/clean-mcpb.ts strips them):${sampleOf(natives)}`,
+      `${bundleLabel} is missing ${missingBindings.length} DuckDB runtime entries — re-run the \`bundle\` script:` +
+        missingBindings.map((entry) => `\n      ${entry}`).join(''),
     );
   }
 
@@ -1902,17 +1892,13 @@ async function main(): Promise<void> {
   const distDir = resolve('dist');
   if (existsSync(distDir)) {
     for (const file of readdirSync(distDir).filter((f) => f.endsWith('.mcpb'))) {
+      let listing: string;
       try {
-        const listing = execFileSync('unzip', ['-Z1', join(distDir, file)], {
+        listing = execFileSync('unzip', ['-Z1', join(distDir, file)], {
           encoding: 'utf-8',
           maxBuffer: 64 * 1024 * 1024,
+          timeout: 30_000,
         });
-        errors.push(
-          ...checkBundleEntries(
-            listing.split('\n').filter((line) => line.length > 0),
-            `dist/${file}`,
-          ),
-        );
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
           notes.push(`unzip not available — skipping bundle content check for dist/${file}.`);
@@ -1921,6 +1907,14 @@ async function main(): Promise<void> {
             `failed to list entries of dist/${file}: ${err instanceof Error ? err.message : err}`,
           );
         }
+        continue;
+      }
+      try {
+        errors.push(...checkBundleEntries(listing.split('\n').filter(Boolean), `dist/${file}`));
+      } catch (error) {
+        errors.push(
+          `failed to verify dist/${file}: ${error instanceof Error ? error.message : error}`,
+        );
       }
     }
   }

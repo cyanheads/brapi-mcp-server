@@ -6,23 +6,22 @@
  *
  *   1. `mcpb clean <bundle>` — official dev-dependency prune + manifest
  *      validation (a measured real-world bundle dropped 61 MB → 12.9 MB).
- *   2. Exact-name strip of four entry classes nested under `node_modules/`,
+ *   2. Exact-name strip of three entry classes nested under `node_modules/`,
  *      which root-anchored `.mcpbignore` patterns cannot reach by design
  *      (issues #146/#207):
  *        a. Dependency-shipped agent docs at an installed package's root —
  *           `framework-skills/`, `skills/`, `.claude/`, `.agents/` trees and
  *           `AGENTS.md`/`CLAUDE.md` — plus `SKILL.md` files anywhere (issues
  *           #230/#794/#820). A `skills/` below a package root is runtime code.
- *        b. Platform-specific native bindings, which would otherwise lock the
- *           bundle to the build host's platform and push it past the 25 MB cap
- *           registries enforce (issue #274).
- *        c. node-gyp build output beside a `binding.gyp` — generator files,
+ *        b. node-gyp build output beside a `binding.gyp` — generator files,
  *           intermediate trees, and link inputs, which record the packing
  *           host's paths; compiled `*.node` addons stay (issue #783).
- *        d. Build-only package files — mcp-ts-core's `changelog/`, `config/`,
+ *        c. Build-only package files — mcp-ts-core's `changelog/`, `config/`,
  *           `scripts/`, `templates/`, `biome.json`, and `vitest.config.base.mjs`,
  *           and better-sqlite3's `deps/` and `src/` C sources (issue #791).
- *   3. Re-list and assert zero matching entries remain.
+ *   3. Replace the build host's DuckDB bindings with every platform package
+ *      declared by the installed DuckDB loader. The canvas requires DuckDB.
+ *   4. Verify the pruned entries are gone and the DuckDB inventory is complete.
  *
  * Entry names are passed to `zip -d` with `-nw` (no-wildcard) so they match
  * literally — bracketed runtime filenames like `pages/[slug].js` exist in
@@ -34,9 +33,21 @@
  * @module scripts/clean-mcpb
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
+import { missingDuckDbBindingEntries, readDuckDbBindings } from './mcpb-duckdb-bindings.ts';
 
 /**
  * Agent-doc entries under `node_modules/` that must not ship in a bundle: a
@@ -56,26 +67,6 @@ import { fileURLToPath } from 'node:url';
  */
 export const AGENT_DOC_ENTRY =
   /^node_modules\/(?:.+\/node_modules\/)?(?:@[^/]+\/[^/]+|[^@/][^/]*)\/(?:(?:framework-skills|skills|\.claude|\.agents)\/|(?:AGENTS|CLAUDE)\.md$)|^node_modules\/.*\/SKILL\.md$/;
-
-/**
- * Platform-specific native binding packages, which must not ship in a bundle.
- * KEEP IN SYNC with `NATIVE_BINDING_ENTRY` in `scripts/lint-packaging.ts`
- * (post-bundle content check) — edit both literals together. The assertion that
- * they match lives in the mcp-ts-core repository's own test suite; `tests/` is
- * not part of the published package, so nothing enforces the pair in a server
- * these scripts were copied into.
- *
- * `mcpb pack` archives the whole project directory, so a native dependency
- * contributes the build host's platform slice and nothing else — for
- * `@duckdb/node-api` that is a ~108 MB `libduckdb` shared library. The bundle
- * then runs only on the platform it was packed on, contradicting the
- * cross-platform "Install in Claude Desktop" badge, and blows past the 25 MB
- * cap registries enforce. Stripping them keeps the bundle portable and small;
- * DuckDB is an optional peer loaded through `lazyImport`, so a server whose
- * canvas is disabled (`CANVAS_PROVIDER_TYPE=none`, the default) is unaffected
- * and one that enables it gets the helper's actionable install hint.
- */
-export const NATIVE_BINDING_ENTRY = /^node_modules\/@duckdb\/node-bindings-[^/]+\//;
 
 /**
  * node-gyp output, matched against an entry's path below a `build/` directory
@@ -122,11 +113,6 @@ export function filterAgentDocEntries(entries: string[]): string[] {
   return entries.filter((entry) => AGENT_DOC_ENTRY.test(entry));
 }
 
-/** Filter a bundle entry listing down to the native-binding entries to strip. */
-export function filterNativeBindingEntries(entries: string[]): string[] {
-  return entries.filter((entry) => NATIVE_BINDING_ENTRY.test(entry));
-}
-
 /**
  * Filter a bundle entry listing down to the node-gyp output to strip: entries
  * under `<dir>/build/` matching `NODE_GYP_OUTPUT`, for each `<dir>/binding.gyp`
@@ -153,90 +139,139 @@ const MAX_LIST_BUFFER = 64 * 1024 * 1024;
 
 /** `zip -d` argv batch size — stays clear of ARG_MAX with long entry names. */
 const DELETE_BATCH = 200;
+const COMMAND_TIMEOUT_MS = 300_000;
+const packageIdentity = z.object({ name: z.string(), version: z.string() });
 
 function listEntries(bundle: string): string[] {
-  return execFileSync('unzip', ['-Z1', bundle], { encoding: 'utf-8', maxBuffer: MAX_LIST_BUFFER })
+  return execFileSync('unzip', ['-Z1', bundle], {
+    encoding: 'utf-8',
+    maxBuffer: MAX_LIST_BUFFER,
+    timeout: COMMAND_TIMEOUT_MS,
+  })
     .split('\n')
     .filter((line) => line.length > 0);
 }
 
-function run(cmd: string, args: string[]): void {
-  execFileSync(cmd, args, { stdio: 'inherit' });
+function run(cmd: string, args: string[], cwd?: string): void {
+  execFileSync(cmd, args, { cwd, stdio: 'inherit', timeout: COMMAND_TIMEOUT_MS });
 }
 
 function mb(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function appendDuckDbBindings(bundle: string, scratch: string): void {
+  const bindings = readDuckDbBindings();
+  /**
+   * npm verifies each tarball against registry integrity metadata. Packing a registry
+   * spec fetches other platforms without installing them or resolving their dependencies.
+   */
+  run(
+    'npm',
+    [
+      'pack',
+      '--ignore-scripts',
+      '--silent',
+      '--fetch-retries=1',
+      '--fetch-timeout=60000',
+      '--',
+      ...bindings.map(({ name, version }) => `${name}@${version}`),
+    ],
+    scratch,
+  );
+
+  const archivedFiles: string[] = [];
+  for (const { name, version, directory, runtimeFiles } of bindings) {
+    const tarball = join(scratch, `${name.slice(1).replace('/', '-')}-${version}.tgz`);
+    const target = join(scratch, directory);
+    const files = [...runtimeFiles, 'LICENSE', 'README.md'];
+    mkdirSync(target, { recursive: true });
+    run('tar', [
+      '-xzf',
+      tarball,
+      '--strip-components=1',
+      '-C',
+      target,
+      ...files.map((file) => `package/${file}`),
+    ]);
+    for (const file of files) {
+      if (!lstatSync(join(target, file)).isFile()) {
+        throw new Error(`${name}@${version} contains a non-file entry at ${file}.`);
+      }
+      archivedFiles.push(`${directory}/${file}`);
+    }
+    const metadata = packageIdentity.parse(
+      JSON.parse(readFileSync(join(target, 'package.json'), 'utf8')),
+    );
+    if (metadata.name !== name || metadata.version !== version) {
+      throw new Error(
+        `Expected ${name}@${version}, received ${metadata.name}@${metadata.version}.`,
+      );
+    }
+  }
+  run('zip', ['-q', bundle, ...archivedFiles], scratch);
+}
+
 function main(): void {
   const bundleArg = process.argv[2];
-  if (!bundleArg) {
-    console.error('Usage: clean-mcpb.ts <bundle.mcpb> — run after `mcpb pack`.');
-    process.exit(1);
-  }
-  const bundle = resolve(bundleArg);
-  if (!existsSync(bundle)) {
-    console.error(`No bundle at ${bundle} — run \`mcpb pack\` first (see the \`bundle\` script).`);
-    process.exit(1);
-  }
+  if (!bundleArg) throw new Error('Usage: clean-mcpb.ts <bundle.mcpb> — run after `mcpb pack`.');
+  const original = resolve(bundleArg);
+  if (!existsSync(original)) throw new Error(`No bundle at ${original} — run \`mcpb pack\` first.`);
 
-  const sizeBefore = statSync(bundle).size;
-
-  // 1. Official prune: removes dev dependencies, validates the manifest.
+  const sizeBefore = statSync(original).size;
+  // Stage beside the output so a failed fetch or validation leaves the packed file intact.
+  const scratch = mkdtempSync(join(dirname(original), '.mcpb-clean-'));
+  const bundle = join(scratch, basename(original));
   try {
+    copyFileSync(original, bundle);
     run('npx', ['-y', '@anthropic-ai/mcpb', 'clean', bundle]);
-  } catch {
-    console.error('✗ `mcpb clean` failed — bundle left as packed.');
-    process.exit(1);
-  }
 
-  // 2. Exact-name strip of agent docs, platform natives, node-gyp output, and build-only files.
-  let agentDocs: string[] = [];
-  let natives: string[] = [];
-  let nodeGyp: string[] = [];
-  let buildOnly: string[] = [];
-  try {
     const entries = listEntries(bundle);
-    agentDocs = filterAgentDocEntries(entries);
-    natives = filterNativeBindingEntries(entries);
-    nodeGyp = filterNodeGypBuildEntries(entries);
-    buildOnly = filterBuildOnlyEntries(entries);
+    const agentDocs = filterAgentDocEntries(entries);
+    const nodeGyp = filterNodeGypBuildEntries(entries);
+    const buildOnly = filterBuildOnlyEntries(entries);
+    const oldBindings = entries.filter((entry) =>
+      entry.startsWith('node_modules/@duckdb/node-bindings-'),
+    );
     // An entry in two classes is named once: a `zip -d` batch naming only deleted entries exits 12.
-    const doomed = [...new Set([...agentDocs, ...natives, ...nodeGyp, ...buildOnly])];
+    const doomed = [...new Set([...agentDocs, ...nodeGyp, ...buildOnly, ...oldBindings])];
     for (let i = 0; i < doomed.length; i += DELETE_BATCH) {
       run('zip', ['-q', '-d', '-nw', bundle, ...doomed.slice(i, i + DELETE_BATCH)]);
     }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      console.error('✗ Info-ZIP `zip`/`unzip` not found on PATH — required for the strip step.');
-    } else {
-      console.error(`✗ Bundle strip failed: ${err instanceof Error ? err.message : err}`);
+    appendDuckDbBindings(bundle, scratch);
+
+    const remainingEntries = listEntries(bundle);
+    const remaining = [
+      ...filterAgentDocEntries(remainingEntries),
+      ...filterNodeGypBuildEntries(remainingEntries),
+      ...filterBuildOnlyEntries(remainingEntries),
+    ];
+    if (remaining.length > 0) {
+      throw new Error(
+        `${remaining.length} entries still present after strip:\n${remaining.join('\n')}`,
+      );
     }
-    process.exit(1);
+    const missing = missingDuckDbBindingEntries(remainingEntries);
+    if (missing.length > 0) {
+      throw new Error(`Missing DuckDB runtime entries:\n${missing.join('\n')}`);
+    }
+    const sizeAfter = statSync(bundle).size;
+    renameSync(bundle, original);
+    console.log(
+      `Bundle cleaned: ${mb(sizeBefore)} → ${mb(sizeAfter)} ` +
+        `(${agentDocs.length} agent-doc, ${nodeGyp.length} node-gyp build, ` +
+        `${buildOnly.length} build-only entries stripped, all DuckDB platform bindings included).`,
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
-
-  // 3. Verify: zero matching entries remain in any class.
-  const remainingEntries = listEntries(bundle);
-  const remaining = [
-    ...filterAgentDocEntries(remainingEntries),
-    ...filterNativeBindingEntries(remainingEntries),
-    ...filterNodeGypBuildEntries(remainingEntries),
-    ...filterBuildOnlyEntries(remainingEntries),
-  ];
-  if (remaining.length > 0) {
-    console.error(`✗ ${remaining.length} entries still present after strip, e.g.:`);
-    for (const entry of remaining.slice(0, 5)) console.error(`    ${entry}`);
-    process.exit(1);
-  }
-
-  const sizeAfter = statSync(bundle).size;
-  console.log(
-    `Bundle cleaned: ${mb(sizeBefore)} → ${mb(sizeAfter)} ` +
-      `(${agentDocs.length} agent-doc, ${natives.length} native-binding, ${nodeGyp.length} node-gyp build, ` +
-      `${buildOnly.length} build-only entries stripped).`,
-  );
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main();
+  try {
+    main();
+  } catch (error) {
+    console.error(`✗ Bundle cleaning failed: ${error instanceof Error ? error.message : error}`);
+    process.exitCode = 1;
+  }
 }
