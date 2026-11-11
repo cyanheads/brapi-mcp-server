@@ -40,44 +40,14 @@ import {
   selectInlineRows,
   toDataframeHandle,
 } from '../shared/find-helpers.js';
-import { buildCallsSearchBody, collectCalls } from '../shared/genotype-calls.js';
+import {
+  buildCallsSearchBody,
+  CallRowSchema,
+  collectCalls,
+  NO_MATCHING_CALLS_NOTICE,
+  toFinderCallRow,
+} from '../shared/genotype-calls.js';
 import { literal } from '../shared/markdown-literals.js';
-
-const CallRowSchema = z
-  .object({
-    callSetDbId: z
-      .string()
-      .nullish()
-      .describe('FK to the call set (one germplasm × one variant set = one call set).'),
-    callSetName: z.string().nullish().describe('Display name of the call set.'),
-    variantDbId: z.string().nullish().describe('FK to the variant being called.'),
-    variantName: z.string().nullish().describe('Display name / alias of the variant.'),
-    variantSetDbId: z.string().nullish().describe('FK to the variant set the call belongs to.'),
-    genotype: z
-      .object({
-        values: z
-          .array(z.string().describe('Per-allele value string.'))
-          .nullish()
-          .describe('Encoded allele values — interpret using top-level `callFormatting`.'),
-      })
-      .passthrough()
-      .nullish()
-      .describe(
-        'Structured genotype payload (array of allele values plus server-specific fields).',
-      ),
-    genotypeValue: z
-      .string()
-      .nullish()
-      .describe(
-        'Legacy flat string form of the call (provided by some servers instead of `genotype`).',
-      ),
-    phaseSet: z
-      .string()
-      .nullish()
-      .describe('Phase-set identifier linking calls that share a haplotype phase.'),
-  })
-  .passthrough()
-  .describe('One genotype call row.');
 
 const OutputSchema = z.object({
   alias: z.string().describe('Connection alias the call used.'),
@@ -390,9 +360,8 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       warnings,
     });
 
-    let inline = selectInlineRows(collected.rows, loadLimit, (rows) =>
-      renderCallRows({ results: rows as Output['results'] }),
-    );
+    const callRows = collected.rows.map(toFinderCallRow);
+    let inline = selectInlineRows(callRows, loadLimit, (rows) => renderCallRows({ results: rows }));
     const distributions = {
       callSetName: computeDistribution(collected.rows, (r) => asString(r.callSetName)),
       variantName: computeDistribution(collected.rows, (r) => asString(r.variantName)),
@@ -407,13 +376,13 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         ctx,
         connection,
         body: searchBody,
-        rows: collected.rows,
+        rows: callRows,
         pullCapped: collected.truncated,
         stoppedEarly,
         maxRows: maxCalls,
       });
-      inline = selectInlineRows(collected.rows, loadLimit, (rows) =>
-        renderCallRows({ results: rows as Output['results'], dataframe: dataframeHandle }),
+      inline = selectInlineRows(callRows, loadLimit, (rows) =>
+        renderCallRows({ results: rows, dataframe: dataframeHandle }),
       );
     }
 
@@ -423,10 +392,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       appliedFilters: searchBody,
       warnings,
     });
-    if (collected.rows.length === 0)
-      ctx.enrich.notice(
-        'No calls matched the requested filters. The variant set or filter combination may not match any data on this server — broaden the scope (variantSetDbId, germplasmDbIds) or verify the IDs.',
-      );
+    if (collected.rows.length === 0) ctx.enrich.notice(NO_MATCHING_CALLS_NOTICE);
     /**
      * The output's own `truncated` means the pull cap fired, so the inline cut is
      * disclosed through shown / cap and the notice, not ctx.enrich.truncated.
@@ -524,7 +490,10 @@ async function spillCalls(input: SpillCallsInput): Promise<z.infer<typeof Datafr
 }
 
 /** Render the exact row section used by both formatting and preview sizing. */
-function renderCallRows(result: Pick<Output, 'results' | 'dataframe'>): string {
+function renderCallRows(result: {
+  results: readonly Output['results'][number][];
+  dataframe?: Output['dataframe'];
+}): string {
   const lines: string[] = [];
   lines.push('## Calls');
   if (result.results.length === 0) {

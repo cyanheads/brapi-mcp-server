@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.10.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/cyanheads/brapi-mcp-server/pkgs/container/brapi-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-0.10.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/cyanheads/brapi-mcp-server/pkgs/container/brapi-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/brapi-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/brapi-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/) [![Status](https://img.shields.io/badge/Status-Beta-yellow.svg?style=flat-square)](./CHANGELOG.md)
 
 </div>
 
@@ -162,8 +162,8 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 ### `brapi_find_observations` <sub>tool</sub>
 
 - Filters: `studies`, `germplasm`, `variables`, `observationUnits`, `observations`, `seasons`, `programs`, `trials`, `observationLevels`, `timestampFrom` / `timestampTo`
-- Study-scoped SGN/Breedbase queries use advertised `/observationunits?includeObservations=true`, preserving zero-valued measurements. Unit totals drive paging; child fields take precedence over inherited unit metadata, and repeated observation IDs are counted once. Observation-level filters are checked after flattening; `appliedFilters` separates upstream requests from client-side criteria
-- A GET query with no `studies`, `trials`, `observationUnits`, or `observations` anchor runs a one-row count probe first and skips the bulk pull when the probe fails or reports more than 5,000 matches; `warnings` says so
+- Study- or germplasm-scoped SGN/Breedbase queries use advertised `/observationunits?includeObservations=true`, preserving zero-valued measurements. Unit totals drive paging; child fields take precedence over inherited unit metadata, and repeated observation IDs are counted once. Observation-level filters are checked after flattening; `appliedFilters` separates upstream requests from client-side criteria on both output surfaces
+- Outside that embedded-unit route, a GET query with no `studies`, `trials`, `observationUnits`, or `observations` anchor runs a one-row count probe first and skips the bulk pull when the probe fails or reports more than 5,000 matches; `warnings` says so. Germplasm predicates are checked before staging, and counts describe confirmed matches. When collection cannot proceed, `brapi_germplasm_performance` can supply contributing study IDs for a study-scoped retry
 - `distributions` over `observationVariableName`, `studyName`, `germplasmName`, `observationLevel`, `season`
 
 ---
@@ -171,6 +171,8 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 ### `brapi_find_images` <sub>tool</sub>
 
 - Filters: `images`, `observationUnits`, `observations`, `studies`, `imageFileNames`, `mimeTypes`, `descriptiveOntologyTerms`; returns metadata only, with bytes via `brapi_get_image`
+- MIME predicates are checked case-insensitively before staging. Contradictions and rows with missing MIME metadata are excluded and disclosed separately; incomplete scans cannot establish that no upstream match exists
+- With MIME verification, `totalCount` counts confirmed matches in the scan; `upstreamTotalCount` retains the upstream total when available
 - `distributions` over `mimeType`, `studyName`, `observationUnitName`, `descriptiveOntologyTerms`
 
 ---
@@ -185,14 +187,16 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 ### `brapi_find_locations` <sub>tool</sub>
 
-- Filters: `locations`, `locationNames`, `countryCodes` (alphabetic codes uppercased; numeric upstream codes preserved), `countryNames` (English names resolved to alpha-3), `locationTypes`, `abbreviations`; unresolved names fail unless an effective country-code restriction remains. Optional `bbox` applies after the fetch; a nonempty box requires all four ordered bounds (`minLat`, `maxLat`, `minLon`, `maxLon`) or fails before location retrieval. An empty box is omitted.
-- `distributions` over `countryCode`, `locationType`; `coordinateAxisOrder: "swapped"` reports a server that stores coordinates as `[lat, lon]`
+- Filters: `locations`, `locationNames`, `countryCodes` (alphabetic codes uppercased; numeric upstream codes preserved), `countryNames` (English names resolved to alpha-3, plus alpha-2 and three-digit ISO numeric codes on CassavaBase), `locationTypes`, `abbreviations`; unresolved names fail unless an effective country-code restriction remains. Optional `bbox` applies before staging; a nonempty box requires all four ordered bounds (`minLat`, `maxLat`, `minLon`, `maxLon`) or fails before location retrieval. An empty box is omitted.
+- `distributions` over `countryCode`, `locationType`; GeoJSON uses `[longitude, latitude]` by default. The BrAPI test-server dialect declares swapped Point coordinates, reported as `coordinateAxisOrder: "swapped"` with or without a bbox. Axis order never depends on the requested box or preview size
 
 ---
 
 ### `brapi_find_variants` <sub>tool</sub>
 
 - Filters: `variantSets`, `variants`, `references`, and a genomic region of `referenceName` + `start` (inclusive) / `end` (exclusive), 0-based
+- Reference and overlapping half-open region predicates are verified before staging. Contradictions and records without enough location metadata are excluded and disclosed separately; touching interval endpoints do not overlap
+- Empty or reversed windows return no matches without fetching variant rows. During region verification, `totalCount` counts confirmed matches in the scan and `upstreamTotalCount` retains the upstream total when available
 - `distributions` over `variantType`, `referenceName`, `variantSetDbId`
 
 ---
@@ -203,6 +207,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - Variant sets are listed by `brapi_raw_get({ path: "/variantsets" })`, optionally with `params.studyDbId`; on Breedbase-family servers they belong to genotyping projects that `brapi_find_studies` does not list
 - `distributions` over `callSetName`, `variantName`, `variantSetDbId`, plus the server's `callFormatting`; `search_endpoint_disabled` when the active dialect marks `POST /search/calls` as dead
 - The upstream pull stops at `BRAPI_GENOTYPE_CALLS_MAX_PULL` (default 100,000) and sets `truncated`; a pull the call's 50 s upstream deadline stops after the first page keeps the calls collected so far, sets `hasMore`, and says so in `warnings`; `loadLimit` and the 24,000-byte inline budget bound only the inline preview, reported through `shown` / `cap`, with every collected call staged in a dataframe when the preview is cut
+- Scalar upstream `genotype.values` become single-element arrays in finder results and staged calls. They retain their values; a bare numeric scalar alone does not establish an allele call
 
 ---
 
@@ -215,7 +220,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 ### `brapi_dataframe_query` <sub>tool</sub>
 
-- `sql` is a single `SELECT`; writes, DDL, `COPY`, `PRAGMA`, `ATTACH`, file reads (a file or URL named as a table included), system-catalog reads, and `DESCRIBE` / `SUMMARIZE` / `SHOW` fail as `sql_rejected`, with the specific reason in `data.gateReason` (`brapi_dataframe_describe` lists a dataframe's columns and types)
+- `sql` is one read-only statement. Use `SELECT` for rows and aggregation, `DESCRIBE` or `SHOW` for a known table or query, and `SUMMARIZE` for column statistics. SQL refusals carry a specific `data.gateReason` under `sql_rejected`. Qualify a column named `current_schema` with its table alias. Use different column, alias, CTE, or table names for identifiers reserved by the system-catalog gate.
 - A query that fails on the data (a cast that does not convert) fails as `sql_execution_error`, a dataframe name that no longer exists as `missing_table`, and a `registerAs` name already in use as `register_as_clash`
 - Returns `rowCount`, typed `columns`, and leading `rows` bounded by `preview`, `rowLimit`, and `BRAPI_CANVAS_MAX_ROWS`, each clamped to the next, then 24,000 bytes on each serialized row array and rendered row section (escaping and markers included). `shown` is the delivered count; `cap` remains the effective row ceiling. An oversized first row returns zero rows: use a narrower projection or aggregation
 - `registerAs` (identifier, ≤63 characters) saves the full result as a new dataframe for chaining
@@ -240,7 +245,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 ### `brapi_build_phenotype_matrix` <sub>tool</sub>
 
-- `studies` required (≥1), optional `variables` / `germplasm` subsets; `shape` `wide` (default) or `long`; `aggregate` `mean` (default), `median`, `first`, or `all` (always long form); `loadLimit` caps matching observations per study
+- `studies` required (≥1), optional `variables` / `germplasm` subsets; `shape` `wide` (default) or `long`; `aggregate` `mean` (default), `median`, `first`, or `all` (always long form); `loadLimit` caps matching observations per study, defaulting to 50,000 independently of the finder preview setting
 - Pages each study's observations against the upstream total, preferring embedded observation units on SGN/Breedbase when advertised so zeros are retained; unit totals count raw units, while `loadLimit` counts matching observations. Other servers retain the `/observations` and fallback paths. Study / variable / germplasm subsets are checked on returned rows
 - `extraFilters` are forwarded, then checked against the rows the matrix is built from, as on `brapi_find_observations`: `warnings` names a key the rows contradict and the keys no row can speak to
 - Returns the matrix as a dataframe plus `observationCount`, `germplasmCount`, `variableCount`, and `variableLegend` mapping SQL-safe column names to variable names; `truncated` / `cap` flag a study whose scan stopped before its total (at `loadLimit`, the page cap, a failed, empty, or repeated page, or the call deadline) and the notice names it with the rows examined
@@ -252,7 +257,8 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 - `germplasmDbId` required; SGN/Breedbase uses advertised germplasm-scoped embedded units, walking their raw total without the study-discovery cap. Other servers discover up to 200 studies. Explicit `studyDbIds` skips discovery and restricts collection to those studies; optional `variables` subset; `germplasm_not_found` when the upstream has no such germplasm
 - `perVariable` rows carry `n`, `mean`, `median`, `sd` (omitted when n < 2 or non-numeric), `min`, `max`, `studyCount`, `studyDbIds`, and `seasons`
-- `studyCount` / `studyDbIds` remain contributors only. Additive `coverage` distinguishes contributed, empty, failed, partial, and unprocessed studies; scoped-unit scans report raw units, pages, total when known, and completion. An incomplete unit walk cannot establish the unseen study count. Repeated observation IDs are counted once; distinct-ID replicates and zero values remain. The deployment observation limit applies per study, including on the germplasm-unit walk; page, observation, and deadline limits are disclosed, and deadline-skipped studies receive one count warning
+- `studyCount` / `studyDbIds` remain contributors only. Additive `coverage` distinguishes contributed, empty, failed, partial, and unprocessed studies; scoped-unit scans report raw units, pages, total when known, and completion. An incomplete unit walk cannot establish the unseen study count. Repeated observation IDs are counted once; distinct-ID replicates and zero values remain. Optional `loadLimit` caps matching observations per study, defaulting to 50,000 on explicit and discovered study paths; page, observation, and deadline limits are disclosed, and deadline-skipped studies receive one count warning
+- `truncated: true` identifies incomplete observation scans; `coverage.partial` also covers failed studies
 
 ---
 
@@ -261,6 +267,8 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - `variantSetDbId` required (`no_filters` otherwise; list sets with `brapi_raw_get({ path: "/variantsets" })`), optional `germplasmDbIds`; `format` is `matrix-json`, `vcf-lite` (adds `vcf` text), or `plink` (adds `ped` / `map` text), and every format registers the germplasm × variant dataframe
 - `variantColumnLegend` maps SQL-safe column names back to variant IDs; `search_endpoint_disabled` when the active dialect marks `POST /search/calls` as dead
 - VCF POS and PLINK base-pair positions are one-based: valid zero-based BrAPI `start` values 0 and 500 export as 1 and 501. Missing or invalid positions retain `.` (VCF) / `0` (PLINK) placeholders.
+- PLINK allele indices use available REF/ALT labels, or positive numeric labels when metadata cannot resolve the marker. Missing calls use `0 0`. Ambiguous numeric scalar calls remain verbatim in the raw dataframe but export as missing in VCF-lite and PLINK, with a warning; dosage is not inferred into an allele genotype
+- An empty call search returns a queryable zero-row dataframe with its `germplasmDbId` column and no-match guidance
 - `maxCalls` / `maxColumns` can lower `BRAPI_GENOTYPE_CALLS_MAX_PULL` / `BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS` but never raise them; `truncated` means a ceiling fired or the call's 50 s upstream deadline ended the call pull early, and `warnings` names which
 
 ---
@@ -365,7 +373,7 @@ Agent-friendly output:
 
 ### Working with dataframes
 
-When a finder's inline `results` holds fewer rows than matched — `loadLimit` or the 24,000-byte inline budget bound first — the response carries a `dataframe` handle: `tableName`, `rowCount`, `columns`, `createdAt`, `expiresAt`, and the upstream `totalCount` when the server reports one, plus `truncated` (and `maxRows` when the row cap fired) when the dataframe holds fewer rows than the upstream total; `warnings` then says why the walk stopped. Columns renamed to pass the SQL identifier check map back to their upstream keys in `columnLegend`.
+When a finder's inline `results` holds fewer rows than matched — `loadLimit` or the 24,000-byte inline budget bound first — the response carries a `dataframe` handle: `tableName`, `rowCount`, `columns`, `createdAt`, and `expiresAt`. `totalCount` is the upstream total for unfiltered walks, the matched total for a complete locally filtered walk, and absent when a locally filtered scan is incomplete. `truncated` and `warnings` disclose a stopped walk, with `maxRows` when the row cap fired. Columns renamed to pass the SQL identifier check map back to their upstream keys in `columnLegend`.
 
 Every response that stages a dataframe — the finders, `brapi_raw_get` / `brapi_raw_search` when a row or byte bound trims a list, every matrix from `brapi_build_phenotype_matrix` and `brapi_export_genotype_matrix`, and `brapi_walk_pedigree` when graph/frontier previews are trimmed or fetched relatives are omitted — carries one `notice` naming each table, its row count, coverage, and `brapi_dataframe_describe` then `brapi_dataframe_query`. `brapi_dataframe_export` is named too where it is registered (stdio with `BRAPI_EXPORT_DIR` set). On a finder, the same notice says which bound cut `results`.
 
@@ -460,7 +468,7 @@ No env vars are required: the built-in aliases (`bti-cassava`, `bti-sweetpotato`
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 - [`@duckdb/node-api`](https://www.npmjs.com/package/@duckdb/node-api), installed as a regular dependency, with prebuilt native bindings for macOS, Linux (glibc and musl), and Windows on x64 and arm64. Cloudflare Workers is not supported.
 
 ### Installation

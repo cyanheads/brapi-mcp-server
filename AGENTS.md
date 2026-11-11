@@ -2,9 +2,9 @@
 
 **Server:** brapi-mcp-server
 **Version:** 0.10.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1 (protocol revisions 2026-07-28 and 2025-*)
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0 (protocol revisions 2026-07-28 and 2025-*)
 **Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -94,7 +94,9 @@ export const brapiConnect = tool('brapi_connect', {
 
 ### Tool — find with dataframe spillover
 
-`find_*` tools share a pattern: pull one page (usually capped at `loadLimit`; germplasm text scans use configured `pageSize`), walk the remaining pages when it shows more exist (the upstream `totalCount` exceeds it, or, with no `totalCount`, it came back full), compute distributions across the full matched set, and return the leading rows within both `loadLimit` and the 24,000-byte inline budget (`INLINE_RESULTS_BUDGET_BYTES`, via `selectInlineRows`). Whenever `results` holds fewer rows than matched, `maybeSpill` materializes the matched set as a canvas dataframe and returns a handle; `discloseInlineTrim` reports the cut as `truncated` / `shown` / `cap` plus one notice naming the bound that fired and, via `stagedDataframeNotice`, the staged table with `brapi_dataframe_describe` / `brapi_dataframe_query`. Every tool that stages a dataframe carries that pointer in its `notice`. `brapi_find_genotype_calls` already uses `truncated` for its pull cap, so it reports the cut through `shown` / `cap` and `inlineTrimNotice`. Spilled rows live in DuckDB only — there is no parallel JSON store. Canvas is mandatory: startup fails closed when `core.canvas` is undefined.
+`find_*` tools share a pattern: pull one page (usually capped at `loadLimit`; germplasm text scans use configured `pageSize`), walk the remaining pages when it shows more exist (the upstream `totalCount` exceeds it, or, with no `totalCount`, it came back full), compute distributions across the full matched set, and return the leading rows within both `loadLimit` and the 24,000-byte inline budget (`INLINE_RESULTS_BUDGET_BYTES`, via `selectInlineRows`). Whenever `results` holds fewer rows than matched, `maybeSpill` materializes the matched set as a canvas dataframe and returns a handle; `discloseInlineTrim` reports the cut as `truncated` / `shown` / `cap` plus one notice naming the bound that fired and, via `stagedDataframeNotice`, the staged table with `brapi_dataframe_describe` / `brapi_dataframe_query`. Every tool that stages a dataframe carries that pointer in its `notice`. `brapi_find_genotype_calls` already uses `truncated` for its pull cap, so it reports the cut through `shown` / `cap` and `inlineTrimNotice`. Spilled rows live in DuckDB only — there is no parallel JSON store. Canvas is mandatory: `src/index.ts` loads `.env` (`parseConfig()`), defaults an unset or empty `CANVAS_PROVIDER_TYPE` to `duckdb`, and startup fails closed when `core.canvas` is undefined (`CANVAS_PROVIDER_TYPE=none`).
+
+CanvasBridge resolves its stored tenant or session pointer through `DataCanvas.acquireShared`, so concurrent first stagings reuse one canvas. Empty genotype matrices pass an explicit column schema through the same registration and provenance path.
 
 ```ts
 // src/mcp-server/tools/definitions/brapi-find-germplasm.tool.ts (abbreviated)
@@ -252,7 +254,7 @@ src/
     brapi-filters/                        # Static v2.1 filter catalog
     canvas-bridge/                        # Default-canvas resolver (per-session when BRAPI_SESSION_ISOLATION=true; per-tenant otherwise), df_<uuid> table generator, provenance store
     capability-registry/                  # Per-connection /serverinfo cache + call guard
-    iso-country/                          # ISO 3166-1 resolver — free-form country names → alpha-3 for /locations filters
+    iso-country/                          # ISO 3166-1 resolver — names and aliases → alpha-3, alpha-2, numeric codes
     ontology-resolver/                    # Free-text → ontology-term matcher for variables
     reference-data-cache/                 # Programs / trials / locations / crops lookup cache
     server-registry/                      # Alias → live connection map with auth resolution; session-scoped under BRAPI_SESSION_ISOLATION=true
@@ -275,7 +277,7 @@ src/
         brapi-find-variants.tool.ts       # find_* — variants, 0-based [start, end) genomic region
         brapi-find-genotype-calls.tool.ts # Async-search genotype calls with maxCalls cap + dataframe spillover
         brapi-dataframe-describe.tool.ts  # List / describe canvas dataframes with columns, row counts, provenance
-        brapi-dataframe-query.tool.ts     # Run SQL across canvas dataframes (SELECT only); typed columns response
+        brapi-dataframe-query.tool.ts     # Run read-only SQL across canvas dataframes
         brapi-dataframe-drop.tool.ts      # Drop a dataframe by name (opt-in via BRAPI_CANVAS_DROP_ENABLED)
         brapi-dataframe-export.tool.ts    # Write CSV/Parquet/JSON to BRAPI_EXPORT_DIR (opt-in, stdio-only)
         brapi-build-phenotype-matrix.tool.ts  # Germplasm × trait matrix from studies; materialized as canvas dataframe
@@ -322,7 +324,7 @@ src/
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
+Read development skills in `framework-skills/` when a task matches. `bun run list-skills` prints the registry. Root `skills/` is reserved for skills published to agents that install or call this server. The npm package, Docker image, and MCPB bundle ship the published tree when present. To serve it over MCP, set `skills: 'skills'` in `createApp()`. The packaging check validates the published tree.
 
 **Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, Codex: `.codex/skills/`, shared: `.agents/skills/`, others: equivalent). This makes skills available as context without needing to reference `framework-skills/` paths manually. After framework updates, run the `maintenance` skill — it re-syncs the agent directory automatically (Phase B).
 
@@ -336,6 +338,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author a published skill for callers in root `skills/` |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -387,7 +390,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting (safe fixes only) |
 | `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, Dockerfile build platform (run by devcheck) |
+| `bun run lint:packaging` | Check env-var parity, Dockerfile build platform, MCPB exclusions, plugin manifests, and published skills |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
 | `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
 | `bun run start` | Production mode — defers transport selection to `MCP_TRANSPORT_TYPE` (stdio default) |
@@ -402,7 +405,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. The bundle therefore ships portable without the DuckDB native — `@duckdb/node-api` is loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. MCPB is stdio-only — HTTP deployments are unaffected. To opt out, delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly when `manifest.json` is absent.
+`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. The bundle therefore ships portable without the DuckDB native — `@duckdb/node-api` is loaded lazily, so canvas tools report an actionable install hint and every other tool works normally. Unlike inline-capable servers, the bundle keeps the DuckDB default rather than pinning `CANVAS_PROVIDER_TYPE=none`, because this server refuses to start without a canvas. MCPB is stdio-only — HTTP deployments are unaffected. To opt out, delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly when `manifest.json` is absent.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match.
 

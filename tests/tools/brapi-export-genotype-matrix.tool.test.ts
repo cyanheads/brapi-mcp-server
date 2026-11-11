@@ -7,13 +7,15 @@
  * @module tests/tools/brapi-export-genotype-matrix.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import type { Context } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetServerConfig } from '@/config/server-config.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiExportGenotypeMatrix } from '@/mcp-server/tools/definitions/brapi-export-genotype-matrix.tool.js';
 import { registerDialect } from '@/services/brapi-dialect/registry.js';
+import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import {
   BASE_URL,
   envelope,
@@ -112,6 +114,242 @@ describe('brapi_export_genotype_matrix tool', () => {
   afterEach(() => {
     resetTestServices();
     vi.unstubAllEnvs();
+  });
+
+  async function run(ctx: Context, format: 'matrix-json' | 'vcf-lite' | 'plink') {
+    const definition = {
+      ...brapiExportGenotypeMatrix,
+      handler: (input, contractCtx) =>
+        brapiExportGenotypeMatrix.handler(input, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiExportGenotypeMatrix;
+    const result = await runToolContract(
+      definition,
+      { variantSetDbId: 'vset-1', format },
+      {
+        context: { tenantId: 't1' },
+      },
+    );
+    const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+    return { result, structured: result.structuredContent as Record<string, unknown>, text };
+  }
+
+  it.each(['vcf-lite', 'plink'] as const)(
+    'keeps scalar dosages in the matrix and emits missing in %s',
+    async (format) => {
+      const ctx = await connect(fetcher);
+      const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+      const data = ['0', '0.5', '0/1'].map((values, index) =>
+        call({
+          variantDbId: `v${index}`,
+          genotype: { values },
+        }),
+      );
+      fetcher.mockImplementation(async (url: string) =>
+        jsonResponse(envelope({ data: pathnameOf(url).endsWith('/search/calls') ? data : [] })),
+      );
+      const { result, structured, text } = await run(ctx, format);
+      expect(result.isError).toBeFalsy();
+      expect(register.mock.calls[0]?.[1].rows).toEqual([
+        { germplasmDbId: 'cs-1', v0: '0', v1: '0.5', v2: '0/1' },
+      ]);
+      expect(structured.warnings).toEqual(
+        expect.arrayContaining([expect.stringContaining('dosage')]),
+      );
+      expect(text).toContain('dosage');
+      if (format === 'plink') {
+        expect(structured.ped).toBe('0\tTME419\t0\t0\t0\t0\t0\t0\t0\t0\t1\t2');
+        expect(text).toContain(structured.ped);
+      } else {
+        expect((structured.vcf as string).split('\n').slice(1)).toEqual([
+          '.\t.\tv0\t.\t.\t.',
+          '.\t.\tv1\t.\t.\t.',
+          '.\t.\tv2\t.\t.\t0/1',
+        ]);
+        expect(text).toContain(structured.vcf);
+      }
+    },
+  );
+
+  it.each(['matrix-json', 'vcf-lite', 'plink'] as const)(
+    'returns a typed, empty %s export with no metadata fetch',
+    async (format) => {
+      const ctx = await connect(fetcher);
+      fetcher.mockResolvedValueOnce(jsonResponse(envelope({ data: [] })));
+      const { result, structured, text } = await run(ctx, format);
+      expect(result.isError).toBeFalsy();
+      expect(structured).toMatchObject({
+        rowCount: 0,
+        columnCount: 0,
+        variantColumnLegend: {},
+        dataframe: { columns: ['germplasmDbId'], rowCount: 0 },
+        notice: expect.stringContaining('No calls matched'),
+      });
+      const tableName = (structured.dataframe as { tableName: string }).tableName;
+      expect(structured.notice).toContain(`Staged dataframe \`${tableName}\` (0 rows)`);
+      expect(structured.notice).toContain('brapi_dataframe_describe');
+      expect(structured.notice).toContain('brapi_dataframe_query');
+      expect(text).toContain(structured.notice);
+      expect(await getCanvasBridge().describe(ctx, { tableName })).toMatchObject([
+        {
+          name: tableName,
+          rowCount: 0,
+          provenance: { source: 'export_genotype_matrix' },
+        },
+      ]);
+      expect(text).toContain('No calls matched');
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(structured.vcf).toBe(format === 'vcf-lite' ? '#CHROM\tPOS\tID\tREF\tALT' : undefined);
+      expect(structured.ped).toBe(format === 'plink' ? '' : undefined);
+      expect(structured.map).toBe(format === 'plink' ? '' : undefined);
+    },
+  );
+
+  it('recodes indexed PED calls and preserves raw calls with incomplete or mixed metadata', async () => {
+    const ctx = await connect(fetcher);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    const data = ['0/0', '0/1', '0/.', '0/2', '0/1'].map((genotypeValue, index) =>
+      call({
+        variantDbId: `v${index}`,
+        genotype: null,
+        genotypeValue,
+      }),
+    );
+    data.push(
+      call({
+        callSetDbId: 'cs-2',
+        callSetName: 'second',
+        variantDbId: 'v4',
+        genotype: { values: ['A', 'G'] },
+      }),
+    );
+    fetcher.mockImplementation(async (url: string) =>
+      jsonResponse(
+        envelope({
+          data: pathnameOf(url).endsWith('/search/calls')
+            ? data
+            : [
+                { variantDbId: 'v0', referenceBases: 'A', alternateBases: ['G'] },
+                { variantDbId: 'v3', referenceBases: 'C', alternateBases: [null, 'T'] },
+              ],
+          unknownString: '.',
+        }),
+      ),
+    );
+    const { result, structured, text } = await run(ctx, 'plink');
+    expect(result.isError).toBeFalsy();
+    expect(structured.ped).toBe(
+      [
+        '0\tTME419\t0\t0\t0\t0\tA\tA\t1\t2\t0\t0\tC\tT\t0\t0',
+        '0\tsecond\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\tA\tG',
+      ].join('\n'),
+    );
+    expect(text).toContain(structured.ped);
+    expect(text).toContain('numeric labels');
+    expect(text).toContain('literal');
+    expect(register.mock.calls[0]?.[1].rows[0]).toMatchObject({
+      v0: '0/0',
+      v1: '0/1',
+      v2: '0/.',
+      v3: '0/2',
+      v4: '0/1',
+    });
+  });
+
+  it('propagates cancellation during variant metadata collection before staging', async () => {
+    const ctx = await connect(fetcher);
+    const controller = new AbortController();
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(async (url: string) => {
+      if (pathnameOf(url).endsWith('/search/calls')) {
+        return jsonResponse(envelope({ data: [call()] }));
+      }
+      controller.abort();
+      throw controller.signal.reason;
+    });
+    await expect(
+      brapiExportGenotypeMatrix.handler(
+        brapiExportGenotypeMatrix.input.parse({ variantSetDbId: 'vset-1', format: 'plink' }),
+        { ...ctx, signal: controller.signal },
+      ),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it('keeps numeric PED calls when variant metadata fails', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      if (pathnameOf(url).endsWith('/search/calls')) {
+        return jsonResponse(
+          envelope({
+            data: [call({ genotype: { values: ['0', '1'] } })],
+            sepUnphased: '::',
+          }),
+        );
+      }
+      throw new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Variant endpoint failed.', {
+        status: 500,
+        errorSource: 'FetchHttpError',
+      });
+    });
+    const { result, structured, text } = await run(ctx, 'plink');
+    expect(result.isError).toBeFalsy();
+    expect(structured.ped).toBe('0\tTME419\t0\t0\t0\t0\t1\t2');
+    expect(structured.map).toBe('0\tv-1\t0\t0');
+    expect(text).toContain('Variant metadata could not be fully retrieved');
+    expect(text).toContain('numeric labels');
+  });
+
+  it('uses earlier formatting hints to decode PED calls from a later page', async () => {
+    const ctx = await connect(fetcher);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(async (url: string) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith('/search/calls')) {
+        return jsonResponse(envelope({ searchResultsDbId: 'calls-job' }), 202);
+      }
+      if (parsed.pathname.endsWith('/variants')) return jsonResponse(envelope({ data: [] }));
+      const page = Number(parsed.searchParams.get('page'));
+      return jsonResponse({
+        metadata: { pagination: { currentPage: page, totalPages: 2 } },
+        result:
+          page === 0
+            ? {
+                sepUnphased: '::',
+                unknownString: 'NA',
+                data: [call({ variantDbId: 'v0', genotype: { values: ['0', '1'] } })],
+              }
+            : {
+                sepPhased: '|',
+                data: [call({ variantDbId: 'v1', genotype: { values: '0::NA' } })],
+              },
+      });
+    });
+
+    const { result, structured, text } = await run(ctx, 'plink');
+    expect(result.isError).toBeFalsy();
+    expect(structured.ped).toBe('0\tTME419\t0\t0\t0\t0\t1\t2\t0\t0');
+    expect(text).toContain(structured.ped);
+    expect(register.mock.calls[0]?.[1].rows).toEqual([
+      { germplasmDbId: 'cs-1', v0: '0::1', v1: '0::NA' },
+    ]);
+  });
+
+  it('preserves names and encounter order for opaque sample identifiers', async () => {
+    const ctx = await connect(fetcher);
+    const rows = [
+      call({ callSetDbId: '__proto__', callSetName: 'First sample', variantDbId: 'v0' }),
+      call({ callSetDbId: 'constructor', callSetName: 'Second sample', variantDbId: 'v0' }),
+      call({ callSetDbId: '__proto__', callSetName: 'Ignored repeat', variantDbId: 'v1' }),
+    ];
+    fetcher.mockImplementation(async (url: string) =>
+      jsonResponse(envelope({ data: pathnameOf(url).endsWith('/search/calls') ? rows : [] })),
+    );
+    const { result, structured, text } = await run(ctx, 'vcf-lite');
+    expect(result.isError).toBeFalsy();
+    expect(structured.rowCount).toBe(2);
+    const header = '#CHROM\tPOS\tID\tREF\tALT\tFirst sample\tSecond sample';
+    expect((structured.vcf as string).split('\n')[0]).toBe(header);
+    expect(text).toContain(header);
   });
 
   it('names the matrix dataframe and the dataframe tools in a notice, adding export only when registered', async () => {

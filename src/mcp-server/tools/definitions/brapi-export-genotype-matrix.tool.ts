@@ -30,7 +30,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
 import {
   GENOTYPE_CALLS_MAX_PULL_CEILING,
   GENOTYPE_MATRIX_MAX_COLUMNS_CEILING,
@@ -58,15 +58,17 @@ import {
 import {
   buildCallsSearchBody,
   type CallFormatting,
-  type CallRow,
   collectCalls,
+  NO_MATCHING_CALLS_NOTICE,
   renderGenotypeString,
+  type WireCallRow,
 } from '../shared/genotype-calls.js';
 import { fenced, literal } from '../shared/markdown-literals.js';
 
 /** Per-variant coordinate metadata used to populate VCF/PLINK position columns. */
 interface VariantMeta {
   alt?: string;
+  altByIndex?: (string | undefined)[];
   chrom?: string;
   pos?: string;
   ref?: string;
@@ -110,7 +112,7 @@ const OutputSchema = z.object({
     })
     .describe('Genotype-encoding hints echoed by the server.'),
   dataframe: DataframeHandleSchema.describe(
-    'The wide germplasm × variant matrix, staged for every format; brapi_dataframe_export writes it to a file where that tool is listed. vcf, ped, and map serialize the same data.',
+    'The wide germplasm × variant matrix with raw genotype values, staged for every format. brapi_dataframe_export writes it to a file where that tool is listed.',
   ),
   vcf: z
     .string()
@@ -122,7 +124,7 @@ const OutputSchema = z.object({
     .string()
     .optional()
     .describe(
-      'PLINK .ped text — FID IID PAT MAT SEX PHENO placeholders (all 0) followed by biallelic genotype pairs per variant, one row per sample. Present only when format="plink". Alleles are passed through verbatim; PLINK missing is `0`.',
+      'PLINK .ped text — FID IID PAT MAT SEX PHENO placeholders followed by allele pairs per variant. Indexed alleles use REF/ALT labels when available or positive numeric labels when metadata is missing. Missing calls use 0 0. Present for format="plink".',
     ),
   map: z
     .string()
@@ -381,6 +383,37 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       );
     }
 
+    let vcf: string | undefined;
+    let ped: string | undefined;
+    let map: string | undefined;
+    if (input.format === 'vcf-lite' || input.format === 'plink') {
+      const variantMeta =
+        matrix.columnCount === 0
+          ? new Map<string, VariantMeta>()
+          : await collectVariantMetadata({
+              client,
+              connection,
+              dialect,
+              variantSetDbId: input.variantSetDbId,
+              neededIds: new Set(matrix.variantIdOrder),
+              ctx,
+              warnings,
+            });
+      if (matrix.hasAmbiguousValues) {
+        warnings.push(
+          'Bare numeric genotype values can represent dosage or a single allele index. Text export marks those calls missing. Query the staged matrix with brapi_dataframe_query to retrieve the original values.',
+        );
+      }
+      if (input.format === 'vcf-lite') {
+        vcf = buildVcfText(matrix, variantMeta, collected.callFormatting);
+      } else {
+        ped = buildPedText(matrix, variantMeta, collected.callFormatting, warnings);
+        map = buildMapText(matrix, variantMeta);
+      }
+    }
+    if (ctx.signal.aborted)
+      throw requestCancelled('Genotype matrix export cancelled by the caller.');
+
     // Register the wide matrix as a canvas dataframe (used by all three formats).
     const registerInput: RegisterDataframeInput = {
       source: 'export_genotype_matrix',
@@ -388,6 +421,9 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       query: searchBody,
       rows: matrix.matrixRows,
     };
+    if (matrix.matrixRows.length === 0) {
+      registerInput.emptySchema = [{ name: 'germplasmDbId', type: 'VARCHAR', nullable: true }];
+    }
     // A column cap leaves the dataframe incomplete too — flag it so a reader who
     // inspects the handle without reading `warnings` doesn't take the matrix as
     // whole. `maxRows` stays row-scoped: it's set only when the call pull hit the
@@ -403,32 +439,10 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     }
     const dfResult = await bridge.registerDataframe(ctx, registerInput);
     const dataframeHandle = toDataframeHandle(dfResult);
-    ctx.enrich.notice(stagedDataframeNotice([dataframeHandle]));
-
-    // For text formats, pull variant coordinate metadata and render the text.
-    let vcf: string | undefined;
-    let ped: string | undefined;
-    let map: string | undefined;
-    if (input.format === 'vcf-lite' || input.format === 'plink') {
-      const variantMeta = await collectVariantMetadata({
-        client,
-        connection,
-        dialect,
-        variantSetDbId: input.variantSetDbId,
-        neededIds: new Set(matrix.variantIdOrder),
-        ctx,
-        warnings,
-      });
-      if (input.format === 'vcf-lite') {
-        vcf = buildVcfText(matrix, variantMeta, collected.callFormatting);
-      } else {
-        ped = buildPedText(matrix, collected.callFormatting);
-        map = buildMapText(matrix, variantMeta);
-        warnings.push(
-          'PLINK alleles are passed through verbatim from the genotype calls; numeric (0/1) codings are not recoded to nucleotides and `0` denotes PLINK missing. Supply letter-coded genotypes or recode downstream if a true biallelic .ped is required.',
-        );
-      }
-    }
+    const stagedNotice = stagedDataframeNotice([dataframeHandle]);
+    ctx.enrich.notice(
+      matrix.matrixRows.length === 0 ? `${NO_MATCHING_CALLS_NOTICE} ${stagedNotice}` : stagedNotice,
+    );
 
     const result: Output = {
       alias: connection.alias,
@@ -561,17 +575,23 @@ function renderTextPreview(opts: {
 // Matrix pivot
 // ---------------------------------------------------------------------------
 
+interface GenotypeCell {
+  ambiguous: boolean;
+  text: string;
+}
+
 interface MatrixBuildResult {
   /** Number of distinct variant columns (≤ the `maxColumns` cap). */
   columnCount: number;
   /** True when distinct variants exceeded `maxColumns` and net-new ones were dropped. */
   columnsTruncated: boolean;
-  /** sample → variantDbId → rendered genotype string. */
-  genotypeAt: Map<string, Map<string, string>>;
+  /** sample → variantDbId → raw rendered genotype and encoding information. */
+  genotypeAt: Map<string, Map<string, GenotypeCell>>;
+  hasAmbiguousValues: boolean;
   /** Wide rows registered as the canvas dataframe (one per sample). */
   matrixRows: Record<string, unknown>[];
   /** Row key → display label (callSetName when present). */
-  sampleLabels: Record<string, string>;
+  sampleLabels: Map<string, string>;
   /** Sample (call-set) row keys in encounter order. */
   sampleOrder: string[];
   /** Map of sanitized column name → original variantDbId. */
@@ -599,16 +619,14 @@ interface MatrixBuildResult {
  * built, not built-then-trimmed.
  */
 function buildMatrix(
-  rows: CallRow[],
+  rows: WireCallRow[],
   callFormatting: CallFormatting,
   maxColumns: number,
 ): MatrixBuildResult {
   const variantSeen = new Set<string>();
   const variantIdOrder: string[] = [];
-  const sampleSeen = new Set<string>();
-  const sampleOrder: string[] = [];
-  const sampleLabels: Record<string, string> = {};
-  const genotypeAt = new Map<string, Map<string, string>>();
+  const sampleLabels = new Map<string, string>();
+  const genotypeAt = new Map<string, Map<string, GenotypeCell>>();
   let columnsTruncated = false;
 
   for (const row of rows) {
@@ -620,10 +638,8 @@ function buildMatrix(
     // common Breedbase /search/calls shape). It must still appear, empty in the
     // kept columns.
     const sampleKey = row.callSetDbId ?? row.callSetName ?? 'unknown';
-    if (!sampleSeen.has(sampleKey)) {
-      sampleSeen.add(sampleKey);
-      sampleOrder.push(sampleKey);
-      sampleLabels[sampleKey] = row.callSetName ?? sampleKey;
+    if (!sampleLabels.has(sampleKey)) {
+      sampleLabels.set(sampleKey, row.callSetName ?? sampleKey);
     }
     if (!variantSeen.has(vid)) {
       if (variantIdOrder.length >= maxColumns) {
@@ -633,24 +649,32 @@ function buildMatrix(
       variantSeen.add(vid);
       variantIdOrder.push(vid);
     }
-    const gt = renderGenotypeString(row, callFormatting);
+    const text = renderGenotypeString(row, callFormatting);
+    const ambiguous =
+      typeof row.genotype?.values === 'string' &&
+      text !== callFormatting.unknownString &&
+      isBareNumeric(text);
     let byVariant = genotypeAt.get(sampleKey);
     if (!byVariant) {
       byVariant = new Map();
       genotypeAt.set(sampleKey, byVariant);
     }
-    byVariant.set(vid, gt);
+    byVariant.set(vid, { text, ambiguous });
   }
 
   const { columns: sanitizedCols, toOriginal: variantColumnLegend } =
     buildUniqueColumns(variantIdOrder);
 
+  let hasAmbiguousValues = false;
+  const sampleOrder = [...sampleLabels.keys()];
   const matrixRows: Record<string, unknown>[] = sampleOrder.map((sampleKey) => {
     const row: Record<string, unknown> = { germplasmDbId: sampleKey };
     const byVariant = genotypeAt.get(sampleKey);
     variantIdOrder.forEach((vid, i) => {
       const col = sanitizedCols[i] ?? `v_${i}`;
-      row[col] = byVariant?.get(vid) ?? null;
+      const cell = byVariant?.get(vid);
+      if (cell?.ambiguous) hasAmbiguousValues = true;
+      row[col] = cell?.text ?? null;
     });
     return row;
   });
@@ -664,7 +688,17 @@ function buildMatrix(
     sampleOrder,
     sampleLabels,
     genotypeAt,
+    hasAmbiguousValues,
   };
+}
+
+function isBareNumeric(text: string): boolean {
+  const token = text.trim();
+  return (
+    token !== '' &&
+    !['0x', '0o', '0b'].includes(token.slice(0, 2).toLowerCase()) &&
+    Number.isFinite(Number(token))
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -688,12 +722,15 @@ function buildVcfText(
     'ID',
     'REF',
     'ALT',
-    ...matrix.sampleOrder.map((s) => matrix.sampleLabels[s] ?? s),
+    ...matrix.sampleOrder.map((s) => matrix.sampleLabels.get(s) ?? s),
   ];
   const lines = [tsv(header)];
   for (const vid of matrix.variantIdOrder) {
     const m = variantMeta.get(vid) ?? {};
-    const genotypes = matrix.sampleOrder.map((s) => matrix.genotypeAt.get(s)?.get(vid) ?? missing);
+    const genotypes = matrix.sampleOrder.map((s) => {
+      const cell = matrix.genotypeAt.get(s)?.get(vid);
+      return cell?.ambiguous ? '.' : (cell?.text ?? missing);
+    });
     lines.push(tsv([m.chrom ?? '.', m.pos ?? '.', vid, m.ref ?? '.', m.alt ?? '.', ...genotypes]));
   }
   return lines.join('\n');
@@ -709,47 +746,119 @@ function buildMapText(matrix: MatrixBuildResult, variantMeta: Map<string, Varian
     .join('\n');
 }
 
-function buildPedText(matrix: MatrixBuildResult, callFormatting: CallFormatting): string {
-  // FID IID PAT MAT SEX PHENO (all 0 placeholders) + biallelic genotype pairs.
-  return matrix.sampleOrder
-    .map((sampleKey) => {
-      const fields: string[] = [
-        '0',
-        matrix.sampleLabels[sampleKey] ?? sampleKey,
-        '0',
-        '0',
-        '0',
-        '0',
-      ];
-      const byVariant = matrix.genotypeAt.get(sampleKey);
-      for (const vid of matrix.variantIdOrder) {
-        const [a1, a2] = splitAlleles(byVariant?.get(vid), callFormatting);
-        fields.push(a1, a2);
+function buildPedText(
+  matrix: MatrixBuildResult,
+  variantMeta: Map<string, VariantMeta>,
+  callFormatting: CallFormatting,
+  warnings: string[],
+): string {
+  const unknown = callFormatting.unknownString ?? '.';
+  const separators = [callFormatting.sepPhased, callFormatting.sepUnphased, '/', '|', ','].filter(
+    (sep): sep is string => Boolean(sep),
+  );
+  const literalMarkers = new Set<string>();
+  const unmappedMarkers = new Set<string>();
+  for (const calls of matrix.genotypeAt.values()) {
+    for (const [variant, cell] of calls) {
+      if (cell.ambiguous) continue;
+      const pair = splitAlleles(cell.text, unknown, separators);
+      if (!pair) continue;
+      for (const allele of pair) {
+        if (typeof allele === 'string') literalMarkers.add(variant);
+        else if (!pedAlleleLabel(variantMeta.get(variant), allele)) unmappedMarkers.add(variant);
       }
-      return fields.join('\t');
+    }
+  }
+  if ([...unmappedMarkers].some((variant) => !literalMarkers.has(variant))) {
+    warnings.push(
+      'PLINK uses positive numeric labels (allele index + 1) for markers whose allele metadata cannot resolve all indices.',
+    );
+  }
+  if ([...unmappedMarkers].some((variant) => literalMarkers.has(variant))) {
+    warnings.push(
+      'PLINK marks indexed calls missing where marker metadata cannot relate them to literal allele labels. The original calls are in the staged matrix.',
+    );
+  }
+
+  return matrix.sampleOrder
+    .map((sample) => {
+      const row = ['0', matrix.sampleLabels.get(sample) ?? sample, '0', '0', '0', '0'];
+      const calls = matrix.genotypeAt.get(sample);
+      for (const variant of matrix.variantIdOrder) {
+        const cell = calls?.get(variant);
+        const pair =
+          cell && !cell.ambiguous ? splitAlleles(cell.text, unknown, separators) : undefined;
+        const unmapped = unmappedMarkers.has(variant);
+        if (
+          !pair ||
+          (unmapped &&
+            literalMarkers.has(variant) &&
+            pair.some((allele) => typeof allele === 'number'))
+        ) {
+          row.push('0', '0');
+          continue;
+        }
+        const meta = variantMeta.get(variant);
+        for (const allele of pair) {
+          if (typeof allele === 'string') row.push(allele);
+          else row.push(unmapped ? String(allele + 1) : (pedAlleleLabel(meta, allele) ?? '0'));
+        }
+      }
+      return row.join('\t');
     })
     .join('\n');
 }
 
+function pedAlleleLabel(meta: VariantMeta | undefined, index: number): string | undefined {
+  return index === 0 ? indexedAlleleLabel(meta?.ref) : meta?.altByIndex?.[index - 1];
+}
+
 /**
- * Split a rendered genotype string into a biallelic pair for PLINK .ped. Splits
- * on `/` or `|`; a single allele is treated as homozygous; unknown/missing maps
- * to PLINK's `0` sentinel. Polyploid calls keep the first two alleles.
+ * Decode the first two tokens for PED. A single known allele is duplicated;
+ * a missing token makes the whole pair missing.
  */
-function splitAlleles(gt: string | undefined, callFormatting: CallFormatting): [string, string] {
-  const unknown = callFormatting.unknownString ?? '.';
-  if (!gt || gt === unknown) return ['0', '0'];
-  const norm = (t: string): string => (t === unknown || t === '.' ? '0' : t);
-  const tokens = gt
-    .split(/[/|]/)
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0);
-  if (tokens.length === 0) return ['0', '0'];
-  if (tokens.length === 1) {
-    const a = norm(tokens[0] as string);
-    return [a, a];
+function splitAlleles(
+  gt: string,
+  unknown: string,
+  separators: string[],
+): [string | number, string | number] | undefined {
+  if (gt.trim() === unknown) return;
+  const nextSeparator = (start: number) => {
+    let position = gt.length;
+    let width = 0;
+    for (const sep of separators) {
+      const found = gt.indexOf(sep, start);
+      if (found !== -1 && found < position) {
+        position = found;
+        width = sep.length;
+      }
+    }
+    return { position, width };
+  };
+  const first = nextSeparator(0);
+  const a = gt.slice(0, first.position).trim();
+  const start = first.position + first.width;
+  const b = first.width ? gt.slice(start, nextSeparator(start).position).trim() : a;
+  if (!a || !b || a === unknown || b === unknown || a === '.' || b === '.') return;
+  const asAllele = (token: string): string | number => {
+    const index = Number(token);
+    return Number.isSafeInteger(index) &&
+      index >= 0 &&
+      index < Number.MAX_SAFE_INTEGER &&
+      String(index) === token
+      ? index
+      : token;
+  };
+  return [asAllele(a), asAllele(b)];
+}
+
+function indexedAlleleLabel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return;
+  const label = value.trim();
+  if (label && label !== '0' && label !== '.') {
+    return label;
   }
-  return [norm(tokens[0] as string), norm(tokens[1] as string)];
+  return;
 }
 
 // ---------------------------------------------------------------------------
@@ -806,17 +915,19 @@ async function collectVariantMetadata(
       for (const r of rows) {
         scanned++;
         const vid = asString(r.variantDbId);
-        if (!vid) continue;
+        if (!vid || !neededIds.has(vid)) continue;
         meta.set(vid, extractVariantMeta(r));
       }
       totalPages = envelope.metadata?.pagination?.totalPages ?? page + 1;
       page++;
-      if (neededIds.size > 0 && [...neededIds].every((id) => meta.has(id))) break;
+      if (meta.size === neededIds.size) break;
       if (rows.length < VARIANT_METADATA_PAGE_SIZE) break;
     }
-  } catch (err) {
+  } catch {
+    if (ctx.signal.aborted)
+      throw requestCancelled('Genotype matrix export cancelled by the caller.');
     warnings.push(
-      `Variant metadata pull failed (${err instanceof Error ? err.message : String(err)}). CHROM/POS/REF/ALT use placeholders.`,
+      'Variant metadata could not be fully retrieved. Coordinates and allele labels use fallbacks where metadata is missing.',
     );
   }
   return meta;
@@ -834,9 +945,13 @@ function extractVariantMeta(r: Record<string, unknown>): VariantMeta {
   if (Array.isArray(altRaw)) {
     const alts = altRaw.filter((a): a is string => typeof a === 'string' && a.length > 0);
     if (alts.length > 0) meta.alt = alts.join(',');
+    meta.altByIndex = altRaw.map(indexedAlleleLabel);
   } else {
     const alt = asString(altRaw);
-    if (alt) meta.alt = alt;
+    if (alt) {
+      meta.alt = alt;
+      meta.altByIndex = alt.split(',').map(indexedAlleleLabel);
+    }
   }
   return meta;
 }

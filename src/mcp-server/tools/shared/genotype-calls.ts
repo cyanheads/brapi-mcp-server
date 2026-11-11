@@ -5,8 +5,7 @@
  * can reuse the same pull infrastructure without duplicating it.
  *
  * This module owns: the `CallRowSchema`, `CallFormatting` type, and the
- * `collectCalls` / `consumePage` helpers. It does NOT contain `spillCalls` or
- * any tool-level concerns — those stay in the consuming tool files.
+ * `collectCalls` helper. Dataframe spillover stays in the consuming tools.
  *
  * @module mcp-server/tools/shared/genotype-calls
  */
@@ -24,6 +23,20 @@ import { buildRequestOptions } from './find-helpers.js';
 
 const PAGE_SIZE = 10_000;
 
+export const NO_MATCHING_CALLS_NOTICE =
+  'No calls matched the requested filters. The variant set or filter combination may not match any data on this server — broaden the scope (variantSetDbId, germplasmDbIds) or verify the IDs.';
+
+const GenotypeSchema = z
+  .object({
+    values: z
+      .array(z.string().describe('Per-allele value string.'))
+      .nullish()
+      .describe(
+        'Encoded genotype values. A scalar sent upstream is returned as a singleton array.',
+      ),
+  })
+  .passthrough();
+
 export const CallRowSchema = z
   .object({
     callSetDbId: z
@@ -34,18 +47,9 @@ export const CallRowSchema = z
     variantDbId: z.string().nullish().describe('FK to the variant being called.'),
     variantName: z.string().nullish().describe('Display name / alias of the variant.'),
     variantSetDbId: z.string().nullish().describe('FK to the variant set the call belongs to.'),
-    genotype: z
-      .object({
-        values: z
-          .array(z.string().describe('Per-allele value string.'))
-          .nullish()
-          .describe('Encoded allele values — interpret using top-level `callFormatting`.'),
-      })
-      .passthrough()
-      .nullish()
-      .describe(
-        'Structured genotype payload (array of allele values plus server-specific fields).',
-      ),
+    genotype: GenotypeSchema.nullish().describe(
+      'Structured genotype payload (array of allele values plus server-specific fields).',
+    ),
     genotypeValue: z
       .string()
       .nullish()
@@ -61,6 +65,24 @@ export const CallRowSchema = z
   .describe('One genotype call row.');
 
 export type CallRow = z.infer<typeof CallRowSchema>;
+
+const WireCallRowSchema = CallRowSchema.extend({
+  genotype: GenotypeSchema.extend({
+    values: z.union([z.array(z.string()), z.string()]).nullish(),
+  }).nullish(),
+});
+
+/** BrAPI row as received, including scalar genotype values from some servers. */
+export type WireCallRow = z.infer<typeof WireCallRowSchema>;
+
+/** Project a wire row onto the finder's advertised array-valued schema. */
+export function toFinderCallRow(row: WireCallRow): CallRow {
+  const genotype = row.genotype;
+  if (genotype && typeof genotype.values === 'string') {
+    return { ...row, genotype: { ...genotype, values: [genotype.values] } };
+  }
+  return row as CallRow;
+}
 
 export interface CallFormatting {
   expandHomozygotes?: boolean | null;
@@ -80,7 +102,7 @@ export interface CollectCallsInput {
 
 export interface CollectCallsResult {
   callFormatting: CallFormatting;
-  rows: CallRow[];
+  rows: WireCallRow[];
   /**
    * Why the page walk ended before the last page: this call's deadline for
    * upstream requests. The calls collected up to then are kept in `rows`.
@@ -128,8 +150,7 @@ export function buildCallsSearchBody(input: {
  * cancellation rejects.
  */
 export async function collectCalls(input: CollectCallsInput): Promise<CollectCallsResult> {
-  const rows: CallRow[] = [];
-  let callFormatting: CallFormatting = {};
+  const rows: WireCallRow[] = [];
   let truncated = false;
   let stopReason: string | undefined;
   const deadlineLabel = `this call's ${CALL_DEADLINE_MS / 1000} s deadline for upstream requests`;
@@ -143,35 +164,30 @@ export async function collectCalls(input: CollectCallsInput): Promise<CollectCal
     buildRequestOptions(input.connection),
   );
 
+  const fetchResults = (id: string, page: number) =>
+    input.client.getSearchResults<Record<string, unknown>>(
+      input.connection.baseUrl,
+      'calls',
+      id,
+      input.ctx,
+      buildRequestOptions(input.connection, { page, pageSize: PAGE_SIZE }),
+    );
+
   let envelope: Awaited<ReturnType<BrapiClient['get']>>;
   let searchResultsDbId: string | undefined;
   if (first.kind === 'sync') {
     envelope = first.envelope;
   } else {
     searchResultsDbId = first.searchResultsDbId;
-    envelope = await input.client.getSearchResults<Record<string, unknown>>(
-      input.connection.baseUrl,
-      'calls',
-      first.searchResultsDbId,
-      input.ctx,
-      buildRequestOptions(input.connection),
-    );
+    envelope = await fetchResults(first.searchResultsDbId, 0);
   }
 
-  consumePage(envelope, rows, (cf) => {
-    callFormatting = cf;
-  });
+  const callFormatting = consumePage(envelope, rows) ?? {};
   const totalPages = envelope.metadata?.pagination?.totalPages;
 
   const fetchPage = async (page: number): Promise<Awaited<ReturnType<BrapiClient['get']>>> => {
     if (searchResultsDbId) {
-      return await input.client.getSearchResults<Record<string, unknown>>(
-        input.connection.baseUrl,
-        'calls',
-        searchResultsDbId,
-        input.ctx,
-        buildRequestOptions(input.connection, { page, pageSize: PAGE_SIZE }),
-      );
+      return fetchResults(searchResultsDbId, page);
     }
     const nextSearch = await input.client.postSearch<Record<string, unknown>>(
       input.connection.baseUrl,
@@ -181,13 +197,7 @@ export async function collectCalls(input: CollectCallsInput): Promise<CollectCal
       buildRequestOptions(input.connection),
     );
     if (nextSearch.kind === 'sync') return nextSearch.envelope;
-    return await input.client.getSearchResults<Record<string, unknown>>(
-      input.connection.baseUrl,
-      'calls',
-      nextSearch.searchResultsDbId,
-      input.ctx,
-      buildRequestOptions(input.connection),
-    );
+    return fetchResults(nextSearch.searchResultsDbId, page);
   };
 
   for (let page = 1; page < (totalPages ?? 1); page++) {
@@ -210,9 +220,7 @@ export async function collectCalls(input: CollectCallsInput): Promise<CollectCal
       stopReason = `${deadlineLabel} ran out during page ${page}`;
       break;
     }
-    consumePage(pageEnvelope, rows, (cf) => {
-      callFormatting = cf;
-    });
+    Object.assign(callFormatting, consumePage(pageEnvelope, rows));
   }
 
   if (rows.length > input.maxCalls) {
@@ -251,15 +259,12 @@ function isCallDeadline(err: unknown): boolean {
 }
 
 /**
- * Extract call rows and `callFormatting` hints from one BrAPI envelope page.
- * Mutates `rows` in-place; invokes `setCallFormatting` when formatting hints
- * are present so the caller can merge across pages.
+ * Append call rows and return the formatting hints from this envelope page.
  */
-export function consumePage(
+function consumePage(
   envelope: Awaited<ReturnType<BrapiClient['get']>>,
-  rows: CallRow[],
-  setCallFormatting: (f: CallFormatting) => void,
-): void {
+  rows: WireCallRow[],
+): CallFormatting | undefined {
   const result = envelope.result;
   if (!result || typeof result !== 'object') return;
   const record = result as Record<string, unknown>;
@@ -269,15 +274,15 @@ export function consumePage(
   if (typeof record.unknownString === 'string') cf.unknownString = record.unknownString;
   if (typeof record.sepPhased === 'string') cf.sepPhased = record.sepPhased;
   if (typeof record.sepUnphased === 'string') cf.sepUnphased = record.sepUnphased;
-  setCallFormatting(cf);
-
   const data = record.data;
-  if (!Array.isArray(data)) return;
-  for (const entry of data) {
-    if (typeof entry === 'object' && entry !== null) {
-      rows.push(entry as CallRow);
+  if (Array.isArray(data)) {
+    for (const entry of data) {
+      if (typeof entry === 'object' && entry !== null) {
+        rows.push(entry as WireCallRow);
+      }
     }
   }
+  return cf;
 }
 
 /**
@@ -287,13 +292,14 @@ export function consumePage(
  * no data is available.
  */
 export function renderGenotypeString(
-  row: CallRow,
+  row: WireCallRow,
   callFormatting: CallFormatting,
   phased?: boolean,
 ): string {
   const unknown = callFormatting.unknownString ?? '.';
   const values = row.genotype?.values;
-  if (values && values.length > 0) {
+  if (typeof values === 'string') return values;
+  if (Array.isArray(values) && values.length > 0) {
     const sep = phased ? (callFormatting.sepPhased ?? '|') : (callFormatting.sepUnphased ?? '/');
     return values.join(sep);
   }

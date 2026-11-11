@@ -327,6 +327,93 @@ describe('brapi_find_genotype_calls inline budget (#66)', () => {
     }
   });
 
+  it.each(['async', 'sync-then-async'])(
+    'uses explicit result pagination for a %s search',
+    async (mode) => {
+      const ctx = await connect(fetcher);
+      const queries: string[] = [];
+      fetcher.mockImplementation(
+        async (url: string, _timeout: number, _context: unknown, init: RequestInit) => {
+          const parsed = new URL(url);
+          if (parsed.pathname.endsWith('/search/calls')) {
+            const { page } = JSON.parse(String(init.body)) as { page: number };
+            if (mode === 'sync-then-async' && page === 0) {
+              return jsonResponse({
+                metadata: { pagination: { currentPage: 0, totalPages: 2 } },
+                result: { data: [call({ variantDbId: 'v-0' })] },
+              });
+            }
+            return jsonResponse(envelope({ searchResultsDbId: 'calls-job' }), 202);
+          }
+          queries.push(parsed.search);
+          const page = Number(parsed.searchParams.get('page'));
+          return jsonResponse({
+            metadata: { pagination: { currentPage: page, totalPages: 2 } },
+            result: { data: [call({ variantDbId: `v-${page}` })] },
+          });
+        },
+      );
+      const { structured } = await run(ctx, { variantSetDbId: 'vset-1' });
+      expect(queries).toEqual(
+        mode === 'async'
+          ? ['?page=0&pageSize=10000', '?page=1&pageSize=10000']
+          : ['?page=1&pageSize=10000'],
+      );
+      expect(structured.results).toMatchObject([{ variantDbId: 'v-0' }, { variantDbId: 'v-1' }]);
+    },
+  );
+
+  it('returns scalar values as singleton arrays in both the preview and staged finder rows', async () => {
+    const ctx = await connect(fetcher);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    serve([
+      call({ genotype: { values: '0', depth: '2' } }),
+      call({ genotype: { values: '0.5' } }),
+      call({ genotype: { values: '0/1' } }),
+    ]);
+    const { result, structured, text } = await run(ctx, { variantSetDbId: 'vset-1', loadLimit: 1 });
+    expect(result.isError).toBeFalsy();
+    expect(structured.results).toMatchObject([{ genotype: { values: ['0'], depth: '2' } }]);
+    expect(text).toContain(String.raw`genotype={"values":\["0"\],"depth":"2"}`);
+    expect(register.mock.calls[0]?.[1].rows).toMatchObject([
+      { genotype: { values: ['0'], depth: '2' } },
+      { genotype: { values: ['0.5'] } },
+      { genotype: { values: ['0/1'] } },
+    ]);
+  });
+
+  it('retains formatting hints across omitted pages and applies explicit field updates', async () => {
+    const ctx = await connect(fetcher);
+    const hints = [
+      { sepUnphased: '::', sepPhased: '||', unknownString: 'NA', expandHomozygotes: true },
+      { sepPhased: '|', expandHomozygotes: false },
+      {},
+    ];
+    fetcher.mockImplementation(async (url: string) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.endsWith('/search/calls')) {
+        return jsonResponse(envelope({ searchResultsDbId: 'calls-job' }), 202);
+      }
+      const page = Number(parsed.searchParams.get('page'));
+      return jsonResponse({
+        metadata: { pagination: { currentPage: page, totalPages: 3 } },
+        result: { ...hints[page], data: [call({ variantDbId: `v-${page}` })] },
+      });
+    });
+
+    const { structured, text } = await run(ctx, { variantSetDbId: 'vset-1' });
+    expect(structured.callFormatting).toEqual({
+      sepUnphased: '::',
+      sepPhased: '|',
+      unknownString: 'NA',
+      expandHomozygotes: false,
+    });
+    expect(structured.totalCount).toBe(3);
+    expect(text).toContain('sepUnphased: ::');
+    expect(text).toContain('unknownString: NA');
+    expect(text).toContain('expandHomozygotes: false');
+  });
+
   describe('page walk under the call deadline', () => {
     /**
      * Answer POST /search/calls synchronously, one page per request out of
