@@ -17,18 +17,18 @@
 
 import { unlink } from 'node:fs/promises';
 import type { Context } from '@cyanheads/mcp-ts-core';
-import type {
-  CanvasInstance,
-  ColumnSchema,
-  ColumnType,
-  DataCanvas,
-  ExportResult,
-  ExportTarget,
-  QueryResult,
-  RegisterTableResult,
-  TableInfo,
+import {
+  assertNoSystemCatalogs,
+  type CanvasInstance,
+  type ColumnSchema,
+  type ColumnType,
+  type DataCanvas,
+  type ExportResult,
+  type ExportTarget,
+  type QueryResult,
+  type RegisterTableResult,
+  type TableInfo,
 } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import { sanitizeRowColumns } from '@/mcp-server/tools/shared/canvas-columns.js';
@@ -69,6 +69,8 @@ const DATAFRAME_TABLE_PREFIX = 'df_';
 export interface RegisterDataframeInput {
   /** Originating BrAPI baseUrl. */
   baseUrl: string;
+  /** Known columns to register when this result has no rows to infer from. */
+  emptySchema?: ColumnSchema[];
   /** Cap that fired before the upstream was exhausted. Omit when no cap fired. */
   maxRows?: number;
   /** Original filter map / query — provenance for reproducibility. */
@@ -110,12 +112,9 @@ export class CanvasBridge {
   ) {}
 
   /**
-   * Acquire the default canvas for the current request. The canvasId is cached
-   * in `ctx.state` so subsequent calls reuse the same canvas (sliding TTL on
-   * the canvas itself keeps it warm). On stale-id errors (NotFound), clears
-   * the cache and acquires a fresh canvas — matches the spirit of the
-   * framework's "omit on retry" recovery hint without surfacing the token to
-   * the agent.
+   * Acquire the default canvas for the current request. The framework shares
+   * creation and stale-pointer recovery across requests using the same
+   * tenant and state key.
    *
    * Scope follows `BRAPI_SESSION_ISOLATION`: when true (default) and
    * `ctx.sessionId` is present, the canvas is session-scoped — the cache key
@@ -125,23 +124,7 @@ export class CanvasBridge {
    * tenant-shared canvas.
    */
   async getInstance(ctx: Context): Promise<CanvasInstance> {
-    const key = this.defaultCanvasKey(ctx);
-    const cached = await ctx.state.get<string>(key);
-    try {
-      const instance = await this.canvas.acquire(cached ?? undefined, ctx);
-      if (!cached || instance.isNew) {
-        await ctx.state.set(key, instance.canvasId);
-      }
-      return instance;
-    } catch (err) {
-      if (cached && isCanvasNotFound(err)) {
-        await ctx.state.delete(key);
-        const fresh = await this.canvas.acquire(undefined, ctx);
-        await ctx.state.set(key, fresh.canvasId);
-        return fresh;
-      }
-      throw err;
-    }
+    return await this.canvas.acquireShared(ctx, { stateKey: this.defaultCanvasKey(ctx) });
   }
 
   /**
@@ -196,8 +179,14 @@ export class CanvasBridge {
     // would otherwise be rejected by the framework's assertValidIdentifier gate.
     // `columnLegend` records any rename so callers can map safe → original.
     const { rows: safeRows, legend: columnLegend } = sanitizeRowColumns(input.rows);
-    const schema = deriveAllNullableSchema(safeRows);
-    const registered = await instance.registerTable(tableName, safeRows, { schema });
+    const schema =
+      safeRows.length === 0 && input.emptySchema
+        ? input.emptySchema
+        : deriveAllNullableSchema(safeRows);
+    const registered = await instance.registerTable(tableName, safeRows, {
+      schema,
+      signal: ctx.signal,
+    });
 
     const tableMeta: CanvasTableMeta = {
       source: input.source,
@@ -247,7 +236,7 @@ export class CanvasBridge {
     sql: string,
     options: { preview?: number; registerAs?: string; rowLimit?: number } = {},
   ): Promise<QueryResult> {
-    assertNoSystemCatalogAccess(sql);
+    assertNoSystemCatalogs(sql);
     const instance = await this.getInstance(ctx);
     const rowLimit = this.queryRowLimit(options.rowLimit);
     const queryOpts: {
@@ -374,7 +363,7 @@ export class CanvasBridge {
     // alone, so it stays safe; we select the requested table here. Bounded by
     // the per-session dataframe count. Tracked upstream for a root-cause fix in
     // the mcp-ts-core DuckDB provider.
-    const tables = await instance.describe({});
+    const tables = await instance.describe({ signal: ctx.signal });
     const selected =
       options.tableName === undefined ? tables : tables.filter((t) => t.name === options.tableName);
     return Promise.all(selected.map((t) => this.augmentTableInfo(ctx, t)));
@@ -412,79 +401,12 @@ function generateDataframeName(): string {
   return `${DATAFRAME_TABLE_PREFIX}${left}_${right}`;
 }
 
-/**
- * Reason string set on `validationError.data.reason` when a query is rejected
- * for reaching into DuckDB's system catalogs. Exported so the dataframe-query
- * tool can recognize it alongside the framework's `SQL_GATE_REASONS` and route
- * it through the typed `sql_rejected` contract.
- */
-export const SYSTEM_CATALOG_ACCESS_REASON = 'system_catalog_access' as const;
-
-/**
- * DuckDB metadata views and functions that enumerate the canvas. Catalog
- * schemas are matched as qualified references (`schema.thing`) so legitimate
- * column names like `information_schema_id` don't false-positive. DuckDB's
- * `duckdb_*` introspection functions are matched at the call site (`name(`)
- * so columns or projected literals carrying the same prefix don't trigger.
- */
-const SYSTEM_CATALOG_PATTERNS: ReadonlyArray<{ regex: RegExp; label: string }> = [
-  { regex: /\binformation_schema\s*\.\s*\w+/i, label: 'information_schema' },
-  { regex: /\bpg_catalog\s*\.\s*\w+/i, label: 'pg_catalog' },
-  { regex: /\bsqlite_master\b/i, label: 'sqlite_master' },
-  { regex: /\bsqlite_temp_master\b/i, label: 'sqlite_temp_master' },
-  {
-    regex:
-      /\bduckdb_(?:tables|columns|views|databases|schemas|functions|types|secrets|extensions|settings|temporary_files|memory|approx_database_size|optimizers|prepared_statements|sequences|indexes|constraints|keywords|dependencies|log_contexts|logs|temp_files|temp_relations|sql_keywords|lib_versions)\s*\(/i,
-    label: 'duckdb_*',
-  },
-];
-
-/** Strip SQL block and line comments — mirror of the framework gate's helper. */
-function stripSqlComments(sql: string): string {
-  return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, '');
-}
-
-/**
- * Strip standard SQL string literals so values that happen to mention catalog
- * names (e.g. `WHERE col = 'information_schema.tables'`) don't trigger the
- * deny. Matches single-quoted strings with `''` escape; mirror of the
- * framework gate's helper.
- */
-function stripSqlStringLiterals(sql: string): string {
-  return sql.replace(/'(?:[^']|'')*'/g, "''");
-}
-
-/**
- * Reject SQL that reaches into DuckDB's system catalogs (information_schema,
- * pg_catalog, sqlite_master, duckdb_* introspection functions). Possession of
- * a `df_<uuid>` name is the capability gate for direct queries; system catalogs
- * would let any caller list every name on the shared canvas, bypassing that
- * gate. Throws `validationError` with `data.reason = 'system_catalog_access'`
- * so the dataframe-query tool's contract translator routes it through
- * `sql_rejected`.
- */
-function assertNoSystemCatalogAccess(sql: string): void {
-  const stripped = stripSqlStringLiterals(stripSqlComments(sql));
-  for (const { regex, label } of SYSTEM_CATALOG_PATTERNS) {
-    if (regex.test(stripped)) {
-      throw validationError(
-        `Canvas query references a system catalog (${label}). System tables and metadata views are not accessible — use brapi_dataframe_describe with a specific dataframe name to inspect schema.`,
-        { reason: SYSTEM_CATALOG_ACCESS_REASON, catalog: label },
-      );
-    }
-  }
-}
-
 function tableMetaKey(tableName: string): string {
   return `${TABLE_META_PREFIX}${tableName}`;
 }
 
 function exportPathsKey(tableName: string): string {
   return `${EXPORT_PATHS_PREFIX}${tableName}`;
-}
-
-function isCanvasNotFound(err: unknown): boolean {
-  return err instanceof McpError && err.code === JsonRpcErrorCode.NotFound;
 }
 
 /**

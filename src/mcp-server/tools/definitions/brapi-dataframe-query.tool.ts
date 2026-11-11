@@ -16,9 +16,8 @@
  * `_brapi_probe_<uuid>` name, describes the materialized table for types,
  * then drops it before returning — so types stay consistent with what
  * `brapi_dataframe_describe` would report. Error messages are rewritten so
- * DuckDB's line excerpt quotes the caller's SQL, never that wrapping
- * `CREATE TABLE … AS` statement, and a statement that wrapper cannot take
- * (DESCRIBE, SUMMARIZE, SHOW) is rejected as `sql_rejected`.
+ * DuckDB's line excerpt quotes the caller's SQL without the wrapping
+ * `CREATE TABLE … AS` statement.
  *
  * Defaults to the session's (else the tenant's) workspace; the agent never passes a
  * canvasId. The bridge resolves it via `ctx.state` so multiple calls in the
@@ -36,50 +35,20 @@ import {
   SQL_GATE_REASONS,
 } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import {
-  type CanvasBridge,
-  getCanvasBridge,
-  SYSTEM_CATALOG_ACCESS_REASON,
-} from '@/services/canvas-bridge/index.js';
+import { type CanvasBridge, getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { selectPreviewRows } from '../shared/inline-preview.js';
 import { literal } from '../shared/markdown-literals.js';
 
 /**
  * Refusals that reach the caller as the typed `sql_rejected` contract reason,
  * with the granular reason kept on `data.gateReason`: the framework's SQL gate,
- * the engine's read-only refusal (`sql_read_only` — a write, or a file or URL
- * named as a table), and the server-local system-catalog deny
- * ({@link SYSTEM_CATALOG_ACCESS_REASON}).
+ * and the engine's read-only and parser refusals.
  */
 const REFUSAL_REASONS: ReadonlySet<string> = new Set<string>([
   ...Object.values(SQL_GATE_REASONS),
   DUCKDB_ERROR_REASONS.sqlReadOnly,
-  SYSTEM_CATALOG_ACCESS_REASON,
+  DUCKDB_ERROR_REASONS.sqlParseError,
 ]);
-
-/**
- * DuckDB's parser class, as `@duckdb/node-api` reports it (behind `Failed to
- * extract statements:`). The gate parses the caller's SQL on its own and admits
- * DESCRIBE, SUMMARIZE, and SHOW as SELECTs, but every query here runs as
- * `CREATE TABLE … AS <sql>`, which takes only a query, so those fail to parse
- * there. The framework's canvas classifies that parser error by a class prefix
- * anchored at the start, so it arrives as an untyped `DatabaseError`; a
- * classified one carries `sql_parse_error`.
- */
-const ENGINE_PARSER_ERROR = /^(?:Failed to extract statements: )?Parser Error\b/;
-
-const NOT_A_QUERY_MESSAGE =
-  'Canvas SQL rejected: the statement does not run as a query here. brapi_dataframe_query takes a SELECT (FROM-first and VALUES forms included); DESCRIBE, SUMMARIZE, and SHOW are not accepted. List a dataframe’s columns and types with brapi_dataframe_describe, or compute summary statistics with a SELECT over COUNT, AVG, MIN, and MAX.';
-
-/** True for a parser error the gate let through — see {@link ENGINE_PARSER_ERROR}. */
-function isParserFailure(err: McpError, reason: string | undefined): boolean {
-  if (reason === DUCKDB_ERROR_REASONS.sqlParseError) return true;
-  return (
-    reason === undefined &&
-    err.code === JsonRpcErrorCode.DatabaseError &&
-    ENGINE_PARSER_ERROR.test(err.message)
-  );
-}
 
 function reasonOf(err: McpError): string | undefined {
   const reason = (err.data as { reason?: unknown } | undefined)?.reason;
@@ -140,7 +109,7 @@ const InputSchema = z.object({
     .string()
     .min(1)
     .describe(
-      'SELECT statement against dataframes. Single statement only — writes, DDL, DESCRIBE / SUMMARIZE, file reads, and exports are rejected. Use brapi_dataframe_describe to discover available dataframes. SQL is the primary paging idiom: use `LIMIT/OFFSET` to walk a large dataframe, projection to trim columns, and aggregation (`COUNT`, `GROUP BY`, `AVG`) to summarize without materializing every row.',
+      'One read-only SQL statement against dataframes. Use SELECT for rows and aggregation, DESCRIBE or SHOW for a known table or query, and SUMMARIZE for column statistics. Writes, DDL, file reads, and exports are rejected. Use `LIMIT/OFFSET` to page a large dataframe and projection to trim columns.',
     ),
   registerAs: z
     .string()
@@ -206,13 +175,13 @@ const OutputSchema = z.object({
 
 export const brapiDataframeQuery = tool('brapi_dataframe_query', {
   description:
-    'Run SQL across in-memory dataframes. Dataframes auto-populate when find_* tools spill (named `df_<uuid>`) — the dataframe name appears inline on every find_* response that spilled (`result.dataframe.tableName`), so the typical flow is find_* → read the name → query here. Use brapi_dataframe_describe to inspect schema and provenance for a known name. SELECT only — writes/DDL/COPY/PRAGMA/ATTACH/file-reads are rejected. Use SQL as the paging idiom: `LIMIT/OFFSET` to walk results, projection to trim columns, aggregation to summarize. Use `registerAs` to chain — the result lands as a new dataframe.',
+    'Run read-only SQL across in-memory dataframes. Dataframes auto-populate when find_* tools spill (named `df_<uuid>`) — the dataframe name appears inline on every find_* response that spilled (`result.dataframe.tableName`), so the typical flow is find_* → read the name → query here. Use brapi_dataframe_describe to inspect schema and provenance for a known name. Use `LIMIT/OFFSET` to walk results, projection to trim columns, and aggregation to summarize. Use `registerAs` to chain — the result lands as a new dataframe.',
   annotations: { readOnlyHint: false, idempotentHint: false, openWorldHint: false },
   errors: [
     {
       reason: 'sql_rejected',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'SQL broke the read-only rules: more than one statement, a non-SELECT, a disallowed operation or function, a file or URL named as a table, a system-catalog read, or a DESCRIBE, SUMMARIZE, or SHOW statement',
+      when: 'SQL is invalid or broke the read-only rules: more than one statement, a disallowed operation or function, a file or URL named as a table, or a reserved system-catalog identifier',
       recovery:
         'Submit a single SELECT statement using only registered dataframes. Materialize changes under a different `registerAs` name, or remove an existing dataframe with brapi_dataframe_drop where this deployment enables it.',
     },
@@ -276,14 +245,6 @@ export const brapiDataframeQuery = tool('brapi_dataframe_query', {
     } catch (err) {
       if (!(err instanceof McpError)) throw err;
       const reason = reasonOf(err);
-      if (isParserFailure(err, reason)) {
-        throw ctx.fail(
-          'sql_rejected',
-          NOT_A_QUERY_MESSAGE,
-          { gateReason: DUCKDB_ERROR_REASONS.sqlParseError },
-          { cause: err },
-        );
-      }
       const message = quoteCallerSql(err.message, input.sql, probeName);
       const context = extractGateContext(err);
       if (

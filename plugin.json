@@ -1,0 +1,33 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "brapi-mcp-server",
+  "version": "0.10.1",
+  "description": "A collaborative BrAPI v2.1 workspace for multi-agent research via MCP. Search studies, germplasm, genotypes, and more across Breedbase, T3, Sweetpotatobase, and any BrAPI v2-compliant server.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/brapi-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/brapi-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "claude",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "brapi",
+    "breedbase",
+    "plant-breeding",
+    "bioinformatics",
+    "agriculture",
+    "phenotyping",
+    "genotyping",
+    "germplasm",
+    "llm-tools",
+    "typescript"
+  ]
+}

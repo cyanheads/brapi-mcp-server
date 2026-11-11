@@ -7,15 +7,17 @@
  * @module tests/services/canvas-bridge.test
  */
 
+import { tmpdir } from 'node:os';
 import type { Context } from '@cyanheads/mcp-ts-core';
-import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
+import { CanvasRegistry, DataCanvas, DuckdbProvider } from '@cyanheads/mcp-ts-core/canvas';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ServerConfig } from '@/config/server-config.js';
+import { type ServerConfig, ServerConfigSchema } from '@/config/server-config.js';
 import { CanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { FakeDataCanvas } from './_fake-canvas.js';
 
 const baseConfig: ServerConfig = {
+  ...ServerConfigSchema.parse({}),
   defaultApiKeyHeader: 'Authorization',
   datasetTtlSeconds: 86_400,
   loadLimit: 200,
@@ -135,6 +137,133 @@ describe('CanvasBridge.getInstance', () => {
     expect(fresh.isNew).toBe(true);
     const cached = await ctx.state.get<string>('brapi/canvas/default');
     expect(cached).toBe(fresh.canvasId);
+  });
+});
+
+describe('CanvasBridge with DuckDB', () => {
+  function setup() {
+    const provider = new DuckdbProvider({
+      defaultRowLimit: 100,
+      exportRootPath: tmpdir(),
+      memoryLimitMb: 128,
+      schemaSniffRows: 10,
+    });
+    const canvas = new DataCanvas(
+      provider,
+      new CanvasRegistry(provider, {
+        absoluteCapMs: 60_000,
+        maxCanvasesPerTenant: 10,
+        sweeperIntervalMs: 0,
+        ttlMs: 60_000,
+      }),
+    );
+    return { canvas, provider, bridge: new CanvasBridge(canvas, baseConfig) };
+  }
+
+  it.each(['fresh', 'stale'])(
+    'keeps all concurrently staged %s canvas tables reachable',
+    async (scenario) => {
+      const { canvas, bridge } = setup();
+      const contexts = createSharedTenantContexts('concurrent', 5);
+      const ctx = contexts[0]!;
+      try {
+        if (scenario === 'stale') {
+          const dead = await bridge.getInstance(ctx);
+          await canvas.drop(dead.canvasId, ctx);
+        }
+        const handles = await Promise.all(
+          contexts.map((request, rowId) =>
+            bridge.registerDataframe(request, {
+              source: 'find_observations',
+              baseUrl: 'https://b/v2',
+              query: { rowId },
+              rows: [{ rowId }],
+            }),
+          ),
+        );
+        expect(canvas.countForTenant(ctx)).toBe(1);
+        const described = await bridge.describe(ctx);
+        expect(described.map(({ name }) => name).sort()).toEqual(
+          handles.map(({ tableName }) => tableName).sort(),
+        );
+        for (const [rowId, handle] of handles.entries()) {
+          const data = await bridge.query(ctx, `SELECT rowId FROM ${handle.tableName}`);
+          expect(data.rows).toEqual([{ rowId: String(rowId) }]);
+          expect(
+            described.find(({ name }) => name === handle.tableName)?.provenance?.query,
+          ).toEqual({ rowId });
+        }
+      } finally {
+        await canvas.shutdown(ctx);
+      }
+    },
+  );
+
+  it('releases a canvas when pointer persistence fails and allows a retry', async () => {
+    const { canvas, bridge } = setup();
+    const ctx = createMockContext({ tenantId: 'pointer-failure' });
+    const failure = new Error('storage unavailable');
+    vi.spyOn(ctx.state, 'set').mockRejectedValueOnce(failure);
+    try {
+      await expect(bridge.getInstance(ctx)).rejects.toBe(failure);
+      expect(canvas.countForTenant(ctx)).toBe(0);
+      await expect(bridge.getInstance(ctx)).resolves.toMatchObject({ isNew: true });
+      expect(canvas.countForTenant(ctx)).toBe(1);
+    } finally {
+      await canvas.shutdown(ctx);
+    }
+  });
+
+  it('keeps the shared slot recoverable after failed or cancelled acquisition', async () => {
+    const { canvas, provider, bridge } = setup();
+    const [ctx, cancelled] = createSharedTenantContexts('acquisition-failure', 2) as [
+      Context,
+      Context,
+    ];
+    const failure = new Error('DuckDB unavailable');
+    vi.spyOn(provider, 'initCanvas').mockRejectedValueOnce(failure);
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      await expect(bridge.getInstance(ctx)).rejects.toBe(failure);
+      await expect(bridge.getInstance({ ...cancelled, signal: controller.signal })).rejects.toBe(
+        controller.signal.reason,
+      );
+      expect(await ctx.state.get('brapi/canvas/default')).toBeNull();
+      expect(canvas.countForTenant(ctx)).toBe(0);
+      await expect(bridge.getInstance(ctx)).resolves.toMatchObject({ isNew: true });
+    } finally {
+      await canvas.shutdown(ctx);
+    }
+  });
+
+  it('registers and queries an explicit empty schema with normal provenance', async () => {
+    const { canvas, bridge } = setup();
+    const ctx = createMockContext({ tenantId: 'empty-matrix' });
+    try {
+      const handle = await bridge.registerDataframe(ctx, {
+        source: 'export_genotype_matrix',
+        baseUrl: 'https://b/v2',
+        query: { variantSetDbIds: ['empty'] },
+        rows: [],
+        emptySchema: [{ name: 'germplasmDbId', type: 'VARCHAR', nullable: true }],
+      });
+      expect(
+        await bridge.query(ctx, `SELECT germplasmDbId FROM ${handle.tableName}`),
+      ).toMatchObject({
+        columns: ['germplasmDbId'],
+        rows: [],
+        rowCount: 0,
+      });
+      expect(await bridge.describe(ctx, { tableName: handle.tableName })).toMatchObject([
+        {
+          rowCount: 0,
+          provenance: { source: 'export_genotype_matrix', query: { variantSetDbIds: ['empty'] } },
+        },
+      ]);
+    } finally {
+      await canvas.shutdown(ctx);
+    }
   });
 });
 

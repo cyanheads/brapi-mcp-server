@@ -188,35 +188,6 @@ describe('brapi_dataframe_query', () => {
     });
   });
 
-  it.each([
-    ['SELECT * FROM information_schema.tables', { catalog: 'information_schema' }],
-    ['SELECT * FROM pg_catalog.pg_class', {}],
-    ['SELECT * FROM sqlite_master', {}],
-    ['SELECT * FROM duckdb_tables()', {}],
-  ])('rejects `%s` as system_catalog_access', async (sql, context) => {
-    fakeBridge();
-    await expect(runQuery({ sql })).rejects.toMatchObject({
-      code: JsonRpcErrorCode.ValidationError,
-      data: expect.objectContaining({
-        reason: 'sql_rejected',
-        gateReason: 'system_catalog_access',
-        ...context,
-      }),
-    });
-  });
-
-  it.each([
-    ['a column name shaped like a catalog', 'SELECT information_schema_id FROM df_foo'],
-    [
-      'a string literal that mentions a catalog',
-      "SELECT * FROM df_foo WHERE name = 'information_schema.tables'",
-    ],
-  ])('does not false-positive on %s', async (_label, sql) => {
-    fakeBridge();
-    const result = await runQuery({ sql });
-    expect(result.rowCount).toBe(0);
-  });
-
   it('scrubs the wrapping statement from an unmapped engine error and keeps its code and data', async () => {
     vi.spyOn(fakeBridge(), 'query').mockImplementation(async (_ctx, sql, opts) => {
       const wrapped = `CREATE TABLE "${opts?.registerAs}" AS ${sql}`;
@@ -360,6 +331,50 @@ describe('brapi_dataframe_query error contract against a real DuckDB canvas', ()
     expect(error.data?.recovery?.hint).toBe(recoveryFor('sql_rejected'));
   });
 
+  it('refuses unqualified metadata views that enumerate staged dataframes', async () => {
+    const bridge = initCanvasBridge(canvas, TEST_CONFIG);
+    const instance = await bridge.getInstance(createMockContext());
+    vi.spyOn(bridge, 'getInstance').mockResolvedValue(instance);
+    await instance.registerTable('df_hidden', [{ trait: 'yield' }]);
+
+    const result = await callTool({ sql: 'SELECT table_name FROM duckdb_tables' });
+    expect(result.isError).toBe(true);
+    expect(errorOf(result).data).toMatchObject({
+      reason: 'sql_rejected',
+      gateReason: 'system_catalog_access',
+      catalog: 'duckdb_tables',
+      recovery: { hint: recoveryFor('sql_rejected') },
+    });
+    expect(JSON.stringify(result.content)).toContain('duckdb_tables');
+    expect(JSON.stringify(result)).not.toContain('df_hidden');
+  });
+
+  it.each([
+    ['SELECT * FROM information_schema.tables', 'information_schema'],
+    ['SELECT * FROM pg_catalog.pg_class', 'pg_catalog'],
+    ['SELECT * FROM sqlite_master', 'sqlite_master'],
+    ['SELECT * FROM duckdb_tables()', 'duckdb_tables'],
+  ])('rejects `%s` as system_catalog_access', async (sql, catalog) => {
+    const result = await callTool({ sql });
+    expect(result.isError).toBe(true);
+    expect(errorOf(result).data).toMatchObject({
+      reason: 'sql_rejected',
+      gateReason: 'system_catalog_access',
+      catalog,
+    });
+  });
+
+  it('allows a longer identifier and quoted text that mentions catalog names', async () => {
+    const result = await callTool({
+      sql: "SELECT 'information_schema.tables' AS information_schema_id /* duckdb_tables */",
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      rows: [{ information_schema_id: 'information_schema.tables' }],
+    });
+    expect(JSON.stringify(result.content)).toContain('information_schema.tables');
+  });
+
   it('keeps an execution error on its own declared reason and hint, quoting only the caller SQL', async () => {
     const sql = "SELECT CAST('abc' AS INTEGER) AS x";
     const res = await callTool({ sql });
@@ -376,8 +391,8 @@ describe('brapi_dataframe_query error contract against a real DuckDB canvas', ()
     expect(excerptIndex).toBeGreaterThan(-1);
     expect(lines[excerptIndex]).toBe(`LINE 1: ${sql}`);
     const caret = lines[excerptIndex + 1] ?? '';
-    expect(caret.trimStart()).toBe('^');
-    expect(lines[excerptIndex]?.slice(caret.length - 1)).toMatch(/^CAST\('abc'/);
+    expect(caret.trimStart()).toMatch(/^\^+$/);
+    expect(lines[excerptIndex]?.slice(caret.indexOf('^'))).toMatch(/^CAST\('abc'/);
     expect(JSON.stringify(res.content)).not.toMatch(/_brapi_probe_/);
   });
 
@@ -397,7 +412,8 @@ describe('brapi_dataframe_query error contract against a real DuckDB canvas', ()
     const lines = (error.message ?? '').split('\n');
     const excerptIndex = lines.findIndex((l) => l.startsWith('LINE 1: '));
     const caret = lines[excerptIndex + 1] ?? '';
-    expect(lines[excerptIndex]?.slice(caret.length - 1)).toMatch(/^CAST\('abc'/);
+    expect(caret.trimStart()).toMatch(/^\^+$/);
+    expect(lines[excerptIndex]?.slice(caret.indexOf('^'))).toMatch(/^CAST\('abc'/);
   });
 
   it('keeps a missing table on its own declared reason and hint', async () => {
@@ -421,27 +437,19 @@ describe('brapi_dataframe_query error contract against a real DuckDB canvas', ()
   });
 
   it.each([
-    ['DESCRIBE SELECT 1', undefined],
-    ['SUMMARIZE SELECT 1 AS x', undefined],
-    ['describe select 1', 'mine'],
-    ['SHOW SELECT 1', undefined],
-  ])(
-    'rejects %s (registerAs %s) through sql_rejected with gateReason sql_parse_error',
-    async (sql, registerAs) => {
-      const res = await callTool(registerAs ? { sql, registerAs } : { sql });
-      expect(res.isError).toBe(true);
-      const error = errorOf(res);
-      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
-      expect(error.data?.reason).toBe('sql_rejected');
-      expect(error.data?.gateReason).toBe('sql_parse_error');
-      expect(error.data?.recovery?.hint).toBe(recoveryFor('sql_rejected'));
-      expect(error.message).toMatch(/brapi_dataframe_describe/);
-      expect(error.message).not.toMatch(/_brapi_probe_|CREATE TABLE|Failed to extract/);
-      expect(JSON.stringify(res.content)).not.toMatch(/_brapi_probe_|CREATE TABLE/);
-    },
-  );
+    ['DESCRIBE SELECT 1 AS x', undefined, { column_name: 'x', column_type: 'INTEGER' }],
+    ['SUMMARIZE SELECT 1 AS x', undefined, { column_name: 'x', min: '1', max: '1' }],
+    ['describe select 1 AS x', 'mine', { column_name: 'x', column_type: 'INTEGER' }],
+    ['SHOW SELECT 1 AS x', undefined, { column_name: 'x', column_type: 'INTEGER' }],
+  ])('materializes %s (registerAs %s) as a read-only result', async (sql, registerAs, row) => {
+    const res = await callTool(registerAs ? { sql, registerAs } : { sql });
+    expect(res.isError).toBeFalsy();
+    expect(res.structuredContent).toMatchObject({ rowCount: 1, rows: [row] });
+    for (const value of Object.values(row)) expect(JSON.stringify(res.content)).toContain(value);
+    expect(JSON.stringify(res.content)).not.toMatch(/_brapi_probe_|CREATE TABLE/);
+  });
 
-  it('a SELECT that parses still answers after the DESCRIBE mapping', async () => {
+  it('a SELECT still returns rows from each branch', async () => {
     const res = await callTool({ sql: 'SELECT 1 AS x UNION ALL SELECT 2' });
     expect(res.isError).toBeFalsy();
     expect((res.structuredContent as { rowCount?: number }).rowCount).toBe(2);

@@ -7,31 +7,8 @@
  * @module index
  */
 
-// Default the framework canvas provider to DuckDB. The framework defaults
-// `CANVAS_PROVIDER_TYPE` to `'none'`; this server requires a live canvas
-// for spillover, so we override the default before `createApp` reads
-// config. Operator-set values (including `'none'` for diagnostic runs)
-// pass through untouched.
-//
-// ESM hoists the import below ahead of this statement, but the framework's
-// `config` is a lazy Proxy — importing it only declares the Proxy, the
-// underlying `parseConfig()` runs on first property access (which happens
-// inside `createApp`). So this line lands in the window between
-// import-time evaluation and `createApp`'s config read.
-process.env.CANVAS_PROVIDER_TYPE ??= 'duckdb';
-
-// Bridge `BRAPI_EXPORT_DIR` → `CANVAS_EXPORT_PATH` so the framework's canvas
-// path-traversal sandbox uses the operator-set export root. `??=` so an
-// explicit `CANVAS_EXPORT_PATH` wins (operators who configure the framework
-// directly retain control). When `BRAPI_EXPORT_DIR` is unset, neither is
-// set — the export tool's registration gate fails closed and the canvas
-// runs without an export root (any export call would hit the framework's
-// sandbox check).
-if (process.env.BRAPI_EXPORT_DIR) {
-  process.env.CANVAS_EXPORT_PATH ??= process.env.BRAPI_EXPORT_DIR;
-}
-
 import { createApp } from '@cyanheads/mcp-ts-core';
+import { parseConfig, resetConfig } from '@cyanheads/mcp-ts-core/config';
 import { configurationError, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { disabledTool } from '@cyanheads/mcp-ts-core/tools';
 import {
@@ -61,6 +38,16 @@ import {
   readOnlyToolDefinitions,
   writeToolDefinitions,
 } from './mcp-server/tools/definitions/index.js';
+
+parseConfig();
+// DuckDB is required. An explicit CANVAS_PROVIDER_TYPE=none fails in setup.
+process.env.CANVAS_PROVIDER_TYPE ||= 'duckdb';
+// Node loads .env during parseConfig(). Bridge the export root afterward so
+// the canvas sandbox honors .env on both runtimes. An explicit override wins.
+if (process.env.BRAPI_EXPORT_DIR) {
+  process.env.CANVAS_EXPORT_PATH ??= process.env.BRAPI_EXPORT_DIR;
+}
+resetConfig();
 
 /**
  * The tool gates below read server config before `createApp` runs. A malformed
@@ -128,18 +115,19 @@ await createApp({
     brapiFiltersResource,
   ],
   prompts: [brapiEdaStudy, brapiMetaAnalysis],
+  skills: 'skills',
   // Public-catalog deployment: keep landing inventory visible to unauthenticated
   // visitors even when MCP_AUTH_MODE is jwt/oauth. Framework default (0.9.13+)
   // gates the inventory behind auth; this override restores the open-catalog UX.
   landing: { requireAuth: false },
   instructions:
-    'Bridges BrAPI v2 servers (Breeding API for plant/crop research). `brapi_connect` registers a server under an alias and returns the orientation envelope (capabilities, dialect, content summary, the finders the server supports); call it first for any server given by URL. Built-in and operator-configured aliases also connect on first use from any tool. `brapi_find_*` tools page filtered lookups across studies, germplasm, observations, variables, locations, images, variants, and genotype calls; rows beyond the per-call cap spill to a canvas dataframe — query with `brapi_dataframe_query` (SELECT-only SQL). `brapi_get_*` fetch single records by `*DbId`. Use `brapi_raw_get` / `brapi_raw_search` only when no curated tool fits — responses route back to the right curated tool.',
+    'Bridges BrAPI v2 servers (Breeding API for plant/crop research). `brapi_connect` registers a server under an alias and returns the orientation envelope (capabilities, dialect, content summary, the finders the server supports); call it first for any server given by URL. Built-in and operator-configured aliases also connect on first use from any tool. `brapi_find_*` tools page filtered lookups across studies, germplasm, observations, variables, locations, images, variants, and genotype calls; rows beyond the per-call cap spill to a canvas dataframe — query with `brapi_dataframe_query` (read-only SQL). `brapi_get_*` fetch single records by `*DbId`. Use `brapi_raw_get` / `brapi_raw_search` only when no curated tool fits — responses route back to the right curated tool.',
   setup(core) {
     const serverConfig = getServerConfig();
     if (!core.canvas) {
       throw configurationError(
-        'brapi-mcp-server requires the framework canvas service (DuckDB) for dataframe spillover. Set CANVAS_PROVIDER_TYPE=duckdb (the default) and ensure @duckdb/node-api is installed.',
-        { canvasProviderType: process.env.CANVAS_PROVIDER_TYPE ?? 'duckdb' },
+        'brapi-mcp-server requires DataCanvas (DuckDB) for dataframe spillover, and CANVAS_PROVIDER_TYPE=none disables it. Unset CANVAS_PROVIDER_TYPE or set it to duckdb (the default).',
+        { canvasProviderType: process.env.CANVAS_PROVIDER_TYPE },
       );
     }
     assertCanvasMaxRowsWithinCanvasLimit(serverConfig, core.config.canvas.defaultRowLimit);

@@ -11,6 +11,7 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
+import type { Context } from '@cyanheads/mcp-ts-core';
 import type {
   CanvasInstance,
   ExportResult,
@@ -75,6 +76,22 @@ export class FakeDataCanvas {
     };
     this.canvases.set(canvasId, state);
     return makeInstance(state, /* isNew */ true, this.exportRoot);
+  }
+
+  async acquireShared(ctx: Context, options: { stateKey: string }): Promise<CanvasInstance> {
+    ctx.signal.throwIfAborted();
+    const cached = await ctx.state.get<string>(options.stateKey);
+    if (cached && this.canvases.get(cached)?.tenantId === ctx.tenantId) {
+      return await this.acquire(cached, ctx);
+    }
+    const instance = await this.acquire(undefined, ctx);
+    try {
+      await ctx.state.set(options.stateKey, instance.canvasId);
+    } catch (error) {
+      await this.drop(instance.canvasId);
+      throw error;
+    }
+    return instance;
   }
 
   async drop(canvasId: string): Promise<boolean> {

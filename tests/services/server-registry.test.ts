@@ -561,7 +561,15 @@ describe('ServerRegistry token exchange over a real socket', () => {
       for (const secret of SECRETS) expect(surface).not.toContain(secret);
     };
 
-    it('when the runtime refuses to send a URL carrying userinfo', async () => {
+    it('redacts a runtime rejection that echoes userinfo', async () => {
+      // Node rejects userinfo before sending the request. Bun accepts it, so
+      // supply that same rejection at the fetch seam on both runtimes.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL) =>
+          Promise.reject(new TypeError(`Request cannot be constructed from ${String(input)}`)),
+        ),
+      );
       const err = await register();
 
       expect(err.code).toBe(JsonRpcErrorCode.Forbidden);

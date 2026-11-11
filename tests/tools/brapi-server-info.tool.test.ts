@@ -9,6 +9,7 @@
 
 import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { marked } from 'marked';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ServerConfig } from '@/config/server-config.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
@@ -300,7 +301,7 @@ describe('brapi_server_info on a fresh session (#59)', () => {
         data: { reason: c.reason, ...c.data, recovery: { hint: expect.stringContaining(c.hint) } },
       },
     });
-    expect(textOf(result)).toContain(c.hint);
+    expect(marked.parse(textOf(result), { gfm: false })).toContain(c.hint);
     expect(fetcher.mock.calls.length > 0).toBe(c.upstreamCalled);
   });
 });
