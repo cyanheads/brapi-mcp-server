@@ -39,24 +39,20 @@ import {
   writeToolDefinitions,
 } from './mcp-server/tools/definitions/index.js';
 
-parseConfig();
-// DuckDB is required. An explicit CANVAS_PROVIDER_TYPE=none fails in setup.
-process.env.CANVAS_PROVIDER_TYPE ||= 'duckdb';
-// Node loads .env during parseConfig(). Bridge the export root afterward so
-// the canvas sandbox honors .env on both runtimes. An explicit override wins.
-if (process.env.BRAPI_EXPORT_DIR) {
-  process.env.CANVAS_EXPORT_PATH ??= process.env.BRAPI_EXPORT_DIR;
-}
-resetConfig();
-
 /**
- * The tool gates below read server config before `createApp` runs. A malformed
- * `BRAPI_*` value must fail inside `setup()`, where the framework prints its
- * configuration banner, so a failed parse here leaves every gated tool
- * disabled and `setup()` raises the same error when it parses again.
+ * Load `.env` before setting defaults and deciding which tools to expose.
+ * Defer configuration errors to `createApp` or its `setup()` callback so
+ * operators see the framework's startup banner.
  */
 function readGateConfig(): ServerConfig | undefined {
   try {
+    parseConfig();
+    // DuckDB is required. An explicit CANVAS_PROVIDER_TYPE=none fails in setup.
+    process.env.CANVAS_PROVIDER_TYPE ||= 'duckdb';
+    if (process.env.BRAPI_EXPORT_DIR) {
+      process.env.CANVAS_EXPORT_PATH ??= process.env.BRAPI_EXPORT_DIR;
+    }
+    resetConfig();
     return getServerConfig();
   } catch (err) {
     if (err instanceof McpError && err.code === JsonRpcErrorCode.ConfigurationError) return;

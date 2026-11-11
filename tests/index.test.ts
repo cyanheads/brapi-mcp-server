@@ -1,7 +1,7 @@
 /**
  * @fileoverview Startup tests for the entry point (`src/index.ts`). Boots the
  * real entry module in a child process from an empty working directory (no
- * `.env`) and checks that every malformed `BRAPI_*` value fails behind the
+ * `.env`) and checks that malformed configuration values fail behind the
  * framework's configuration banner — on stdio and HTTP — instead of crashing
  * at import with a raw stack.
  *
@@ -45,7 +45,7 @@ function boot(cwd: string, env: Record<string, string>): Promise<Boot> {
   });
 }
 
-describe('entry point startup with malformed BRAPI_* config', () => {
+describe('entry point startup with malformed config', () => {
   let cwd: string;
 
   beforeAll(async () => {
@@ -60,6 +60,7 @@ describe('entry point startup with malformed BRAPI_* config', () => {
     { name: 'BRAPI_LOAD_LIMIT', value: 'abc' },
     { name: 'BRAPI_CANVAS_MAX_ROWS', value: 'abc' },
     { name: 'BRAPI_ENABLE_WRITES', value: 'maybe' },
+    { name: 'MCP_HTTP_PORT', value: 'invalid' },
   ];
 
   for (const transport of ['stdio', 'http'] as const) {
