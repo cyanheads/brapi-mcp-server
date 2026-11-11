@@ -26,7 +26,7 @@ body:
       value: |
         | Server | mcp-ts-core | Runtime | Transport | OS |
         |---|---|---|---|---|
-        | 0.10.1 | 0.x.y | Bun 1.4.x | stdio | macOS 15.x |
+        | 0.11.0 | 0.x.y | Bun 1.4.x | stdio | macOS 15.x |
     validations:
       required: true
 

@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-11-11 05:46:57
+Generated on: 2026-11-11 05:56:19
 
 ```text
 brapi-mcp-server/
@@ -26,6 +26,7 @@ brapi-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.10.x/
+│   ├── 0.11.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
