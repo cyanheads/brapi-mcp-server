@@ -499,6 +499,7 @@ export async function collectEmbeddedObservations(args: {
   let scanned = 0;
   let pagesFetched = 0;
   let totalCount: number | undefined;
+  let totalPages: number | undefined;
   let previousPage: string | undefined;
   let missingEmbeddedUnits = 0;
   const result = (): EmbeddedObservationPull => ({
@@ -548,7 +549,10 @@ export async function collectEmbeddedObservations(args: {
     }
     pagesFetched++;
     const units = extractRows<Record<string, unknown>>(envelope.result);
-    if (page === 0) totalCount = envelope.metadata?.pagination?.totalCount;
+    if (page === 0) {
+      totalCount = envelope.metadata?.pagination?.totalCount;
+      totalPages = envelope.metadata?.pagination?.totalPages;
+    }
     const signature = JSON.stringify(units);
     if (page > 0 && units.length > 0 && signature === previousPage)
       return stopped(`page ${page + 1} repeated page ${page}`);
@@ -603,11 +607,17 @@ export async function collectEmbeddedObservations(args: {
       }
     }
     if (units.length === 0) {
-      if (totalCount === undefined || scanned >= totalCount) return completed();
+      const expectedUnits = totalCount === undefined ? (totalPages ?? 0) > 1 : scanned < totalCount;
+      if (!expectedUnits) return completed();
       return stopped(`page ${page + 1} came back empty`);
     }
-    if (totalCount === undefined ? units.length < config.pageSize : scanned >= totalCount)
-      return completed();
+    const reachedEnd =
+      totalCount !== undefined
+        ? scanned >= totalCount
+        : totalPages !== undefined
+          ? pagesFetched >= totalPages
+          : units.length < config.pageSize;
+    if (reachedEnd) return completed();
     if (rawRows.length >= args.loadLimit)
       return stopped(`reached loadLimit (${args.loadLimit}) matching observations`);
   }

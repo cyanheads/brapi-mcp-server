@@ -531,6 +531,44 @@ describe('brapi_find_observations inline budget (#66)', () => {
     expect(text).toContain('obs-0');
   });
 
+  it.each([false, true])(
+    'follows the reported unit page count (empty last page: %s)',
+    async (emptyLastPage) => {
+      const ctx = await connect(fetcher, ['observations', 'observationunits'], 'CassavaBase');
+      const pages: number[] = [];
+      fetcher.mockImplementation(async (url: string) => {
+        const page = Number(new URL(url).searchParams.get('page'));
+        pages.push(page);
+        return jsonResponse({
+          metadata: { pagination: { currentPage: page, pageSize: 1, totalPages: 2 } },
+          result: {
+            data:
+              page === 1 && emptyLastPage
+                ? []
+                : [
+                    {
+                      observationUnitDbId: `unit-${page}`,
+                      germplasmDbId: 'g-1',
+                      observations: [{ observationDbId: `obs-${page}`, value: page }],
+                    },
+                  ],
+          },
+        });
+      });
+
+      const { structured, text } = await call(ctx, { germplasm: ['g-1'] });
+      expect(pages).toEqual([0, 1]);
+      expect(structured).toMatchObject({
+        totalCount: emptyLastPage ? 1 : 2,
+        hasMore: emptyLastPage,
+        results: emptyLastPage
+          ? [{ observationDbId: 'obs-0' }]
+          : [{ observationDbId: 'obs-0' }, { observationDbId: 'obs-1' }],
+      });
+      if (emptyLastPage) expect(text).toContain('page 2 came back empty');
+    },
+  );
+
   it('reports nested filters as JSON values and broadens a complete zero-match scan', async () => {
     const ctx = await connect(fetcher, ['observations', 'observationunits'], 'CassavaBase');
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
