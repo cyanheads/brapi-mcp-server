@@ -138,7 +138,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindVariants = tool('brapi_find_variants', {
   description:
-    'Find variant records by variant set, reference sequence, or genomic region (start/end, 0-based inclusive / exclusive per the BrAPI spec; servers may differ). results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
+    'Find variant records by variant set, reference sequence, or genomic region. Named reference and region filters are verified on each scanned row using exact reference names and overlap with the 0-based half-open window [start, end). results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -257,7 +257,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       'Reference display name (e.g. "chr01", "chr1").',
     ),
     start: z.number().int().nonnegative().optional().describe('Window start, 0-based inclusive.'),
-    end: z.number().int().positive().optional().describe('Window end, 0-based exclusive.'),
+    end: z.number().int().nonnegative().optional().describe('Window end, 0-based exclusive.'),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
   }),
@@ -280,7 +280,15 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       .number()
       .int()
       .nonnegative()
-      .describe('Total rows reported by the server, else the rows scanned.'),
+      .describe(
+        'Verified matches among scanned rows when a named reference or window is set, else the upstream total or rows scanned.',
+      ),
+    upstreamTotalCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Upstream row count before local region verification, when reported.'),
     returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
       .record(z.string(), z.unknown())
@@ -296,6 +304,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
   },
 
   enrichmentTrailer: {
+    upstreamTotalCount: { label: 'Upstream total' },
     refinementHint: { render: renderAdvisoryTrailer },
     appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
     warnings: { render: renderWarningsTrailer },
@@ -308,6 +317,18 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     const config = getServerConfig();
 
     const connection = await requireRegisteredConnection(ctx, input.alias);
+    const { referenceName, start, end } = input;
+    const warnings: string[] = [];
+    if (end !== undefined && (start ?? 0) >= end) {
+      warnings.push('start >= end. Provide a nonempty genomic window with start less than end.');
+      ctx.enrich({ totalCount: 0, returnedCount: 0, appliedFilters: {}, warnings });
+      return {
+        alias: connection.alias,
+        results: [],
+        hasMore: false,
+        distributions: { variantType: {}, referenceName: {}, variantSetDbId: {} },
+      };
+    }
 
     const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
     if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
@@ -315,10 +336,6 @@ export const brapiFindVariants = tool('brapi_find_variants', {
 
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
-    const warnings: string[] = [];
-    if (input.start !== undefined && input.end !== undefined && input.start >= input.end) {
-      warnings.push('start >= end; upstream will likely return an empty result set.');
-    }
     const merged = mergeFilters(
       {
         variantSetDbIds: input.variantSets,
@@ -345,6 +362,9 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
+    const verifyRegion = referenceName !== undefined || start !== undefined || end !== undefined;
+    let regionContradictions = 0;
+    let regionUnverified = 0;
     const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'variants');
     const firstPage = await loadInitialFindPage<Record<string, unknown>>(
       client,
@@ -370,8 +390,22 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       bridge,
       warnings,
       ...(normalizeRow ? { normalizeRow } : {}),
+      ...(verifyRegion && {
+        rowFilter: (row) => {
+          const verdict = verifyVariantRegion(row, referenceName, start, end);
+          if (verdict === 'match') return true;
+          if (verdict === 'contradiction') regionContradictions++;
+          else regionUnverified++;
+          return false;
+        },
+      }),
     });
     const { fullRows, dataframe, results, hasMore, rowsScanned } = spill;
+    if (regionContradictions || regionUnverified) {
+      warnings.push(
+        `Region verification scanned ${rowsScanned} row(s): ${regionContradictions} contradicted the filter and ${regionUnverified} could not be verified because reference or position metadata was missing or invalid.`,
+      );
+    }
 
     const distributions = {
       variantType: computeDistribution(fullRows, (r) => asString(r.variantType)),
@@ -383,7 +417,7 @@ export const brapiFindVariants = tool('brapi_find_variants', {
       ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
-    const totalCount = firstPage.totalCount ?? rowsScanned;
+    const totalCount = verifyRegion ? fullRows.length : (firstPage.totalCount ?? rowsScanned);
     const refinementHint = buildRefinementHint(spill, distributions, {
       availableFilters: ['variantSets', 'variants', 'references', 'referenceName', 'start', 'end'],
     });
@@ -391,17 +425,24 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
     ctx.enrich({
       totalCount,
+      ...(verifyRegion &&
+        firstPage.totalCount !== undefined && {
+          upstreamTotalCount: firstPage.totalCount,
+        }),
       returnedCount: results.length,
       appliedFilters,
       warnings,
       ...(refinementHint ? { refinementHint } : {}),
     });
-    if (results.length === 0)
+    if (fullRows.length === 0) {
       ctx.enrich.notice(
-        warnings.length > 0
-          ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
-          : 'No variants matched the applied filters. Try broadening variantSets, references, or referenceName + start/end range.',
+        verifyRegion && (regionUnverified > 0 || !spill.scanComplete)
+          ? 'No verified variants matched among the rows scanned. Check coverage and region metadata in the warnings.'
+          : warnings.length > 0
+            ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
+            : 'No variants matched the applied filters. Try broadening variantSets, references, or referenceName + start/end range.',
       );
+    }
     discloseInlineTrim(ctx, spill, loadLimit);
 
     const result: Output = {
@@ -441,6 +482,45 @@ export const brapiFindVariants = tool('brapi_find_variants', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** Verify only the reference and position fields required by the named filters. */
+function verifyVariantRegion(
+  row: Record<string, unknown>,
+  referenceName: string | undefined,
+  start: number | undefined,
+  end: number | undefined,
+): 'match' | 'contradiction' | 'unverified' {
+  const rowReference = asString(row.referenceName);
+  const hasReference = rowReference?.trim();
+  if (referenceName !== undefined && hasReference && rowReference !== referenceName) {
+    return 'contradiction';
+  }
+  if (start !== undefined || end !== undefined) {
+    const rowStart = variantPosition(row.start);
+    const rowEnd = variantPosition(row.end);
+    if (rowStart !== undefined && rowEnd !== undefined && rowStart >= rowEnd) {
+      return 'unverified';
+    }
+    if (
+      (start !== undefined && rowEnd !== undefined && rowEnd <= start) ||
+      (end !== undefined && rowStart !== undefined && rowStart >= end)
+    ) {
+      return 'contradiction';
+    }
+    if (
+      (start !== undefined && rowEnd === undefined) ||
+      (end !== undefined && rowStart === undefined)
+    ) {
+      return 'unverified';
+    }
+  }
+  return referenceName !== undefined && !hasReference ? 'unverified' : 'match';
+}
+
+function variantPosition(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value;
+  return;
+}
 
 function collectVariantSetIds(row: Record<string, unknown>): string[] | undefined {
   const ids = new Set<string>();

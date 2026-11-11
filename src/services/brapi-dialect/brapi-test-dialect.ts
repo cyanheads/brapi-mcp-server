@@ -153,7 +153,7 @@ const DROPPED_FILTERS: Record<string, ReadonlySet<string>> = {
   observations: new Set(['observationLevels', 'observationLevel', 'studyDbIds', 'studyDbId']),
 };
 
-export const brapiTestDialect = createSingularizingDialect({
+const testDialect = createSingularizingDialect({
   id: 'brapi-test',
   label: 'BrAPI Community Test Server',
   pluralToSingular: PLURAL_TO_SINGULAR,
@@ -161,6 +161,11 @@ export const brapiTestDialect = createSingularizingDialect({
   notes: [
     'GET list endpoints honor only the BrAPI v2.0 singular filter names (studyDbId, germplasmDbId, …); the v2.1 plurals are silently ignored upstream. This dialect translates plurals to singular and downcasts multi-value arrays with a warning. POST /search/{noun} routes honor the v2.1 plurals correctly and remain the path for multi-value queries.',
     'searchText on /germplasm, observationLevel(s) on /observations, and studyDbId(s) on /observations are not honored upstream — all are dropped from the wire with a warning. /observations?studyDbId(s) is broken on this server in both GET and POST /search; scope observation queries by germplasm, observationUnit, or observationVariable instead.',
-    'Location GeoJSON Point coordinates may be stored as [lat, lon, alt] instead of the GeoJSON-standard [lon, lat, alt]; brapi_find_locations retries bbox filtering with swapped axes when needed.',
+    'Location GeoJSON Points are stored as [lat, lon, alt] instead of the GeoJSON-standard [lon, lat, alt]; brapi_find_locations uses the test server convention for filtering and rendering.',
   ],
 });
+
+export const brapiTestDialect = {
+  ...testDialect,
+  locationPointAxisOrder: 'swapped',
+} as const;

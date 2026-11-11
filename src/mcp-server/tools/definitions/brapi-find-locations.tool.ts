@@ -31,7 +31,6 @@ import {
   discloseInlineTrim,
   ExtraFiltersInput,
   extractCoordinates,
-  hasPointGeometry,
   InlineTrimEnrichment,
   LoadLimitInput,
   loadInitialFindPage,
@@ -55,7 +54,7 @@ const LocationRowSchema = z
     locationDbId: z.string().describe('Server-side identifier for the location.'),
     locationName: z.string().nullish().describe('Display name.'),
     abbreviation: z.string().nullish().describe('Short abbreviation.'),
-    countryCode: z.string().nullish().describe('ISO 3166-1 alpha-3 country code.'),
+    countryCode: z.string().nullish().describe('Country code as reported by the upstream.'),
     countryName: z.string().nullish().describe('Display name of the country.'),
     locationType: z
       .string()
@@ -133,7 +132,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindLocations = tool('brapi_find_locations', {
   description:
-    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Countries filter by ISO 3166-1 alpha-3 code via countryCodes, or by free-form English country name via countryNames (resolved client-side to alpha-3 — "Uganda" → "UGA"). Optional bbox parameter restricts rows to a latitude/longitude window. When no first-page row falls inside it under the spec GeoJSON [lon, lat, alt] reading and a row carries a Point geometry, bbox is retried with axes swapped; if that matches, the swapped reading is used (non-conformant servers store [lat, lon, alt]) with a warning and `coordinateAxisOrder: "swapped"`. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
+    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Pass countryCodes directly or use English countryNames to resolve ISO codes. CassavaBase searches alpha-3, alpha-2, and numeric forms for resolved names. Optional bbox restricts rows to a latitude/longitude window. The BrAPI Community Test Server dialect reads GeoJSON Points in [lat, lon, alt] order; other dialects use [lon, lat, alt]. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -270,7 +269,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       .array(NonBlankString)
       .optional()
       .describe(
-        'English country names or aliases (e.g. "Uganda", "United States", "USA") resolved to alpha-3 codes and merged into countryCodes. Unresolved names warn when another effective country restriction remains; otherwise the call fails. Prefer countryCodes when known.',
+        'English country names or aliases resolved to ISO alpha-3 codes (also alpha-2 and numeric on CassavaBase) and merged into countryCodes. Unresolved names warn when another effective country restriction remains; otherwise the call fails.',
       ),
     locationTypes: z
       .array(NonBlankString)
@@ -375,12 +374,10 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       );
     });
 
-    // Resolve free-form country names to ISO 3166-1 alpha-3 codes and union
-    // them into the countryCodes filter slot before mergeFilters runs, so
-    // dialect adaptation, routing, and filter-match checks all see one set.
     const combinedCountryCodes = resolveCountryCodes(
       input.countryCodes,
       input.countryNames,
+      dialect.expandLocationCountryCodes === true,
       warnings,
     );
 
@@ -439,36 +436,14 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       normalizeRow ? { normalizeRow } : {},
     );
 
-    /*
-     * Axis-order pick runs before spillover so the rowFilter we hand to
-     * `maybeSpill` materializes the dataframe under the right coordinate
-     * interpretation from the start — historically this ran after spillover
-     * and the dataframe held the pre-bbox upstream union, which made SQL on
-     * the handle silently bypass the bbox (#28).
-     *
-     * Decision is made over already-fetched first-page rows: try `spec`
-     * (RFC 7946 [lon, lat]); if that yields zero matches and at least one
-     * row carries a Point geometry, retry under `swapped` ([lat, lon]) and
-     * commit to it for the spill walk. If both produce zero we still go with
-     * `spec` — the warning then says "bbox excluded everything" rather than
-     * silently flipping the axis interpretation on no evidence.
-     */
-    let coordinateAxisOrder: CoordinateAxisOrder = 'spec';
-    if (bbox && firstPage.rows.length > 0) {
-      const specMatches = firstPage.rows.filter((r) => insideBbox(r, bbox, 'spec'));
-      if (specMatches.length === 0 && firstPage.rows.some(hasPointGeometry)) {
-        const swappedMatches = firstPage.rows.filter((r) => insideBbox(r, bbox, 'swapped'));
-        if (swappedMatches.length > 0) {
-          coordinateAxisOrder = 'swapped';
-          warnings.push(
-            `Server appears to store GeoJSON coordinates as [lat, lon, alt] rather than the spec-required [lon, lat, alt]. Bbox matches returned under the swapped interpretation; the upstream coordinate convention is non-conformant and should be flagged.`,
-          );
-        }
-      }
+    const coordinateAxisOrder = dialect.locationPointAxisOrder ?? 'spec';
+    if (coordinateAxisOrder === 'swapped') {
+      warnings.push(
+        'The BrAPI Community Test Server dialect reads GeoJSON Points as [lat, lon, alt].',
+      );
     }
-    const axisOrder = coordinateAxisOrder;
     const bboxFilter = bbox
-      ? (r: Record<string, unknown>) => insideBbox(r, bbox, axisOrder)
+      ? (r: Record<string, unknown>) => insideBbox(r, bbox, coordinateAxisOrder)
       : undefined;
 
     const spillInput: Parameters<typeof maybeSpill<Record<string, unknown>>>[0] = {
@@ -505,7 +480,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       : ` scanned; ${upstreamTotal === undefined ? 'the rest were' : `the other ${upstreamTotal - rowsScanned} of ${upstreamTotal} were`} not checked`;
     if (bbox && rowsScanned > 0 && filteredFull.length === 0) {
       warnings.push(
-        `bbox excluded all ${rowsScanned} upstream location(s)${scope}. Verify the latitude/longitude window matches the server's coordinate convention.`,
+        `bbox excluded all ${rowsScanned} upstream location(s)${scope}. Check or broaden the latitude/longitude bounds.`,
       );
     } else if (bbox && filteredFull.length < rowsScanned) {
       warnings.push(
@@ -518,10 +493,21 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       locationType: computeDistribution(filteredFull, (r) => asString(r.locationType)),
     };
 
+    const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
+    const sentCodes = appliedFilters.countryCodes ?? appliedFilters.countryCode;
+    const requestedCountryCodes = (Array.isArray(sentCodes) ? sentCodes : [sentCodes]).filter(
+      (code): code is string | number =>
+        typeof code === 'number' || (typeof code === 'string' && code.length > 0),
+    );
+    const {
+      countryCodes: _countryCodes,
+      countryCode: _countryCode,
+      ...otherExtraFilters
+    } = input.extraFilters ?? {};
     checkFilterMatchRates(warnings, filteredFull.length, [
       {
         paramName: 'countryCodes',
-        requestedValues: combinedCountryCodes,
+        requestedValues: requestedCountryCodes,
         distribution: distributions.countryCode,
         caseInsensitive: true,
         requireEveryRowMatch: true,
@@ -533,8 +519,19 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         caseInsensitive: true,
         requireEveryRowMatch: true,
       },
-      ...buildExtraFilterChecks(input.extraFilters, filteredFull, warnings),
+      ...buildExtraFilterChecks(otherExtraFilters, filteredFull, warnings),
     ]);
+    if (requestedCountryCodes.length > 0) {
+      const known = Object.values(distributions.countryCode).reduce(
+        (total, count) => total + count,
+        0,
+      );
+      if (known < filteredFull.length) {
+        warnings.push(
+          `Could not verify the country filter for ${filteredFull.length - known} returned location(s) with no country code.`,
+        );
+      }
+    }
 
     const totalCount = bbox ? filteredFull.length : (firstPage.totalCount ?? spill.rowsScanned);
     const refinementHint = buildRefinementHint(spill, distributions, {
@@ -549,7 +546,6 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       ],
     });
 
-    const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
     ctx.enrich({
       totalCount,
       returnedCount: filteredReturned.length,
@@ -659,29 +655,31 @@ function insideBbox(
 }
 
 /**
- * Resolve free-form `countryNames` to ISO 3166-1 alpha-3 codes and union them
- * with any explicit `countryCodes`. Pushes a resolution advisory for names
- * that mapped and a warning for names that did not. Returns the combined,
- * de-duplicated code list, or `undefined` when neither input carried a value
- * (so the upstream call stays unfiltered rather than sending an empty array).
+ * Resolve country names to the dialect's supported ISO codes and union them with
+ * explicit codes, keeping numeric strings and their leading zeros intact.
  */
 function resolveCountryCodes(
   countryCodes: string[] | undefined,
   countryNames: string[] | undefined,
+  expandCodes: boolean,
   warnings: string[],
 ): string[] | undefined {
-  const resolved: Array<{ input: string; code: string }> = [];
+  const resolved: Array<{ input: string; codes: string[] }> = [];
   const unresolved: string[] = [];
   for (const name of countryNames ?? []) {
-    const code = resolveCountryName(name);
-    if (code) resolved.push({ input: name, code });
-    else unresolved.push(name);
+    const country = resolveCountryName(name);
+    if (country) {
+      resolved.push({
+        input: name,
+        codes: expandCodes ? [country.alpha3, country.alpha2, country.numeric] : [country.alpha3],
+      });
+    } else unresolved.push(name);
   }
   if (resolved.length > 0) {
     warnings.push(
-      `Resolved country name(s) to ISO 3166-1 alpha-3: ${resolved
-        .map((p) => `"${p.input}" → ${p.code}`)
-        .join(', ')}.`,
+      `Resolved country name(s) to ISO 3166-1${expandCodes ? ' codes' : ' alpha-3'}: ${resolved
+        .map((p) => `"${p.input}" → ${p.codes.join(', ')}`)
+        .join('; ')}.`,
     );
   }
   if (unresolved.length > 0) {
@@ -691,9 +689,11 @@ function resolveCountryCodes(
         .join(', ')}. Pass the alpha-3 code directly via countryCodes, or check the spelling.`,
     );
   }
-  const resolvedCodes = resolved.map((p) => p.code);
+  const resolvedCodes = resolved.flatMap((p) => p.codes);
   if (!countryCodes && resolvedCodes.length === 0) return;
-  return [...new Set([...(countryCodes ?? []), ...resolvedCodes])];
+  return [
+    ...new Set([...(countryCodes ?? []).map((code) => code.toUpperCase()), ...resolvedCodes]),
+  ];
 }
 
 /** Render the exact row section used by both formatting and preview sizing. */

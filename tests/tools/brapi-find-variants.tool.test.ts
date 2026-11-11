@@ -89,12 +89,20 @@ describe('brapi_find_variants tool', () => {
     expect(url.searchParams.get('end')).toBe('5000');
   });
 
-  it('warns when start >= end', async () => {
+  it.each([0, 4, 5])('returns no matches with guidance for start 5 and end %s', async (end) => {
     const ctx = await connect(fetcher);
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [variantRow()], totalCount: 1 })));
 
-    await brapiFindVariants.handler(brapiFindVariants.input.parse({ start: 1000, end: 1000 }), ctx);
-    expect(getEnrichment(ctx).warnings.join('\n')).toContain('start >= end');
+    const result = await brapiFindVariants.handler(
+      brapiFindVariants.input.parse({ start: 5, end }),
+      ctx,
+    );
+    expect(result).toMatchObject({ results: [], hasMore: false });
+    expect(getEnrichment(ctx)).toMatchObject({
+      totalCount: 0,
+      warnings: [expect.stringContaining('start >= end')],
+    });
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('returns rows + per-type / per-reference distributions', async () => {
@@ -214,19 +222,143 @@ describe('brapi_find_variants inline budget (#66)', () => {
     });
   }
 
-  async function call(ctx: Context, input: Record<string, unknown>) {
+  async function call(ctx: Context, input: Record<string, unknown>, signal?: AbortSignal) {
     const definition = {
       ...brapiFindVariants,
       handler: (parsed, contractCtx) =>
         brapiFindVariants.handler(parsed, { ...contractCtx, state: ctx.state }),
     } satisfies typeof brapiFindVariants;
-    const result = await runToolContract(definition, input, { context: { tenantId: 't1' } });
+    const result = await runToolContract(definition, input, {
+      context: { tenantId: 't1', ...(signal && { signal }) },
+    });
     const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
     return { result, structured: result.structuredContent as Record<string, unknown>, text };
   }
 
   const variants = (n: number, extra: Record<string, unknown> = {}) =>
     Array.from({ length: n }, (_, i) => variantRow({ variantDbId: `v-${i + 1}`, ...extra }));
+
+  it('verifies exact references and half-open overlap on all pages before staging', async () => {
+    const ctx = await connect(fetcher);
+    const examples = [
+      { start: 0, end: 7 },
+      { start: 0, end: 5 },
+      { start: 9, end: 10 },
+      { referenceName: 'Chr1', start: 6, end: 7 },
+      { start: 6, end: null },
+      { referenceName: null, start: 6, end: 7 },
+      { start: 8, end: 8 },
+      { referenceName: null, start: 9, end: 10 },
+    ];
+    serve(variants(48).map((row, i) => ({ ...row, ...examples[i % examples.length] })));
+
+    const { structured, text } = await call(ctx, {
+      referenceName: 'chr1',
+      start: 5,
+      end: 9,
+      loadLimit: 5,
+    });
+
+    expect(structured).toMatchObject({
+      totalCount: 6,
+      upstreamTotalCount: 48,
+      returnedCount: 5,
+      hasMore: true,
+      results: [1, 9, 17, 25, 33].map((id) => expect.objectContaining({ variantDbId: `v-${id}` })),
+      distributions: { referenceName: { chr1: 6 } },
+      dataframe: { rowCount: 6, totalCount: 6 },
+      warnings: expect.arrayContaining([
+        expect.stringContaining('24 contradicted the filter'),
+        expect.stringContaining('18 could not be verified'),
+      ]),
+    });
+    expect(text).toContain('24 contradicted the filter');
+    expect(text).toContain('18 could not be verified');
+    expect(text).toContain('**Upstream total:** 48');
+    expect(text).toContain('ref=chr1 · start=0 · end=7');
+  });
+
+  it('retains sparse unfiltered variants and excludes them when a region requires the missing fields', async () => {
+    const ctx = await connect(fetcher);
+    serve([{ variantDbId: 'unknown-site', referenceName: null, start: null, end: null }]);
+
+    const unfiltered = await call(ctx, {});
+    expect(unfiltered.structured).toMatchObject({
+      totalCount: 1,
+      results: [{ variantDbId: 'unknown-site' }],
+    });
+    expect(unfiltered.text).toContain('unknown-site');
+    const filtered = await call(ctx, { referenceName: 'chr1', start: 0 });
+    expect(filtered.structured).toMatchObject({
+      totalCount: 0,
+      results: [],
+      hasMore: false,
+      upstreamTotalCount: 1,
+    });
+    expect(filtered.text).toContain('1 could not be verified');
+    expect(filtered.text).toContain('No verified variants matched among the rows scanned');
+  });
+
+  it('requires only the coordinate used by a one-sided window and leaves extraFilters untouched', async () => {
+    const ctx = await connect(fetcher);
+    serve([
+      { variantDbId: 'overlap', start: 0 },
+      { variantDbId: 'touch', start: 5 },
+    ]);
+
+    const named = await call(ctx, { end: 5 });
+    expect(named.structured).toMatchObject({
+      totalCount: 1,
+      results: [{ variantDbId: 'overlap' }],
+    });
+    expect(named.text).toContain('1 contradicted the filter');
+    const extra = await call(ctx, { extraFilters: { end: 5 } });
+    expect(extra.structured).toMatchObject({ totalCount: 2 });
+    expect(extra.text).toContain('touch');
+  });
+
+  it('reports a partial region scan without treating upstream totals as matches', async () => {
+    const ctx = await connect(fetcher);
+    fetcher
+      .mockResolvedValueOnce(
+        jsonResponse(envelope({ data: variants(10, { referenceName: null }) }, { totalCount: 25 })),
+      )
+      .mockResolvedValueOnce(jsonResponse(envelope({ data: [] }, { totalCount: 25 })));
+
+    const { structured, text } = await call(ctx, { referenceName: 'chr1', loadLimit: 10 });
+
+    expect(structured).toMatchObject({
+      totalCount: 0,
+      results: [],
+      hasMore: true,
+      upstreamTotalCount: 25,
+    });
+    expect(structured).not.toHaveProperty('dataframe');
+    expect(text).toContain('Dataframe walk stopped after 10 of 25 upstream row(s)');
+    expect(text).toContain('10 could not be verified');
+  });
+
+  it('cancels a region walk without turning its first page into a partial success', async () => {
+    const ctx = await connect(fetcher);
+    const controller = new AbortController();
+    fetcher
+      .mockResolvedValueOnce(jsonResponse(envelope({ data: variants(10) }, { totalCount: 25 })))
+      .mockImplementationOnce(async () => {
+        controller.abort();
+        throw new Error('cancelled');
+      });
+
+    const { result, structured, text } = await call(
+      ctx,
+      { referenceName: 'chr1', loadLimit: 10 },
+      controller.signal,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(structured).toMatchObject({ error: { code: JsonRpcErrorCode.RequestCancelled } });
+    expect(text).toMatch(/cancelled/i);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
 
   it('trims results[] to the byte budget and stages every matched row', async () => {
     const ctx = await connect(fetcher);

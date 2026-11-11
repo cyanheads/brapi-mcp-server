@@ -881,10 +881,17 @@ describe('maybeSpill — client-side row filter over the spill walk', () => {
     ]);
     expect(result.results).toHaveLength(5);
     expect(result.dataframe?.rowCount).toBe(8);
-    expect(result.dataframe?.totalCount).toBe(25);
+    expect(result.dataframe?.totalCount).toBe(8);
     expect((register.mock.calls[0]![1].rows as unknown[]).length).toBe(8);
     expect(result.rowsScanned).toBe(25);
     vi.restoreAllMocks();
+  });
+
+  it('omits the matched dataframe total when the filtered walk stops early', async () => {
+    serve(things(25), { failWhen: (page) => page === 1 });
+    const result = await run(2, (row) => (row.n as number) % 2 === 0);
+    expect(result.dataframe).toMatchObject({ rowCount: 5, truncated: true });
+    expect(result.dataframe).not.toHaveProperty('totalCount');
   });
 
   it('stages nothing when every kept row of a walk fits inline', async () => {
@@ -912,7 +919,7 @@ describe('maybeSpill — client-side row filter over the spill walk', () => {
     expect(result.rowsScanned).toBe(500);
     expect(result.fullRows).toHaveLength(10);
     expect(result.dataframe?.truncated).toBe(true);
-    expect(result.dataframe?.totalCount).toBe(600);
+    expect(result.dataframe).not.toHaveProperty('totalCount');
   });
 
   it('counts first-page rows as scanned when no spill runs', async () => {
@@ -932,7 +939,8 @@ describe('maybeSpill — client-side row filter over the spill walk', () => {
     expect(fetcher.mock.calls.length).toBe(3);
     expect(result.rowsScanned).toBe(10);
     expect(result.fullRows.map((r) => r.id)).toEqual(things(10).map((r) => r.id));
-    expect(result.dataframe).toMatchObject({ rowCount: 10, truncated: true, totalCount: 25 });
+    expect(result.dataframe).toMatchObject({ rowCount: 10, truncated: true });
+    expect(result.dataframe).not.toHaveProperty('totalCount');
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatch(/stopped after 10 of 25 upstream row\(s\)/);
   });

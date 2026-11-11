@@ -1,6 +1,6 @@
 /**
  * @fileoverview Types for the static ISO 3166-1 country table used by
- * `resolveCountryName` to map free-form country names to alpha-3 codes.
+ * `resolveCountryName` to look up ISO country codes.
  *
  * @module services/iso-country/types
  */
@@ -19,4 +19,6 @@ export interface IsoCountry {
   alpha3: string;
   /** ISO 3166-1 English short name (e.g. `Uganda`). */
   name: string;
+  /** ISO 3166-1 three-digit code, including any leading zeros (e.g. `008`). */
+  numeric: string;
 }

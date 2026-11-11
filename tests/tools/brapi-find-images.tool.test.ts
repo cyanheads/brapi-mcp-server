@@ -240,19 +240,94 @@ describe('brapi_find_images inline budget (#66)', () => {
     });
   }
 
-  async function call(ctx: Context, input: Record<string, unknown>) {
+  async function call(ctx: Context, input: Record<string, unknown>, signal?: AbortSignal) {
     const definition = {
       ...brapiFindImages,
       handler: (parsed, contractCtx) =>
         brapiFindImages.handler(parsed, { ...contractCtx, state: ctx.state }),
     } satisfies typeof brapiFindImages;
-    const result = await runToolContract(definition, input, { context: { tenantId: 't1' } });
+    const result = await runToolContract(definition, input, {
+      context: { tenantId: 't1', ...(signal && { signal }) },
+    });
     const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
     return { result, structured: result.structuredContent as Record<string, unknown>, text };
   }
 
   const images = (n: number, extra: Record<string, unknown> = {}) =>
     Array.from({ length: n }, (_, i) => imgRow({ imageDbId: `img-${i + 1}`, ...extra }));
+
+  it('stages only verified MIME matches across pages when upstream ignores the filter', async () => {
+    const ctx = await connect(fetcher);
+    serve(
+      images(16).map((row, i) =>
+        i % 3 === 0
+          ? { ...row, mimeType: 'IMAGE/PNG' }
+          : i % 3 === 1
+            ? { ...row, mimeType: null }
+            : row,
+      ),
+    );
+
+    const { structured, text } = await call(ctx, { mimeTypes: ['image/png'], loadLimit: 5 });
+
+    expect(structured).toMatchObject({
+      totalCount: 6,
+      upstreamTotalCount: 16,
+      returnedCount: 5,
+      hasMore: true,
+      results: [1, 4, 7, 10, 13].map((id) => expect.objectContaining({ imageDbId: `img-${id}` })),
+      distributions: { mimeType: { 'IMAGE/PNG': 6 } },
+      dataframe: { rowCount: 6, totalCount: 6 },
+      warnings: expect.arrayContaining([
+        expect.stringContaining('5 contradicted the filter'),
+        expect.stringContaining('5 could not be verified'),
+      ]),
+    });
+    expect(text).toContain('5 contradicted the filter');
+    expect(text).toContain('5 could not be verified');
+    expect(text).toContain('**Upstream total:** 16');
+    expect(text).not.toContain('image/jpeg');
+  });
+
+  it('reports zero verified matches and incomplete coverage when a MIME walk fails', async () => {
+    const ctx = await connect(fetcher);
+    serve(images(25, { mimeType: null }), 1);
+
+    const { structured, text } = await call(ctx, { mimeTypes: ['image/png'], loadLimit: 5 });
+
+    expect(structured).toMatchObject({
+      totalCount: 0,
+      results: [],
+      hasMore: true,
+      upstreamTotalCount: 25,
+    });
+    expect(structured).not.toHaveProperty('dataframe');
+    expect(text).toContain('Dataframe walk stopped after 10 of 25 upstream row(s)');
+    expect(text).toContain('10 could not be verified');
+    expect(text).toContain('No verified images matched among the rows scanned');
+  });
+
+  it('cancels a MIME walk without turning its first page into a partial success', async () => {
+    const ctx = await connect(fetcher);
+    const controller = new AbortController();
+    fetcher
+      .mockResolvedValueOnce(jsonResponse(envelope({ data: images(10) }, { totalCount: 25 })))
+      .mockImplementationOnce(async () => {
+        controller.abort();
+        throw new Error('cancelled');
+      });
+
+    const { result, structured, text } = await call(
+      ctx,
+      { mimeTypes: ['image/jpeg'], loadLimit: 10 },
+      controller.signal,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(structured).toMatchObject({ error: { code: JsonRpcErrorCode.RequestCancelled } });
+    expect(text).toMatch(/cancelled/i);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
 
   it('trims results[] to the byte budget and stages every matched row', async () => {
     const ctx = await connect(fetcher);

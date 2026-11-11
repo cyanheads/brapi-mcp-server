@@ -765,12 +765,12 @@ describe('brapi_find_studies locations on dialects that drop locationDbIds', () 
 
     const { structured } = await call(ctx, { locations: ['23'], loadLimit: 2 });
 
-    // s14 and s25 sit on walk pages 1 and 2; today `results` is the unfiltered first page.
+    // s14 and s25 sit on walk pages 1 and 2.
     expect(ids(structured)).toEqual(['s3', 's14']);
     expect(structured.returnedCount).toBe(2);
     expect(structured.totalCount).toBe(3);
     expect(structured.hasMore).toBe(true);
-    expect(structured.dataframe).toMatchObject({ rowCount: 3, totalCount: 25 });
+    expect(structured.dataframe).toMatchObject({ rowCount: 3, totalCount: 3 });
   });
 
   it('says only the first N of M studies were checked when the walk stops at its ceiling', async () => {

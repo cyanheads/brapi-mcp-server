@@ -13,10 +13,11 @@ import { brapiDescribeFilters } from '@/mcp-server/tools/definitions/brapi-descr
 import { listFilterEndpoints } from '@/services/brapi-filters/index.js';
 
 const ENDPOINTS = listFilterEndpoints();
+const TITLE = 'BrAPI filter catalog';
 
 export const brapiFiltersResource = resource('brapi://filters/{endpoint}', {
   name: 'brapi-filters',
-  title: 'BrAPI filter catalog',
+  title: TITLE,
   description:
     'BrAPI filter catalog for a single endpoint (name, type, description, example per filter). Mirrors the brapi_describe_filters tool.',
   mimeType: 'application/json',
@@ -43,7 +44,8 @@ export const brapiFiltersResource = resource('brapi://filters/{endpoint}', {
   list: async () => ({
     resources: ENDPOINTS.map((endpoint) => ({
       uri: `brapi://filters/${endpoint}`,
-      name: `BrAPI filter catalog · ${endpoint}`,
+      name: `${TITLE} · ${endpoint}`,
+      title: TITLE,
       description: `Filter names accepted by /${endpoint} on a BrAPI v2.1 server.`,
       mimeType: 'application/json',
     })),

@@ -223,10 +223,14 @@ export async function pullStudyObservations(
   //   2b. Units carry germplasmDbIds but observations[] is null — pull
   //       /observations?germplasmDbId=X per germplasm found in the study.
   if (supportsObsUnits) {
-    let germPull: Omit<StudyPull, 'truncation'> = { observations: [], rawRows: [] };
+    let germPull: StudyPull = { observations: [], rawRows: [] };
     try {
-      const units = await fetchObservationUnits(args);
+      const { units, truncation } = await fetchObservationUnits(args);
       if (units.length === 0) {
+        if (truncation) {
+          if (firstError !== undefined) throw firstError;
+          return { observations: [], rawRows: [], truncation };
+        }
         warnings.push(
           firstError === undefined
             ? `Study '${studyDbId}': No observations found via /observations or /observationunits.`
@@ -244,7 +248,18 @@ export async function pullStudyObservations(
         warnings.push(
           `Study '${studyDbId}': Using /observationunits embedded observations[] fallback${obsFailure}.`,
         );
-        return embedded;
+        if (embedded.observations.length > args.loadLimit) {
+          return {
+            observations: embedded.observations.slice(0, args.loadLimit),
+            rawRows: embedded.rawRows.slice(0, args.loadLimit),
+            truncation: {
+              reason: `reached loadLimit (${args.loadLimit}) matching observations`,
+              scanned: units.length,
+              ...(truncation?.totalCount !== undefined && { totalCount: truncation.totalCount }),
+            },
+          };
+        }
+        return { ...embedded, ...(truncation && { truncation }) };
       }
 
       let germplasmIds = [
@@ -263,6 +278,7 @@ export async function pullStudyObservations(
       if (germplasmIds.length > 0) {
         germPull = await fetchObservationsByGermplasm(args, germplasmIds);
       }
+      if (truncation && !germPull.truncation) germPull.truncation = truncation;
     } catch (err) {
       if (isDialectAllDropped(err) || ctx.signal.aborted) throw err;
       throw firstError ?? err;
@@ -273,6 +289,7 @@ export async function pullStudyObservations(
       );
       return germPull;
     }
+    if (germPull.truncation && firstError === undefined) return germPull;
   }
 
   if (firstError !== undefined) throw firstError;
@@ -839,7 +856,7 @@ async function scanObservations(
 /** Fetch the study's observationunit records (without extracting observations). */
 async function fetchObservationUnits(
   args: PullStudyObservationsArgs,
-): Promise<Record<string, unknown>[]> {
+): Promise<{ units: Record<string, unknown>[]; truncation?: StudyTruncation }> {
   const { client, connection, dialect, studyDbId, loadLimit, ctx } = args;
   const adapted = dialect.adaptGetFilters('observationunits', { studyDbIds: [studyDbId] });
   const envelope = await client.get<
@@ -850,10 +867,25 @@ async function fetchObservationUnits(
     ctx,
     pullRequestOptions(args, {
       ...(adapted.filters as QueryParams),
-      pageSize: loadLimit,
+      pageSize: Math.min(args.config.pageSize, loadLimit),
     }),
   );
-  return extractRows<Record<string, unknown>>(envelope.result);
+  const units = extractRows<Record<string, unknown>>(envelope.result);
+  const totalCount = envelope.metadata?.pagination?.totalCount;
+  const totalPages = envelope.metadata?.pagination?.totalPages;
+  const incomplete =
+    (totalCount !== undefined && totalCount > units.length) ||
+    (totalPages !== undefined && totalPages > 1);
+  return {
+    units,
+    ...(incomplete && {
+      truncation: {
+        reason: '/observationunits fallback returned only the first page',
+        scanned: units.length,
+        ...(totalCount !== undefined && { totalCount }),
+      },
+    }),
+  };
 }
 
 /**
@@ -917,12 +949,20 @@ function extractEmbeddedObservations(
 async function fetchObservationsByGermplasm(
   args: PullStudyObservationsArgs,
   germplasmIds: string[],
-): Promise<Omit<StudyPull, 'truncation'>> {
+): Promise<StudyPull> {
   const { client, connection, dialect, studyDbId, loadLimit, ctx } = args;
   const keep = matcher(args.input, studyDbId);
   const observations: NormObs[] = [];
   const rawRows: RawObservationRow[] = [];
+  let truncation: StudyTruncation | undefined;
+  let scanned = 0;
+  const stoppedAtLimit = (): StudyPull => ({
+    observations,
+    rawRows,
+    truncation: { reason: `reached loadLimit (${loadLimit}) matching observations`, scanned },
+  });
   for (const germId of germplasmIds) {
+    if (observations.length >= loadLimit) return stoppedAtLimit();
     const adapted = dialect.adaptGetFilters('observations', { germplasmDbIds: [germId] });
     // Skip if the germplasm filter is also dropped
     if (adapted.dropped.length > 0 && Object.keys(adapted.filters).length === 0) continue;
@@ -932,17 +972,33 @@ async function fetchObservationsByGermplasm(
       ctx,
       pullRequestOptions(args, {
         ...(adapted.filters as QueryParams),
-        pageSize: loadLimit,
+        pageSize: Math.min(args.config.pageSize, loadLimit),
       }),
     );
-    for (const row of extractRows<RawObservationRow>(envelope.result)) {
+    const rows = extractRows<RawObservationRow>(envelope.result);
+    const totalCount = envelope.metadata?.pagination?.totalCount;
+    const totalPages = envelope.metadata?.pagination?.totalPages;
+    if (
+      !truncation &&
+      ((totalCount !== undefined && totalCount > rows.length) ||
+        (totalPages !== undefined && totalPages > 1))
+    ) {
+      truncation = {
+        reason: `/observations fallback for germplasm '${germId}' returned only the first page`,
+        scanned: rows.length,
+        ...(totalCount !== undefined && { totalCount }),
+      };
+    }
+    for (const row of rows) {
+      scanned++;
       const norm = normalizeObsRow(row);
       if (!norm || !keep(norm)) continue;
+      if (observations.length >= loadLimit) return stoppedAtLimit();
       observations.push(norm);
       rawRows.push(row);
     }
   }
-  return { observations, rawRows };
+  return { observations, rawRows, ...(truncation && { truncation }) };
 }
 
 /** Normalise a raw /observations row; drops rows missing any required field. */

@@ -52,7 +52,7 @@ export const brapiMetaAnalysis = prompt('brapi_meta_analysis', {
       '',
       '## Step 2 — Discover studies that measured the trait on the target germplasm',
       `1. Call \`brapi_find_observations\` with \`germplasm: ${idsLiteral}\` and \`variables: [<resolved variable DbIds from Step 1>]\`${aliasArg}.`,
-      '2. If the response warns that an unanchored observation query stalled, do not retry the same germplasm-only shape. Use study anchors when available: re-call `brapi_find_observations` with both `studies: ["<studyDbId>"]` and the target `germplasm` / `variables` filters, one candidate study at a time.',
+      `2. If the response warns that an unanchored observation query stalled or skipped collection, call \`brapi_germplasm_performance\` for each target \`germplasmDbId\` with the resolved \`variables\`${aliasArg}. Inspect coverage and use the contributing \`studyDbIds\` where available. Re-call \`brapi_find_observations\` with \`studies: ["<studyDbId>"]\` and the target \`germplasm\` / \`variables\` filters, one candidate study at a time.`,
       '3. From `distributions.studyName`, capture the distinct studies returning observations. If `hasMore` is true and a `dataframe` handle is returned, work with the full set via `brapi_dataframe_query` — SQL `LIMIT/OFFSET` is the paging idiom; projection (`SELECT col1, col2`) and aggregation (`COUNT`, `GROUP BY`) summarize without materializing every row.',
       '4. For each study, call `brapi_get_study` to capture program, location, season, and trial context — these are the moderators in the meta-analysis.',
       '',

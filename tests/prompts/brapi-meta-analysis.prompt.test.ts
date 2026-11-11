@@ -41,6 +41,8 @@ describe('brapi_meta_analysis prompt', () => {
     });
     const text = (brapiMetaAnalysis.generate(args)[0]!.content as { text: string }).text;
     expect(text).toContain('unanchored observation query stalled');
+    expect(text).toContain('`brapi_germplasm_performance`');
+    expect(text).toContain('contributing `studyDbIds`');
     expect(text).toContain('studies: ["<studyDbId>"]');
     expect(text).toContain('germplasm');
   });

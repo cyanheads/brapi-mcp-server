@@ -227,7 +227,7 @@ describe('brapi_find_locations tool', () => {
       {
         locationDbIds: ['3', '4'],
         locationNames: ['Namulonge'],
-        countryCodes: ['UGA'],
+        countryCodes: ['UGA', 'UG', '800'],
         locationTypes: ['Farm'],
         abbreviations: ['NM', 'UB'],
       },
@@ -238,7 +238,7 @@ describe('brapi_find_locations tool', () => {
     ],
     [
       'Sweetpotatobase',
-      { locations: ['29'], locationNames: ['Ica'], countryCodes: ['PER'], abbreviations: ['BIO'] },
+      { locations: ['29'], locationNames: ['Ica'], countryNames: ['Peru'], abbreviations: ['BIO'] },
       {
         locationDbIds: ['29'],
         locationNames: ['Ica'],
@@ -349,47 +349,131 @@ describe('brapi_find_locations tool', () => {
     expect(text).toContain('alt=234');
   });
 
-  it('retries bbox with axes swapped when spec ordering returns zero against a non-conformant server (BrAPI test-server shape)', async () => {
-    const ctx = await connect(fetcher);
-    // Mirrors the BrAPI Community Test Server: Cornell at (42.44, -76.46) is
-    // stored as [42.44423, -76.46313, 123]. Read GeoJSON-spec ([lon, lat]),
-    // it'd be (lat=-76.46, lon=42.44) — outside any sane upstate-NY bbox.
-    // The swap-on-zero retry should recover the row.
-    const rows = [
-      {
+  it.each([{}, { bbox: { minLat: 42, maxLat: 43, minLon: -77, maxLon: -76 } }])(
+    'uses the BrAPI Community Test Server axis order with input %j',
+    async (input) => {
+      const ctx = await connect(fetcher, ['locations'], 'BrAPI Community Test Server');
+      const point = {
         locationDbId: 'location_01',
         locationName: 'Location 1',
         coordinates: {
           type: 'Feature',
           geometry: { type: 'Point', coordinates: [42.44423, -76.46313, 123] },
         },
-      },
-    ];
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+      };
+      const legacy = locRow({ locationDbId: 'legacy', latitude: 0, longitude: 1, altitude: 0 });
+      const polygon = {
+        locationDbId: 'polygon',
+        coordinates: { geometry: { type: 'Polygon', coordinates: [[[42.44, -76.46]]] } },
+      };
+      serveLocations(fetcher, [point, legacy, polygon]);
 
-    const result = await brapiFindLocations.handler(
-      brapiFindLocations.input.parse({
-        bbox: { minLat: 42, maxLat: 43, minLon: -77, maxLon: -76 },
-      }),
-      ctx,
-    );
+      const { structured, text } = await callContract(ctx, input);
 
-    expect(result.coordinateAxisOrder).toBe('swapped');
-    expect(getEnrichment(ctx).returnedCount).toBe(1);
-    expect(result.results[0]?.locationDbId).toBe('location_01');
-    expect(getEnrichment(ctx).warnings.join('\n')).toContain('[lat, lon, alt]');
-    // Renderer must use the same swapped reading as the bbox filter, otherwise
-    // the LLM sees coords that contradict the warning.
-    const text = (brapiFindLocations.format!(result)[0] as { text: string }).text;
-    expect(text).toContain('lat=42.44423');
-    expect(text).toContain('lon=-76.46313');
-  });
+      expect(structured).toMatchObject({
+        coordinateAxisOrder: 'swapped',
+        results: 'bbox' in input ? [point] : [point, legacy, polygon],
+        warnings: expect.arrayContaining([expect.stringContaining('[lat, lon, alt]')]),
+      });
+      expect(text).toContain('**Coordinate axis order:** swapped');
+      expect(text).toContain('lat=42.44423 · lon=-76.46313 · alt=123');
+      if (!('bbox' in input)) expect(text).toContain('lat=0 · lon=1 · alt=0');
+    },
+  );
 
   /** One location at a single GeoJSON geometry. */
   const geoRow = (locationDbId: string, geometry: Record<string, unknown>) => ({
     locationDbId,
     locationName: locationDbId,
     coordinates: { type: 'Feature', geometry },
+  });
+
+  it.each([5, 30])(
+    'uses spec order even with a transposed first-page hit at limit %s',
+    async (loadLimit) => {
+      const ctx = await connect(fetcher, ['locations'], 'CassavaBase');
+      const onne = geoRow('9', { type: 'Point', coordinates: [7.035316, 4.744334] });
+      const agoOwu = geoRow('196', { type: 'Point', coordinates: [4.332487, 7.241968, 194] });
+      const rows = [
+        onne,
+        ...Array.from({ length: 10 }, (_, i) => locRow({ locationDbId: `loc-${i}` })),
+        agoOwu,
+      ];
+      serveLocations(fetcher, rows);
+
+      const wide = await callContract(ctx, {
+        bbox: { minLat: 6.5, maxLat: 7.6, minLon: 4, maxLon: 5.2 },
+        loadLimit,
+      });
+      expect(wide.structured).toMatchObject({
+        coordinateAxisOrder: 'spec',
+        results: [agoOwu],
+        totalCount: 1,
+      });
+      expect(wide.text).toContain('lat=7.241968 · lon=4.332487 · alt=194');
+      const narrow = await callContract(ctx, {
+        bbox: { minLat: 6.9, maxLat: 7.2, minLon: 4.5, maxLon: 5 },
+        loadLimit,
+      });
+      expect(narrow.structured).toMatchObject({
+        coordinateAxisOrder: 'spec',
+        results: [],
+        totalCount: 0,
+      });
+      expect(narrow.text).toContain('bbox excluded all 12 upstream location(s)');
+    },
+  );
+
+  it('unions CassavaBase ISO forms with normalized explicit codes and preserves numeric strings', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'CassavaBase');
+    const rows = [
+      locRow({ locationDbId: 'uganda-alpha2', countryCode: 'UG' }),
+      locRow({ locationDbId: 'uganda-alpha3', countryCode: 'UGA' }),
+      locRow({ locationDbId: 'albania-numeric', countryCode: '008' }),
+    ];
+    fetcher.mockImplementation(async (url: string) => {
+      const codes = new URL(url).searchParams.getAll('countryCodes');
+      const filtered = rows.filter((row) => codes.includes(String(row.countryCode)));
+      return jsonResponse(envelope({ data: filtered }, { totalCount: filtered.length }));
+    });
+
+    const { structured, text } = await callContract(ctx, {
+      countryCodes: ['ug', '260', '8'],
+      countryNames: ['Uganda', 'Albania'],
+    });
+    const codes = ['UG', '260', '8', 'UGA', '800', 'ALB', 'AL', '008'];
+    expect(new URL(String(fetcher.mock.calls[0]![0])).searchParams.getAll('countryCodes')).toEqual(
+      codes,
+    );
+    expect(structured).toMatchObject({
+      appliedFilters: { countryCodes: codes },
+      results: rows,
+      distributions: { countryCode: { UG: 1, UGA: 1, '008': 1 } },
+    });
+    expect(text).toContain('Albania" → ALB, AL, 008');
+    expect(text).not.toContain('may not honor');
+  });
+
+  it('checks the country filter sent after an extraFilters fallback and reports absent codes', async () => {
+    const ctx = await connect(fetcher);
+    serveLocations(fetcher, [
+      locRow({ locationDbId: 'match', countryCode: 'UGA' }),
+      locRow({ locationDbId: 'unknown', countryCode: null }),
+      locRow({ locationDbId: 'unexpected', countryCode: 'ZMB' }),
+    ]);
+
+    const { structured, text } = await callContract(ctx, {
+      countryNames: ['Atlantis'],
+      extraFilters: { countryCodes: ['uga'] },
+    });
+    expect(structured).toMatchObject({
+      appliedFilters: { countryCodes: ['UGA'] },
+      warnings: expect.arrayContaining([
+        expect.stringContaining('1 returned row(s) carried other values (ZMB)'),
+        expect.stringContaining('1 returned location(s) with no country code'),
+      ]),
+    });
+    expect(text).toContain('1 returned location(s) with no country code');
   });
 
   it.each([
@@ -438,8 +522,9 @@ describe('brapi_find_locations tool', () => {
       expect(getEnrichment(ctx).returnedCount).toBe(returned);
       const warnings = getEnrichment(ctx).warnings.join('\n');
       expect(warnings).not.toContain('[lat, lon, alt]');
-      // Only a bbox that excludes every row carries the verify-coordinate-convention warning.
-      expect(warnings.includes('Verify the latitude/longitude window')).toBe(returned === 0);
+      expect(warnings.includes('Check or broaden the latitude/longitude bounds')).toBe(
+        returned === 0,
+      );
     },
   );
 
@@ -473,7 +558,7 @@ describe('brapi_find_locations tool', () => {
     expect(text).toContain('_No rows returned._');
     // The walk scanned all four rows, not just the two on the first page.
     expect((structured.warnings as string[]).filter((w) => w.startsWith('bbox excluded'))).toEqual([
-      "bbox excluded all 4 upstream location(s). Verify the latitude/longitude window matches the server's coordinate convention.",
+      'bbox excluded all 4 upstream location(s). Check or broaden the latitude/longitude bounds.',
     ]);
     expect(text).not.toContain('returned on the first page');
     expect(text).not.toContain('More rows');
@@ -497,7 +582,7 @@ describe('brapi_find_locations tool', () => {
 
     expect(structured.hasMore).toBe(true);
     expect((structured.warnings as string[]).filter((w) => w.startsWith('bbox excluded'))).toEqual([
-      "bbox excluded all 10 upstream location(s) scanned; the other 15 of 25 were not checked. Verify the latitude/longitude window matches the server's coordinate convention.",
+      'bbox excluded all 10 upstream location(s) scanned; the other 15 of 25 were not checked. Check or broaden the latitude/longitude bounds.',
     ]);
     // The spill walk's own stop warning reaches the tool's warnings too.
     expect((structured.warnings as string[]).join('\n')).toMatch(

@@ -325,7 +325,13 @@ export function renderAppliedFiltersTrailer(
     if (entries.length === 0) return `**Applied Filters:** ${emptyText}`;
     const lines = entries.map(([k, v]) => {
       const display = serverToUser[k] ?? k;
-      return `- **${prose(display)}:** ${prose(Array.isArray(v) ? v.join(', ') : String(v))}`;
+      const nested = Array.isArray(v)
+        ? v.some((item) => item !== null && typeof item === 'object')
+        : v !== null && typeof v === 'object';
+      const value = nested
+        ? code(JSON.stringify(v).replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029'))
+        : prose(Array.isArray(v) ? v.join(', ') : v);
+      return `- **${prose(display)}:** ${value}`;
     });
     return `**Applied Filters:**\n${lines.join('\n')}`;
   };
@@ -1310,19 +1316,15 @@ export const DataframeHandleSchema = z.object({
     .record(z.string(), z.string())
     .optional()
     .describe(
-      'Sanitized column name → original upstream key, present only when a column was renamed to be SQL-safe (e.g. `end` → `end_`). SQL uses the sanitized names.',
+      'SQL-safe name → original upstream key for renamed columns. Use the safe names in SQL.',
     ),
   createdAt: z.string().describe('ISO 8601 creation time.'),
-  expiresAt: z
-    .string()
-    .describe(
-      'ISO 8601 time the dataframe metadata is purged; copy rows out before, or re-run the producing tool.',
-    ),
+  expiresAt: z.string().describe('ISO 8601 expiry of this dataframe’s provenance metadata.'),
   truncated: z
     .boolean()
     .optional()
     .describe(
-      'True when the dataframe holds less than the upstream reports: a cap, failed page, deadline, or short upstream ended the pull, or it was skipped. warnings says which. Absent otherwise.',
+      'True for a capped, failed, timed-out, incomplete, or skipped pull; warnings explains why.',
     ),
   maxRows: z
     .number()
@@ -1335,7 +1337,9 @@ export const DataframeHandleSchema = z.object({
     .int()
     .nonnegative()
     .optional()
-    .describe('Upstream-reported row total, when known; can exceed rowCount.'),
+    .describe(
+      'Matched total for complete local scans; else upstream total. Omitted for incomplete local scans or unknown totals.',
+    ),
 });
 
 export type DataframeHandle = z.infer<typeof DataframeHandleSchema>;
@@ -1407,7 +1411,7 @@ export function formatExpiresIn(expiresAt: string, now: Date = new Date()): stri
   return deltaMs >= 0 ? `expires in ${label}` : `expired ${label} ago`;
 }
 
-/** Project a `RegisterDataframeResult` to the inline handle shape. */
+/** Project a registered table with its known result total, when available. */
 export function toDataframeHandle(
   result: RegisterDataframeResult,
   totalCount?: number,
@@ -1569,7 +1573,12 @@ export async function maybeSpill<T extends Record<string, unknown>>(
     );
   let inline = selectInline();
   const dataframe = inline.bound ? await registerSpillRows(spillInput, walk) : undefined;
-  const handle = dataframe ? toDataframeHandle(dataframe, firstPage.totalCount) : undefined;
+  const matchedTotal = rowFilter
+    ? walk.scanComplete
+      ? walk.fullRows.length
+      : undefined
+    : firstPage.totalCount;
+  const handle = dataframe ? toDataframeHandle(dataframe, matchedTotal) : undefined;
   if (handle) inline = selectInline(handle);
   const warning = noteSpillStop(
     input.ctx,
@@ -1935,9 +1944,8 @@ export function asStringArray(value: unknown): string[] | undefined {
 /**
  * Axis interpretation for GeoJSON Point coordinates:
  *   - `spec` — RFC 7946 standard `[lon, lat, alt?]` (default)
- *   - `swapped` — non-conformant `[lat, lon, alt?]` deployments (e.g. the
- *     BrAPI Community Test Server). `find_locations` falls back to this
- *     reading when a bbox filter under spec ordering returns zero matches.
+ *   - `swapped` — a dialect's declared `[lat, lon, alt?]` Point convention
+ *     (e.g. the BrAPI Community Test Server).
  */
 export type CoordinateAxisOrder = 'spec' | 'swapped';
 
@@ -1964,7 +1972,8 @@ export function extractCoordinates(
   if (Array.isArray(geoCoords) && geoCoords.length >= 2) {
     const [a, b, alt] = geoCoords;
     if (typeof a === 'number' && typeof b === 'number') {
-      const [lon, lat] = axisOrder === 'spec' ? [a, b] : [b, a];
+      const isPoint = (geometry as { type?: unknown } | null | undefined)?.type === 'Point';
+      const [lon, lat] = axisOrder === 'swapped' && isPoint ? [b, a] : [a, b];
       const result: { latitude: number; longitude: number; altitude?: number } = {
         latitude: lat,
         longitude: lon,
@@ -1985,27 +1994,6 @@ export function extractCoordinates(
     return result;
   }
   return;
-}
-
-/**
- * True when a BrAPI record carries a GeoJSON `Point` geometry with a
- * 2- or 3-element numeric coordinate array. Used by the bbox swap-on-zero
- * heuristic to decide whether retrying with axes swapped is worth doing —
- * Polygon-only or geometry-less rows can't be reinterpreted.
- */
-export function hasPointGeometry(record: unknown): boolean {
-  if (typeof record !== 'object' || record === null) return false;
-  const r = record as Record<string, unknown>;
-  const geometry = (r.coordinates as { geometry?: unknown } | null | undefined)?.geometry;
-  if (!geometry || typeof geometry !== 'object') return false;
-  const g = geometry as { type?: unknown; coordinates?: unknown };
-  if (g.type !== 'Point') return false;
-  return (
-    Array.isArray(g.coordinates) &&
-    g.coordinates.length >= 2 &&
-    typeof g.coordinates[0] === 'number' &&
-    typeof g.coordinates[1] === 'number'
-  );
 }
 
 /**

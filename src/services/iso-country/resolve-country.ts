@@ -1,18 +1,14 @@
 /**
  * @fileoverview `resolveCountryName` — map a free-form English country name,
- * alias, or ISO code to its ISO 3166-1 alpha-3 code. Case-, diacritic-, and
- * punctuation-insensitive. Backs the `countryNames` input on
- * `brapi_find_locations`, since BrAPI `/locations` filters countries only by
- * alpha-3 code, not by name.
+ * alias, or ISO alphabetic code to its ISO 3166-1 entry. Case-, diacritic-,
+ * and punctuation-insensitive. Backs the `countryNames` input on
+ * `brapi_find_locations`.
  *
  * @module services/iso-country/resolve-country
  */
 
 import { ISO_3166_1_COUNTRIES } from './iso-3166-data.js';
-
-/** Inclusive code-point bounds of the combining diacritical marks block. */
-const COMBINING_MARK_LOW = 0x0300;
-const COMBINING_MARK_HIGH = 0x036f;
+import type { IsoCountry } from './types.js';
 
 /**
  * Normalize a country string for lookup: trim, lowercase, NFD-decompose and
@@ -21,40 +17,40 @@ const COMBINING_MARK_HIGH = 0x036f;
  * "COTE-D'IVOIRE" all resolve alike.
  */
 function normalize(value: string): string {
-  const decomposed = value.trim().toLowerCase().normalize('NFD');
-  let stripped = '';
-  for (const ch of decomposed) {
-    const cp = ch.codePointAt(0) ?? 0;
-    if (cp < COMBINING_MARK_LOW || cp > COMBINING_MARK_HIGH) stripped += ch;
-  }
-  return stripped.replace(/[^a-z0-9]+/g, ' ').trim();
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
 /**
  * Lazily-built lookup index: normalized name / alias / alpha-3 / alpha-2 →
- * alpha-3 code. Populated in priority passes so a real country name or alpha-3
+ * ISO entry. Populated in priority passes so a real country name or alpha-3
  * code always wins over an alpha-2 code that happens to normalize the same.
  */
-let index: Map<string, string> | undefined;
+let index: Map<string, IsoCountry> | undefined;
 
-function buildIndex(): Map<string, string> {
-  const map = new Map<string, string>();
-  const add = (key: string, alpha3: string): void => {
+function buildIndex(): Map<string, IsoCountry> {
+  const map = new Map<string, IsoCountry>();
+  const add = (key: string, country: IsoCountry): void => {
     const norm = normalize(key);
-    if (norm && !map.has(norm)) map.set(norm, alpha3);
+    if (norm && !map.has(norm)) map.set(norm, country);
   };
-  for (const c of ISO_3166_1_COUNTRIES) add(c.name, c.alpha3);
-  for (const c of ISO_3166_1_COUNTRIES) for (const alias of c.aliases) add(alias, c.alpha3);
-  for (const c of ISO_3166_1_COUNTRIES) add(c.alpha3, c.alpha3);
-  for (const c of ISO_3166_1_COUNTRIES) add(c.alpha2, c.alpha3);
+  for (const c of ISO_3166_1_COUNTRIES) add(c.name, c);
+  for (const c of ISO_3166_1_COUNTRIES) for (const alias of c.aliases) add(alias, c);
+  for (const c of ISO_3166_1_COUNTRIES) add(c.alpha3, c);
+  for (const c of ISO_3166_1_COUNTRIES) add(c.alpha2, c);
   return map;
 }
 
 /**
  * Resolve a free-form country name, alias, or ISO 3166-1 alpha-2 / alpha-3
- * code to its alpha-3 code. Returns `undefined` when nothing matches.
+ * code to its assigned codes. Returns `undefined` when nothing matches.
  */
-export function resolveCountryName(name: string): string | undefined {
+export function resolveCountryName(name: string): IsoCountry | undefined {
   const norm = normalize(name);
   if (!norm) return;
   index ??= buildIndex();

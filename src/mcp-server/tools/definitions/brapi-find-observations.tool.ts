@@ -9,7 +9,7 @@
  */
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import {
   type BrapiClient,
@@ -155,7 +155,7 @@ type Output = z.infer<typeof OutputSchema>;
 const PREFLIGHT_BULK_THRESHOLD = 5_000;
 
 const OBSERVATION_PREFLIGHT_RECOVERY =
-  "Narrow with `studies: ['…']`, `trials: ['…']`, or scope to specific `observationUnits` / `observations`. On SGN/Breedbase servers, a practical path is: first find studies containing the germplasm, then call this tool again with both `studies: ['<studyDbId>']` and `germplasm: ['<germplasmDbId>']`.";
+  'Narrow with `studies`, `trials`, `observationUnits`, or `observations`. To discover contributing study IDs where supported, call `brapi_germplasm_performance` for the target germplasm and use its `studyDbIds` to retry.';
 
 const SERVER_TO_USER: Record<string, string> = {
   // Plurals — BrAPI v2.1 spec, used by the `spec` dialect.
@@ -185,7 +185,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindObservations = tool('brapi_find_observations', {
   description:
-    'Pull observation records filtered by study, germplasm, variable, season, or observation unit. Without a studies, trials, observationUnits, or observations anchor, a GET query first runs a one-row count probe and skips the bulk pull (warnings says so) when the probe fails or reports more than 5,000 matches. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when those bounds cut it short, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
+    'Pull observation records filtered by study, germplasm, variable, season, or observation unit. SGN/Breedbase uses advertised embedded units for study or germplasm scopes. Other GET observation queries without a study, trial, observation unit, or observation anchor run a one-row count probe and skip the bulk pull when the probe fails or reports more than 5,000 rows. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when those bounds cut it short, read the staged dataframe with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -349,7 +349,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       .int()
       .nonnegative()
       .describe(
-        'Upstream observation total, or the matched observations collected on the embedded-unit route; warnings disclose incomplete scans.',
+        'Upstream observation total, or the matched observations collected on embedded-unit and client-filtered routes; warnings disclose incomplete scans.',
       ),
     returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
@@ -406,8 +406,17 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       warnings,
     );
 
+    if (input.germplasm?.length && Object.hasOwn(merged, 'germplasmDbId')) {
+      delete merged.germplasmDbId;
+      warnings.push('extraFilters.germplasmDbId was overridden by the named germplasm filter.');
+    }
+    const studyIds = scopeIds(merged.studyDbIds ?? merged.studyDbId);
+    const germplasmIds = scopeIds(merged.germplasmDbIds ?? merged.germplasmDbId);
     const embeddedRoute =
-      prefersEmbeddedObservations(dialect, profile.supported) && (input.studies?.length ?? 0) > 0;
+      prefersEmbeddedObservations(dialect, profile.supported) &&
+      (studyIds.length > 0 || germplasmIds.length > 0);
+    const fallbackGermplasm =
+      !embeddedRoute && germplasmIds.length ? new Set(germplasmIds) : undefined;
     const adapted = embeddedRoute
       ? { filters: merged, requiresEscalation: false }
       : applyDialectFiltersOrFail(ctx, dialect, 'observations', merged, warnings);
@@ -459,7 +468,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
      *   - `?studyDbId=X` (anchored)             : ~15 s OK
      */
     const hasAnchor =
-      (input.studies?.length ?? 0) > 0 ||
+      studyIds.length > 0 ||
       (input.trials?.length ?? 0) > 0 ||
       (input.observationUnits?.length ?? 0) > 0 ||
       (input.observations?.length ?? 0) > 0;
@@ -471,21 +480,24 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     if (embeddedRoute) {
       const rows: Record<string, unknown>[] = [];
       const seen = new Set<string>();
-      const effectiveStudies = merged.studyDbIds ?? merged.studyDbId ?? [];
-      const studies = Array.isArray(effectiveStudies) ? effectiveStudies : [effectiveStudies];
+      const anchors = studyIds.length ? studyIds : germplasmIds;
       let pagesFetched = 0;
-      for (const [index, study] of studies.entries()) {
+      for (const [index, id] of anchors.entries()) {
+        const unitFilters = studyIds.length
+          ? { ...merged, studyDbIds: [id] }
+          : { germplasmDbIds: [id] };
         const pulled = await collectEmbeddedObservations({
           client,
           connection,
           config,
           ctx,
           dialect,
-          filters: { ...merged, studyDbIds: [study] },
+          filters: unitFilters,
           loadLimit: MAX_SPILLOVER_ROWS - rows.length,
           pageLimit: MAX_SPILLOVER_PAGES - pagesFetched,
           warnings,
-          keep: (row) => matchesEmbeddedObservation(row, merged),
+          keep: (row) =>
+            !seen.has(row.observationDbId ?? '') && matchesEmbeddedObservation(row, merged),
         });
         embeddedRequests.push(pulled.appliedFilters);
         pagesFetched += pulled.pagesFetched;
@@ -499,19 +511,24 @@ export const brapiFindObservations = tool('brapi_find_observations', {
           rows.push(normalizeRow ? normalizeRow(row) : row);
         }
         if (
-          index < studies.length - 1 &&
+          index < anchors.length - 1 &&
           (rows.length >= MAX_SPILLOVER_ROWS || pagesFetched >= MAX_SPILLOVER_PAGES)
         ) {
           embeddedPartial = true;
           warnings.push(
-            `Embedded observation collection reached its ${MAX_SPILLOVER_ROWS}-row or ${MAX_SPILLOVER_PAGES}-page budget; ${studies.length - index - 1} remaining studies were not processed.`,
+            `Embedded observation collection reached its ${MAX_SPILLOVER_ROWS}-row or ${MAX_SPILLOVER_PAGES}-page budget; ${anchors.length - index - 1} remaining ${studyIds.length ? 'studies' : 'germplasm IDs'} were not processed.`,
           );
           break;
         }
       }
-      firstPage = { rows, hasMore: false, pagesFetched: 1, totalCount: rows.length };
+      firstPage = {
+        rows,
+        hasMore: false,
+        pagesFetched,
+        ...(!embeddedPartial && { totalCount: rows.length }),
+      };
     }
-    if (!hasAnchor && route.kind === 'get') {
+    if (!embeddedRoute && !hasAnchor && route.kind === 'get') {
       const probe = await probeObservationCount({
         client,
         connection,
@@ -525,7 +542,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         warnings.push(
           `Observations preflight count probe stalled — the upstream count operation appears unbounded for this query shape, indicating a likely full-table scan. Bulk pull skipped to avoid a long hang. ${OBSERVATION_PREFLIGHT_RECOVERY}`,
         );
-        firstPage = { rows: [], hasMore: false, pagesFetched: 0, totalCount: 0 };
+        firstPage = { rows: [], hasMore: false, pagesFetched: 0 };
         bulkPullSkipped = true;
       } else if (
         typeof probe.totalCount === 'number' &&
@@ -534,7 +551,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         warnings.push(
           `Preflight detected ${probe.totalCount} observations matching this query (no study / trial / observationUnit / observation anchor). Bulk pull skipped to avoid an upstream timeout. ${OBSERVATION_PREFLIGHT_RECOVERY} Returning only the ${probe.rows.length} row(s) the preflight request returned.`,
         );
-        firstPage = probe;
+        firstPage = normalizeRow ? { ...probe, rows: probe.rows.map(normalizeRow) } : probe;
         bulkPullSkipped = true;
       }
     }
@@ -557,15 +574,26 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       warnings,
       ...(embeddedPartial
         ? { preloadedStopReason: 'embedded observation scan stopped early (see warnings)' }
-        : {}),
+        : bulkPullSkipped && firstPage.totalCount === undefined
+          ? { preloadedStopReason: 'preflight skipped the bulk observation pull' }
+          : {}),
+      ...(fallbackGermplasm && {
+        rowFilter: (row: Record<string, unknown>) =>
+          typeof row.germplasmDbId === 'string' && fallbackGermplasm.has(row.germplasmDbId),
+      }),
       ...(normalizeRow ? { normalizeRow } : {}),
       spillRequestOptions: {
         timeoutMs: config.companionTimeoutMs,
         retryMaxAttempts: 0,
       },
     });
-    const { fullRows, dataframe, results, rowsScanned } = spill;
-    const hasMore = spill.hasMore || embeddedPartial;
+    const { fullRows, dataframe, results, rowsScanned, scanComplete, hasMore } = spill;
+    if (fallbackGermplasm && (!scanComplete || fullRows.length < rowsScanned)) {
+      const scannedOf = firstPage.totalCount === undefined ? '' : ` of ${firstPage.totalCount}`;
+      warnings.push(
+        `Germplasm checked client-side: ${fullRows.length} matched among ${rowsScanned}${scannedOf} observation rows scanned.${scanComplete ? '' : ' Remaining rows were not checked.'}`,
+      );
+    }
 
     const distributions = {
       observationVariableName: computeDistribution(fullRows, (r) =>
@@ -601,7 +629,8 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
-    const totalCount = firstPage.totalCount ?? rowsScanned;
+    const totalCount =
+      embeddedRoute || fallbackGermplasm ? fullRows.length : (firstPage.totalCount ?? rowsScanned);
     const refinementHint = buildRefinementHint(spill, distributions, {
       availableFilters: [
         'studies',
@@ -634,12 +663,12 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       ctx.enrich.notice(
         warnings.length > 0
           ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
-          : 'No observations matched the applied filters. Try narrowing with studies, germplasm, variables, or observationUnits.',
+          : 'No observations matched the applied filters. Try broadening your filters.',
       );
     discloseInlineTrim(ctx, spill, loadLimit);
     if (embeddedPartial)
       ctx.enrich.notice(
-        'Embedded observation coverage is partial; inspect warnings and retry with fewer studies.',
+        'Embedded observation coverage is partial. Inspect warnings and retry with a narrower scope.',
       );
 
     const result: Output = {
@@ -705,6 +734,13 @@ function normalizeSeason(value: unknown): string | undefined {
   return year;
 }
 
+function scopeIds(value: unknown): string[] {
+  const ids = Array.isArray(value) ? value : [value];
+  return [
+    ...new Set(ids.filter((id): id is string => typeof id === 'string' && id.trim().length > 0)),
+  ];
+}
+
 /** Apply observation-level criteria after flattening units, including filters units cannot honor. */
 function matchesEmbeddedObservation(
   row: RawObservationRow,
@@ -727,6 +763,7 @@ function matchesEmbeddedObservation(
     const values = Array.isArray(requested) ? requested : [requested];
     const actual =
       field === 'seasonDbId' ? (row.seasonDbId ?? normalizeSeason(row.season)) : row[field];
+    if (actual === undefined || actual === null) return false;
     if (
       !values.some((value) =>
         field === 'observationLevel'
@@ -740,13 +777,13 @@ function matchesEmbeddedObservation(
   if (
     filters.observationTimeStampRangeStart !== undefined &&
     (typeof timestamp !== 'string' ||
-      Date.parse(timestamp) < Date.parse(String(filters.observationTimeStampRangeStart)))
+      !(Date.parse(timestamp) >= Date.parse(String(filters.observationTimeStampRangeStart))))
   )
     return false;
   if (
     filters.observationTimeStampRangeEnd !== undefined &&
     (typeof timestamp !== 'string' ||
-      Date.parse(timestamp) > Date.parse(String(filters.observationTimeStampRangeEnd)))
+      !(Date.parse(timestamp) <= Date.parse(String(filters.observationTimeStampRangeEnd))))
   )
     return false;
   return true;
@@ -797,6 +834,8 @@ async function probeObservationCount(args: {
     if (totalCount !== undefined) result.totalCount = totalCount;
     return result;
   } catch (err) {
+    if (ctx.signal.aborted)
+      throw requestCancelled('Observation preflight cancelled by the caller.');
     if (isDialectAllDropped(err)) throw err;
     return null;
   }

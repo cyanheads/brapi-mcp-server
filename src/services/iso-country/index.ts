@@ -1,6 +1,6 @@
 /**
  * @fileoverview Public API barrel for the ISO 3166-1 country resolver — turns
- * free-form country names into alpha-3 codes for BrAPI `/locations` filters.
+ * free-form country names into ISO assignments for BrAPI `/locations` filters.
  *
  * @module services/iso-country
  */

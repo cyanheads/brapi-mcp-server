@@ -409,6 +409,27 @@ describe('brapi_germplasm_performance observation pull', () => {
     resetTestServices();
   });
 
+  it('honors an explicit lower per-study limit in coverage and text', async () => {
+    const ctx = await connect(fetcher);
+    mockPagedServer(fetcher, study139Rows());
+    const result = await brapiGermplasmPerformance.handler(
+      brapiGermplasmPerformance.input.parse({
+        germplasmDbId: '38884',
+        studyDbIds: ['139'],
+        loadLimit: 1,
+      }),
+      ctx,
+    );
+    expect(result.coverage).toMatchObject({
+      partial: true,
+      studies: [{ status: 'partial', observationCount: 1 }],
+    });
+    expect(brapiGermplasmPerformance.format(result)[0]?.text).toContain('loadLimit (1)');
+    expect(
+      brapiGermplasmPerformance.input.safeParse({ germplasmDbId: '38884', loadLimit: 0 }).success,
+    ).toBe(false);
+  });
+
   it("aggregates rows past the first page, and only the requested study's, when /observations ignores every filter", async () => {
     const ctx = await connect(fetcher);
     const other = {

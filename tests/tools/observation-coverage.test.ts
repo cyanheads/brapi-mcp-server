@@ -163,6 +163,8 @@ it.each([
                 { ...child('inside'), observationTimeStamp: '2026-01-01T00:30:00Z' },
                 { ...child('upper'), observationTimeStamp: '2026-01-01T00:30:00-01:00' },
                 { ...child('precise'), observationTimeStamp: '2026-01-01T00:00:00.000Z' },
+                { ...child('missing') },
+                { ...child('invalid'), observationTimeStamp: 'unknown' },
               ],
             },
           ],
@@ -259,4 +261,39 @@ it('matrix retains requested studies and exposes failed versus empty coverage on
   });
   expect(JSON.stringify(run.content)).toContain('bad: failed');
   expect(JSON.stringify(run.content)).toContain('empty: empty');
+});
+
+it('performance applies the per-study override during a complete germplasm unit walk', async () => {
+  const { fetcher, ctx } = await setup();
+  fetcher.mockImplementation(async (url: string) => {
+    const u = new URL(url);
+    if (u.pathname.includes('/germplasm/')) return jsonResponse(envelope({ germplasmDbId: 'g1' }));
+    const data =
+      u.searchParams.get('page') === '0'
+        ? [unit('s1', [child('first'), child('overflow', '9')])]
+        : [unit('s2', [child('second', '2')])];
+    return jsonResponse(envelope({ data }, { totalCount: 2 }));
+  });
+  const run = await runToolContract(
+    {
+      ...performance,
+      handler: (input, c) => performance.handler(input, { ...c, state: ctx.state }),
+    },
+    { germplasmDbId: 'g1', loadLimit: 1 },
+  );
+  expect(run.isError).not.toBe(true);
+  expect(run.structuredContent).toMatchObject({
+    truncated: true,
+    perVariable: [{ n: 2, mean: 1 }],
+    coverage: {
+      partial: true,
+      scan: { complete: true, pagesFetched: 2 },
+      studies: [
+        { studyDbId: 's1', status: 'partial', observationCount: 1 },
+        { studyDbId: 's2', status: 'contributed', observationCount: 1 },
+      ],
+    },
+  });
+  expect(JSON.stringify(run.content)).toContain('reached per-study loadLimit');
+  expect(JSON.stringify(run.content)).toContain('Observation collection truncated.');
 });

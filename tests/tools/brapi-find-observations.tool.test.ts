@@ -313,7 +313,10 @@ describe('brapi_find_observations tool', () => {
       expect(result.hasMore).toBe(true);
       expect(result.dataframe).toBeUndefined();
       const enrichment = getEnrichment(ctx);
-      expect(enrichment).toMatchObject({ returnedCount: 1, totalCount: total });
+      expect(enrichment).toMatchObject({
+        returnedCount: 1,
+        totalCount: 'germplasm' in input ? 1 : total,
+      });
       for (const key of ['truncated', 'shown', 'cap']) expect(enrichment).not.toHaveProperty(key);
       const preflight = (enrichment.warnings as string[]).find((w) => w.startsWith('Preflight'));
       expect(preflight).toMatch(new RegExp(`^Preflight detected ${total} observations`));
@@ -330,20 +333,19 @@ describe('brapi_find_observations tool', () => {
       throw new Error('upstream stalled');
     });
 
-    await brapiFindObservations.handler(
+    const result = await brapiFindObservations.handler(
       brapiFindObservations.input.parse({ variables: ['var-1'] }),
       ctx,
     );
 
     expect(calls).toBe(1);
+    expect(result.hasMore).toBe(true);
     expect(getEnrichment(ctx).returnedCount).toBe(0);
     expect(getEnrichment(ctx).totalCount).toBe(0);
     expect(
       getEnrichment(ctx).warnings.some((w) => /Observations preflight count probe stalled/.test(w)),
     ).toBe(true);
-    expect(getEnrichment(ctx).warnings.join('\n')).toContain(
-      'find studies containing the germplasm',
-    );
+    expect(getEnrichment(ctx).warnings.join('\n')).toContain('brapi_germplasm_performance');
   });
 
   it('skips preflight when the query has a study scope', async () => {
@@ -467,6 +469,123 @@ describe('brapi_find_observations inline budget (#66)', () => {
     Buffer.byteLength(JSON.stringify(s.results), 'utf8');
   const truncationKeys = ['truncated', 'shown', 'cap'] as const;
 
+  it('renders a flat filter trailer with its existing labels and value order', async () => {
+    const ctx = await connect(fetcher);
+    serve([obsRow()]);
+    const { text } = await call(ctx, { studies: ['s-1', 's-2'] });
+    expect(text).toContain('**Applied Filters:**\n- **studies:** s-1, s-2');
+  });
+
+  it('walks one scoped SGN unit list per germplasm, retaining matching distinct observations', async () => {
+    const ctx = await connect(fetcher, ['observations', 'observationunits'], 'CassavaBase');
+    const requested: string[][] = [];
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const id = u.searchParams.get('germplasmDbId') ?? '';
+      const page = u.searchParams.get('page') ?? '';
+      requested.push([u.pathname, id, page]);
+      const rows =
+        id === 'g-1' && page === '0'
+          ? Array.from({ length: 10 }, (_, i) => ({
+              observationUnitDbId: `empty-${i}`,
+              germplasmDbId: id,
+              observations: [],
+            }))
+          : [
+              {
+                observationUnitDbId: 'ou-1',
+                germplasmDbId: id,
+                studyDbId: 's-1',
+                observations: [
+                  { observationDbId: 'obs-0', observationVariableDbId: 'var-1', value: 0 },
+                  { observationDbId: 'obs-0', observationVariableDbId: 'var-1', value: 0 },
+                  { observationDbId: `obs-${id}`, observationVariableDbId: 'var-1', value: 0 },
+                  { observationDbId: 'other', observationVariableDbId: 'var-2', value: 1 },
+                ],
+              },
+            ];
+      return jsonResponse(envelope({ data: rows }, { totalCount: id === 'g-1' ? 11 : 1 }));
+    });
+
+    const { result, structured, text } = await call(ctx, {
+      germplasm: ['g-1', 'g-2', 'g-1'],
+      variables: ['var-1'],
+      loadLimit: 2,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(requested).toEqual([
+      ['/brapi/v2/observationunits', 'g-1', '0'],
+      ['/brapi/v2/observationunits', 'g-1', '1'],
+      ['/brapi/v2/observationunits', 'g-2', '0'],
+    ]);
+    expect(structured).toMatchObject({
+      totalCount: 3,
+      returnedCount: 2,
+      hasMore: true,
+      results: [
+        { observationDbId: 'obs-0', value: '0' },
+        { observationDbId: 'obs-g-1', value: '0' },
+      ],
+      dataframe: { rowCount: 3, totalCount: 3 },
+    });
+    expect(text).toContain('obs-0');
+  });
+
+  it('reports nested filters as JSON values and broadens a complete zero-match scan', async () => {
+    const ctx = await connect(fetcher, ['observations', 'observationunits'], 'CassavaBase');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+    const { structured, text } = await call(ctx, {
+      studies: ['s-1'],
+      observationLevels: ['plant'],
+    });
+    expect(structured.appliedFilters).toMatchObject({
+      upstreamRequests: [{ studyDbId: 's-1', includeObservations: true }],
+      clientSide: { studyDbIds: ['s-1'], observationLevels: ['plant'] },
+    });
+    expect(text).toContain('"studyDbId":"s-1"');
+    expect(text).toContain('"includeObservations":true');
+    expect(text).toContain('"observationLevels":["plant"]');
+    expect(structured.notice).toMatch(/broaden/i);
+    expect(text).toMatch(/broaden/i);
+  });
+
+  it('matches germplasm before counting, distributing, or staging fallback pages', async () => {
+    const ctx = await connect(fetcher);
+    serve([
+      obsRow({ germplasmDbId: 'other', germplasmName: 'Other' }),
+      obsRow({ germplasmDbId: null, germplasmName: 'Unknown' }),
+      ...smallRows(2),
+    ]);
+    const { structured, text } = await call(ctx, {
+      studies: ['s-1'],
+      germplasm: ['g-1'],
+      loadLimit: 1,
+    });
+    expect(structured).toMatchObject({
+      totalCount: 2,
+      returnedCount: 1,
+      dataframe: { rowCount: 2, totalCount: 2 },
+      distributions: { germplasmName: { TME419: 2 } },
+    });
+    expect(structured.distributions).not.toHaveProperty('germplasmName.Other');
+    expect(text).toContain('TME419');
+  });
+
+  it('propagates cancellation during the preflight probe', async () => {
+    const ctx = await connect(fetcher);
+    const controller = new AbortController();
+    fetcher.mockImplementation(async () => {
+      controller.abort();
+      throw new DOMException('Aborted', 'AbortError');
+    });
+    await expect(
+      brapiFindObservations.handler(brapiFindObservations.input.parse({ germplasm: ['g-1'] }), {
+        ...ctx,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+  });
+
   it('trims results[] to the byte budget and stages every row from the in-memory page', async () => {
     const ctx = await connect(fetcher);
     serve(wideRows(8));
@@ -534,14 +653,15 @@ describe('brapi_find_observations inline budget (#66)', () => {
     expect(resultsBytes(structured)).toBeLessThanOrEqual(24_000);
     expect(structured).toMatchObject({
       returnedCount: 4,
-      totalCount: 50_000,
+      totalCount: 8,
       hasMore: true,
       truncated: true,
       shown: 4,
-      dataframe: { rowCount: 8, truncated: true, totalCount: 50_000 },
+      dataframe: { rowCount: 8, truncated: true },
     });
     const preflight = (structured.warnings as string[]).find((w) => w.startsWith('Preflight'));
     expect(preflight).toContain('Returning only the 8 row(s) the preflight request returned.');
+    expect(structured.dataframe).not.toHaveProperty('totalCount');
     expect(preflight).not.toContain('1-row preflight');
     expect(text).toContain('Returning only the 8 row(s) the preflight request returned.');
   });

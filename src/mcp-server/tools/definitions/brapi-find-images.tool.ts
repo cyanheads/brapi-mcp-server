@@ -144,7 +144,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindImages = tool('brapi_find_images', {
   description:
-    'Filter images by observation unit, observation, study, descriptive ontology term, file name, or MIME type. Returns metadata only — use brapi_get_image to fetch bytes inline. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
+    'Filter images by observation unit, observation, study, descriptive ontology term, file name, or MIME type. Named mimeTypes are verified case-insensitively on each scanned row. Returns metadata only — use brapi_get_image to fetch bytes inline. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -296,7 +296,15 @@ export const brapiFindImages = tool('brapi_find_images', {
       .number()
       .int()
       .nonnegative()
-      .describe('Total rows reported by the server, else the rows scanned.'),
+      .describe(
+        'Verified matches among scanned rows when mimeTypes is set, else the upstream total or rows scanned.',
+      ),
+    upstreamTotalCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Upstream row count before local MIME verification, when reported.'),
     returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
       .record(z.string(), z.unknown())
@@ -312,6 +320,7 @@ export const brapiFindImages = tool('brapi_find_images', {
   },
 
   enrichmentTrailer: {
+    upstreamTotalCount: { label: 'Upstream total' },
     refinementHint: { render: renderAdvisoryTrailer },
     appliedFilters: { render: renderAppliedFiltersTrailer(SERVER_TO_USER) },
     warnings: { render: renderWarningsTrailer },
@@ -359,6 +368,11 @@ export const brapiFindImages = tool('brapi_find_images', {
     });
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
+    const mimeTypes = input.mimeTypes?.length
+      ? new Set(input.mimeTypes.map((value) => value.toLowerCase()))
+      : undefined;
+    let mimeContradictions = 0;
+    let mimeUnverified = 0;
     const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'images');
     const firstPage = await loadInitialFindPage<Record<string, unknown>>(
       client,
@@ -384,8 +398,25 @@ export const brapiFindImages = tool('brapi_find_images', {
       bridge,
       warnings,
       ...(normalizeRow ? { normalizeRow } : {}),
+      ...(mimeTypes && {
+        rowFilter: (row) => {
+          const mimeType = asString(row.mimeType);
+          if (!mimeType?.trim()) {
+            mimeUnverified++;
+            return false;
+          }
+          if (mimeTypes.has(mimeType.toLowerCase())) return true;
+          mimeContradictions++;
+          return false;
+        },
+      }),
     });
     const { fullRows, dataframe, results, hasMore, rowsScanned } = spill;
+    if (mimeContradictions || mimeUnverified) {
+      warnings.push(
+        `MIME verification scanned ${rowsScanned} row(s): ${mimeContradictions} contradicted the filter and ${mimeUnverified} could not be verified because their MIME type was missing.`,
+      );
+    }
 
     const distributions = {
       mimeType: computeDistribution(fullRows, (r) => asString(r.mimeType)),
@@ -400,12 +431,6 @@ export const brapiFindImages = tool('brapi_find_images', {
 
     checkFilterMatchRates(warnings, fullRows.length, [
       {
-        paramName: 'mimeTypes',
-        requestedValues: input.mimeTypes,
-        distribution: distributions.mimeType,
-        caseInsensitive: true,
-      },
-      {
         paramName: 'descriptiveOntologyTerms',
         requestedValues: input.descriptiveOntologyTerms,
         distribution: distributions.descriptiveOntologyTerms,
@@ -415,7 +440,7 @@ export const brapiFindImages = tool('brapi_find_images', {
       ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
     ]);
 
-    const totalCount = firstPage.totalCount ?? rowsScanned;
+    const totalCount = mimeTypes ? fullRows.length : (firstPage.totalCount ?? rowsScanned);
     const refinementHint = buildRefinementHint(spill, distributions, {
       availableFilters: [
         'images',
@@ -431,17 +456,24 @@ export const brapiFindImages = tool('brapi_find_images', {
     const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
     ctx.enrich({
       totalCount,
+      ...(mimeTypes &&
+        firstPage.totalCount !== undefined && {
+          upstreamTotalCount: firstPage.totalCount,
+        }),
       returnedCount: results.length,
       appliedFilters,
       warnings,
       ...(refinementHint ? { refinementHint } : {}),
     });
-    if (results.length === 0)
+    if (fullRows.length === 0) {
       ctx.enrich.notice(
-        warnings.length > 0
-          ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
-          : 'No images matched the applied filters. Try broadening observationUnits, studies, mimeTypes, or descriptiveOntologyTerms.',
+        mimeTypes && (mimeUnverified > 0 || !spill.scanComplete)
+          ? 'No verified images matched among the rows scanned. Check coverage and MIME metadata in the warnings.'
+          : warnings.length > 0
+            ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
+            : 'No images matched the applied filters. Try broadening observationUnits, studies, mimeTypes, or descriptiveOntologyTerms.',
       );
+    }
     discloseInlineTrim(ctx, spill, loadLimit);
 
     const result: Output = {

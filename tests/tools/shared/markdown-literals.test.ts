@@ -145,6 +145,20 @@ describe('shared Markdown contexts', () => {
     assertLiteral(renderAppliedFiltersTrailer({})({ [payload]: [payload] }), payload);
   });
 
+  it('roundtrips nested applied filters as JSON code spans', () => {
+    const filters = {
+      upstreamRequests: [{ studyDbId: 's-1', includeObservations: true }, { studyDbId: 's-2' }],
+      clientSide: { variables: ['x`[unsafe](https://example.org)\u2028y', 'a,b'], enabled: false },
+    };
+    const rendered = renderAppliedFiltersTrailer({})(filters);
+    const parsed: unknown[] = [];
+    marked.walkTokens(marked.lexer(rendered), (token) => {
+      if (token.type === 'codespan') parsed.push(JSON.parse(token.text));
+    });
+    expect(parsed).toEqual([filters.upstreamRequests, filters.clientSide]);
+    expect(marked.parse(rendered)).not.toContain('<a href=');
+  });
+
   it('roundtrips arbitrary fenced source without introducing a second block', () => {
     const source = '```\n# heading\n````\nsource';
     const tokens = marked.lexer(fenced(source, 'text'));

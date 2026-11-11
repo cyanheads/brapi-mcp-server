@@ -73,7 +73,11 @@ export interface BrapiDialect {
    * Omit on dialects with no known dead routes (the default `spec` dialect).
    */
   readonly disabledSearchEndpoints?: ReadonlySet<string>;
+  /** Whether the location country filter accepts ISO alpha-2 and numeric alongside alpha-3. */
+  readonly expandLocationCountryCodes?: true;
   readonly id: string;
+  /** Verified compatibility for locations with Points stored as latitude then longitude. */
+  readonly locationPointAxisOrder?: 'swapped';
   /**
    * Aggregate confidence breakdown for the dialect's filter-translation
    * table. `verified` entries were empirically narrowed against a live server

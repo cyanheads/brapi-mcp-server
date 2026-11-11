@@ -34,6 +34,9 @@ describe('brapi://filters/{endpoint} resource', () => {
     const listing = await brapiFiltersResource.list!({} as never);
     expect(listing.resources.length).toBeGreaterThanOrEqual(7);
     const studiesEntry = listing.resources.find((r) => r.uri === 'brapi://filters/studies');
-    expect(studiesEntry).toBeDefined();
+    expect(studiesEntry).toMatchObject({
+      name: 'BrAPI filter catalog · studies',
+      title: 'BrAPI filter catalog',
+    });
   });
 });

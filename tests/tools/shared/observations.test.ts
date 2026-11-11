@@ -573,6 +573,70 @@ describe('pullStudyObservations', () => {
 
   describe('fallback chain and failure contract', () => {
     it.each([
+      ['embedded', 1],
+      ['embedded', 2],
+      ['germplasm', 1],
+      ['germplasm', 2],
+    ] as const)(
+      'discloses %s fallback coverage from totalPages=%i without a row total',
+      async (mode, totalPages) => {
+        upstream((url) => {
+          if (url.pathname.endsWith('/observations') && url.searchParams.has('studyDbIds'))
+            return emptyPage();
+          const unit = { observationUnitDbId: 'u1', germplasmDbId: 'g1', studyDbId: 's1' };
+          const isUnits = url.pathname.endsWith('/observationunits');
+          return jsonResponse({
+            metadata: {
+              pagination: {
+                currentPage: 0,
+                pageSize: 1,
+                totalPages: isUnits && mode === 'germplasm' ? 1 : totalPages,
+              },
+            },
+            result: {
+              data: isUnits
+                ? [{ ...unit, ...(mode === 'embedded' ? { observations: [row(0, 'g1')] } : {}) }]
+                : [row(0, 'g1')],
+            },
+          });
+        });
+        const result = await pullStudyObservations(
+          studyArgs({ config: { pageSize: 1 }, loadLimit: 50_000 }),
+        );
+        expect(result?.observations.map((observation) => observation.value)).toEqual(['0']);
+        if (totalPages === 1) {
+          expect(result?.truncation).toBeUndefined();
+        } else {
+          expect(result?.truncation).toMatchObject({
+            scanned: 1,
+            reason: expect.stringContaining('returned only the first page'),
+          });
+          expect(result?.truncation).not.toHaveProperty('totalCount');
+        }
+      },
+    );
+
+    it('bounds the legacy fallback page and reports a known unit shortfall', async () => {
+      const requests = upstream((url) => {
+        if (url.pathname.endsWith('/observations')) return emptyPage();
+        return pageOf(
+          url,
+          Array.from({ length: 3 }, (_, i) => ({
+            observationUnitDbId: `unit-${i}`,
+            germplasmDbId: 'g1',
+            studyDbId: 's1',
+            observations: [row(i, 'g1')],
+          })),
+        );
+      });
+      const result = await pullStudyObservations(
+        studyArgs({ config: { pageSize: 2 }, loadLimit: 50_000 }),
+      );
+      expect(requests.at(-1)?.searchParams.get('pageSize')).toBe('2');
+      expect(result?.observations.map((obs) => obs.value)).toEqual(['0', '1']);
+      expect(result?.truncation).toMatchObject({ scanned: 2, totalCount: 3 });
+    });
+    it.each([
       ['/observations 0 rows and 0 units is an empty success', emptyPage, /No observations found/],
       [
         'a /observations 5xx with 0 units stays an empty success naming the failure and its status',

@@ -37,6 +37,8 @@ import {
   buildRequestOptions,
   extractRows,
   isUpstreamNotFound,
+  LoadLimitInput,
+  MAX_SPILLOVER_ROWS,
   NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
@@ -124,6 +126,10 @@ const OutputSchema = z.object({
     .describe('Number of distinct studies that contributed any observation.'),
   studyDbIds: z.array(z.string()).describe('Distinct studyDbIds that contributed observations.'),
   coverage: ObservationCoverageSchema,
+  truncated: z
+    .boolean()
+    .optional()
+    .describe('True when an observation scan stopped early; coverage records what was collected.'),
   perVariable: z
     .array(PerVariableSchema)
     .describe('Per-variable aggregates, sorted by observationVariableDbId.'),
@@ -253,6 +259,9 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
       .describe(
         'Optional subset of observationVariableDbIds to aggregate. Omit to include every variable observed for the germplasm.',
       ),
+    loadLimit: LoadLimitInput.describe(
+      `Cap on matching observations collected per study, including during automatic discovery. Defaults to ${MAX_SPILLOVER_ROWS.toLocaleString('en-US')}. A study that stops at it is reported as partial.`,
+    ),
   }),
   inputAliases: {
     studyDbId: 'studyDbIds',
@@ -281,7 +290,7 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
 
     const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
-    const loadLimit = config.loadLimit;
+    const loadLimit = input.loadLimit ?? MAX_SPILLOVER_ROWS;
     const warnings: string[] = [];
 
     /** Explicit studies bypass discovery; SGN auto mode walks scoped units. */
@@ -345,7 +354,7 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
       };
       if (pulled.cappedStudyDbIds.length)
         warnings.push(
-          `${pulled.cappedStudyDbIds.length} studies reached the per-study observation limit (${loadLimit}); narrow variables or select explicit studies for further collection.`,
+          `${pulled.cappedStudyDbIds.length} studies reached the per-study observation limit (${loadLimit}); raise loadLimit, narrow variables, or select explicit studies for further collection.`,
         );
     } else {
       const discovery = await discoverStudiesForGermplasm({
@@ -436,6 +445,12 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
       perVariable,
       warnings,
     };
+    if (
+      coverage.scan?.complete === false ||
+      coverage.studies.some((study) => study.status === 'partial')
+    ) {
+      result.truncated = true;
+    }
     if (germplasmName) result.germplasmName = germplasmName;
     return result;
   },
@@ -451,6 +466,8 @@ export const brapiGermplasmPerformance = tool('brapi_germplasm_performance', {
     );
     lines.push(literal`studyDbIds: ${result.studyDbIds.join(', ') || '—'}`);
     lines.push(...renderObservationCoverage(result.coverage));
+    if (result.truncated)
+      lines.push('Observation collection truncated. See coverage for the affected scans.');
     lines.push('');
 
     if (result.perVariable.length === 0) {

@@ -451,6 +451,21 @@ describe('brapi_build_phenotype_matrix observation pull', () => {
     resetTestServices();
   });
 
+  it('completes the ordinary study scan by default beyond the finder preview limit', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => pageOf(assertHost(url), study139Rows()));
+    const result = await brapiBuildPhenotypeMatrix.handler(
+      brapiBuildPhenotypeMatrix.input.parse({ studies: ['139'] }),
+      ctx,
+    );
+    expect(result.coverage).toMatchObject({
+      partial: false,
+      studies: [{ status: 'contributed', observationCount: 1427 }],
+    });
+    expect(result.observationCount).toBe(1427);
+    expect(brapiBuildPhenotypeMatrix.format(result)[0]?.text).toContain('1427 observations');
+  });
+
   it('an upstream ignoring every filter: pages past the first page to the germplasm’s rows, keeping only the requested study’s', async () => {
     const ctx = await connect(fetcher);
     // The global set: another study's row for the same germplasm sits first.

@@ -401,7 +401,7 @@ describe('brapi_find_germplasm free-text scan scope', () => {
     expect(structured.totalCount).toBe(479);
     expect(structured.hasMore).toBe(true);
     // The dataframe holds the 100 matches, not the 479 scanned rows.
-    expect(structured.dataframe).toMatchObject({ rowCount: 100, totalCount: 479 });
+    expect(structured.dataframe).toMatchObject({ rowCount: 100, totalCount: 100 });
     expect(structured.distributions).toMatchObject({ commonCropName: { Cassava: 100 } });
     expect((structured.results as { germplasmName: string }[])[0]?.germplasmName).toBe('UG1201111');
     expect(structured.warnings).toContain(

@@ -32,6 +32,7 @@ import {
   DataframeHandleSchema,
   ExtraFiltersInput,
   LoadLimitInput,
+  MAX_SPILLOVER_ROWS,
   NonBlankString,
   renderAdvisoryTrailer,
   renderDataframeHandle,
@@ -245,7 +246,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
         'How to aggregate replicate observations (multiple readings of the same variable on the same germplasm). `mean` and `median` attempt numeric conversion and skip non-numeric values (e.g. categorical traits). `first` keeps the first value seen. `all` keeps every replicate as a separate row (produces long-form output even when shape is "wide"). Default: `mean`.',
       ),
     loadLimit: LoadLimitInput.describe(
-      'Cap on matching observations collected per study. Omit for the deployment default. A study that stops at it is reported as truncated.',
+      `Cap on matching observations collected per study. Defaults to ${MAX_SPILLOVER_ROWS.toLocaleString('en-US')}. A study that stops at it is reported as truncated.`,
     ),
     extraFilters: ExtraFiltersInput,
   }),
@@ -298,7 +299,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
 
     const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
-    const loadLimit = input.loadLimit ?? config.loadLimit;
+    const loadLimit = input.loadLimit ?? MAX_SPILLOVER_ROWS;
 
     const warnings: string[] = [];
     // Each study's rows, already narrowed to germplasm / variables by the pull.

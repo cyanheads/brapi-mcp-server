@@ -245,6 +245,9 @@ function stripNulls(value: unknown): unknown {
   return out;
 }
 
-export const cassavabaseDialect = createSgnFamilyDialect('cassavabase', 'CassavaBase');
+export const cassavabaseDialect: BrapiDialect = {
+  ...createSgnFamilyDialect('cassavabase', 'CassavaBase'),
+  expandLocationCountryCodes: true,
+};
 
 export const breedbaseDialect = createSgnFamilyDialect('breedbase', 'Breedbase/SGN');
