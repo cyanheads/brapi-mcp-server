@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.0](changelog/0.12.x/0.12.0.md) — 2026-11-20
+
+Search across BrAPI connections with source coverage and retain study context in phenotype matrices and observation review.
+
 ## [0.11.0](changelog/0.11.x/0.11.0.md) — 2026-11-10 · ⚠️ Breaking
 
 Correct BrAPI filtering and genotype exports, and keep concurrently staged dataframes queryable.
