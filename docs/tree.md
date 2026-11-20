@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-11-11 06:17:30
+Generated on: 2026-11-20 22:40:42
 
 ```text
 brapi-mcp-server/
@@ -177,6 +177,7 @@ brapi-mcp-server/
 │   │       │   ├── brapi-dataframe-query.tool.ts
 │   │       │   ├── brapi-describe-filters.tool.ts
 │   │       │   ├── brapi-export-genotype-matrix.tool.ts
+│   │       │   ├── brapi-federated-find.tool.ts
 │   │       │   ├── brapi-find-genotype-calls.tool.ts
 │   │       │   ├── brapi-find-germplasm.tool.ts
 │   │       │   ├── brapi-find-images.tool.ts
@@ -202,6 +203,7 @@ brapi-mcp-server/
 │   │           ├── genotype-calls.ts
 │   │           ├── inline-preview.ts
 │   │           ├── markdown-literals.ts
+│   │           ├── observation-review.ts
 │   │           ├── observations.ts
 │   │           ├── orientation-envelope.ts
 │   │           ├── pedigree-diagram.ts
@@ -309,6 +311,7 @@ brapi-mcp-server/
 │   │   ├── brapi-dataframe-query.tool.test.ts
 │   │   ├── brapi-describe-filters.tool.test.ts
 │   │   ├── brapi-export-genotype-matrix.tool.test.ts
+│   │   ├── brapi-federated-find.tool.test.ts
 │   │   ├── brapi-find-genotype-calls.tool.test.ts
 │   │   ├── brapi-find-germplasm.tool.test.ts
 │   │   ├── brapi-find-images.tool.test.ts

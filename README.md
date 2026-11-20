@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/brapi-mcp-server</h1>
   <p><b>A collaborative BrAPI v2.1 workspace for multi-agent research via MCP. Search studies, germplasm, genotypes, and more across Breedbase, T3, Sweetpotatobase, and any BrAPI v2-compliant server.</b>
-  <div>25 Tools • 6 Resources • 2 Prompts</div>
+  <div>26 Tools • 6 Resources • 2 Prompts</div>
   </p>
 </div>
 
@@ -45,6 +45,7 @@ Plant-breeding data from any BrAPI (Breeding API) v2 server — Breedbase instan
 | `brapi_walk_pedigree` | Walk ancestry or descendancy as a deduplicated DAG with cycle detection |
 | `brapi_find_variables` | Find observation variables by name, trait class, or ontology term, with free-text ranking |
 | `brapi_find_observations` | Pull observation records by study, germplasm, variable, season, or unit |
+| `brapi_federated_find` | Find studies, germplasm, or observations across connection aliases with source coverage |
 | `brapi_find_images` | Find image metadata by unit, observation, study, ontology term, or MIME type |
 | `brapi_get_image` | Fetch up to 5 images inline as image content blocks |
 | `brapi_find_locations` | Find research stations by country, type, abbreviation, or bounding box |
@@ -90,6 +91,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - `baseUrl` and `auth` are optional: omitted values come from `BRAPI_<ALIAS>_*` env vars, the built-in aliases, then `BRAPI_DEFAULT_*` (see [Per-alias credentials](#per-alias-credentials)); `alias` (default `default`, pattern `^[a-zA-Z0-9_-]+$`) keeps several servers registered at once; `auth.mode` is `none`, `bearer`, `api_key`, `sgn` (Breedbase `/token` exchange), or `oauth2` (client credentials)
 - Returns the orientation envelope: `server` identity, `auth` summary, `capabilities` (`supported`, `notableGaps`), active `dialect`, `content` counts, `attribution` for built-in servers, and `nextToolSuggestions` naming the entry-point finders this server can serve
 - Typed errors: `auth_session_required`, `auth_base_url_mismatch`, `alias_base_url_unset`, `alias_base_url_invalid`, `private_address_blocked`, `auth_token_exchange_failed`, `auth_no_access_token`, `upstream_unauthorized`, `upstream_forbidden`, `capability_discovery_unavailable` (retryable); a failed connect leaves any earlier registration under the alias intact
+- When both discovery routes return HTTP 404, `capability_discovery_not_found` asks for the full BrAPI base URL, including its version prefix. A root URL gets a candidate ending in `/brapi/v2`.
 - Optional for an alias the server has a URL for (`default` when `BRAPI_DEFAULT_BASE_URL` is set, a built-in, or a `BRAPI_<ALIAS>_BASE_URL` alias): any other tool or resource connects it on first use, as `brapi_connect` with no `baseUrl` or `auth` would, and concurrent first calls share one connect. An alias with no URL of its own still fails `unknown_alias`, even with `BRAPI_DEFAULT_*` set, so a mistyped alias never reaches the default server. Those tools and resources declare the connect failures they can hit (the token, discovery, auth-wall, `alias_base_url_invalid`, and `private_address_blocked` errors above), each with a recovery hint
 
 ---
@@ -127,6 +129,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 ### `brapi_find_germplasm` <sub>tool</sub>
 
 - Filters: `names`, `germplasmDbIds`, `germplasmPUIs`, `accessionNumbers`, `crops`, `synonyms`, `collections`, `genus`, `species`; `text` is a client-side substring match on name, PUI, accession, display name, and synonyms that drops non-matching rows. Its first request uses `BRAPI_PAGE_SIZE` independently of inline `loadLimit`; it scans every upstream row when the set fits one dataframe walk (50,000 rows at the default page size). Above that, a first-page miss stops after one request and reports the actual rows scanned; it does not establish absence from the catalog, so pair it with a server-side filter.
+- Use `studies`, `trials`, or `programs` to scope the result. When the finder has a total from a single route, bounded count probes compare each scope with the same filters minus that scope. A lower count confirms narrowing. Equal, unavailable, or inconclusive counts leave the scope unverified and appear in warnings.
 - `distributions` over `commonCropName`, `genus`, `species`, `collection`, `countryOfOriginCode`
 
 ---
@@ -140,7 +143,8 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 ### `brapi_walk_pedigree` <sub>tool</sub>
 
-- 1–20 root `germplasmDbIds` (`germplasmDbId` also accepted); `direction` is `ancestors` (default), `descendants`, or `both`; `maxDepth` 1–10 (default 3); the walk stops at 1,000 nodes or 10,000 edges and sets `truncated`
+- Supply at least one `germplasmDbIds` value (`germplasmDbId` also accepted). The first 20 distinct roots are walked in input order. Pass `deferredRoots` into a follow-up call.
+- `direction` is `ancestors` (default), `descendants`, or `both`. `maxDepth` defaults to 3 and positive values above 10 use 10, reported in the output. The walk stops at 1,000 nodes or 10,000 edges and sets `truncated`.
 - `both` is the union of the two walks: ancestors expand only through `/pedigree` and descendants only through `/progeny`, so a descendant's other parent is not pulled in
 - One edge per parent–child pair; `cycleCount` counts the edges marked `isCycle`, where a germplasm becomes its own ancestor — shared ancestors and siblings are not cycles
 - `leafCount` counts graph terminals, including depth-boundary nodes; `confirmedLeafCount` counts non-root nodes whose relevant lookups successfully returned no relatives. `frontier` / `frontierCount` distinguish depth-limited, safety-skipped, failed and unsupported directions; `deadEndCount` still counts nodes with failed lookups
@@ -155,6 +159,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 - Filters: `variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`, `studies`, `methods`, `scales`, `crop`. Multiple distinct studies are unioned by variable ID with `studyDbIds` provenance under one shared page, row and time budget. `studyCoverage` reports complete, partial, failed and unprocessed studies; successful studies remain available when another fails.
 - `text` ranks every fetched row and moves matches to the top without dropping the rest; `ontologyCandidates` lists the ranked matches, each with `source` (`puiMatch`, `nameMatch`, `synonymMatch`, `traitClassMatch`)
+- Exact PUI matches lead, then exact normalized names. Equally scored name matches favor the shorter normalized name. Matching ignores a trailing pipe-delimited PUI when it matches the record's PUI. Returned names retain the original text.
 - `distributions` over `ontologyDbId`, `traitClass`, `scaleName`
 
 ---
@@ -165,6 +170,14 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - Study- or germplasm-scoped SGN/Breedbase queries use advertised `/observationunits?includeObservations=true`, preserving zero-valued measurements. Unit totals drive paging; child fields take precedence over inherited unit metadata, and repeated observation IDs are counted once. Observation-level filters are checked after flattening; `appliedFilters` separates upstream requests from client-side criteria on both output surfaces
 - Outside that embedded-unit route, a GET query with no `studies`, `trials`, `observationUnits`, or `observations` anchor runs a one-row count probe first and skips the bulk pull when the probe fails or reports more than 5,000 matches; `warnings` says so. Germplasm predicates are checked before staging, and counts describe confirmed matches. When collection cannot proceed, `brapi_germplasm_performance` can supply contributing study IDs for a study-scoped retry
 - `distributions` over `observationVariableName`, `studyName`, `germplasmName`, `observationLevel`, `season`
+
+---
+
+### `brapi_federated_find` <sub>tool</sub>
+
+- Pass `aliases` and `query: { entity, filters }`. The entity is `studies`, `germplasm`, or `observations`. Use the canonical names in the entity's `filters` schema (for example, `studies`). BrAPI ID aliases apply only at the top level of standalone finder calls. Pass the filters and set the merged preview's `loadLimit` at the top level.
+- Rows retain `sources` with each source's alias, local DbId, and record. Germplasm groups across aliases only when an exact nonblank PUI occurs once per contributing alias. `conflicts` names fields whose non-null values differ. Equal local IDs or names alone leave the records separate.
+- Check `coverage` for partial, failed, or skipped aliases. `collectedCount` counts source rows and `mergedCount` counts grouped output rows, including rows staged when the inline preview is cut. Interpret these counts within the reported coverage.
 
 ---
 
@@ -179,7 +192,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 ### `brapi_get_image` <sub>tool</sub>
 
-- 1–5 `imageDbIds` per call, up to 20 MB each; `images_unsupported` when the server doesn't advertise `/images`
+- Supply at least one `imageDbIds` value. The first five distinct IDs are fetched in input order, up to 20 MB each. Pass `deferredImageDbIds` into a follow-up call. `images_unsupported` fires when the server doesn't advertise `/images`.
 - Each image's `source` is `imagecontent` or the `imageURL` fallback. Both sources require an effective `image/*` MIME type (case and parameters normalized; metadata is used when the byte response has no type). Non-image responses and fetch failures land in per-image `errors[]`; successful siblings still return
 - Bytes appear once as `content[]` image blocks. `images[]` carries metadata, MIME, byte size and source only; `format()` renders metadata without repeating base64
 
@@ -206,7 +219,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - Needs at least one of `variantSetDbId`, `variantSetDbIds`, `germplasmDbIds`, `callSetDbIds`, `variantDbIds` (`no_filters` otherwise); optional `callFormat` (`VCF`, `FLAPJACK`, `DARTSEQ`, `JSON`)
 - Variant sets are listed by `brapi_raw_get({ path: "/variantsets" })`, optionally with `params.studyDbId`; on Breedbase-family servers they belong to genotyping projects that `brapi_find_studies` does not list
 - `distributions` over `callSetName`, `variantName`, `variantSetDbId`, plus the server's `callFormatting`; `search_endpoint_disabled` when the active dialect marks `POST /search/calls` as dead
-- The upstream pull stops at `BRAPI_GENOTYPE_CALLS_MAX_PULL` (default 100,000) and sets `truncated`; a pull the call's 50 s upstream deadline stops after the first page keeps the calls collected so far, sets `hasMore`, and says so in `warnings`; `loadLimit` and the 24,000-byte inline budget bound only the inline preview, reported through `shown` / `cap`, with every collected call staged in a dataframe when the preview is cut
+- The upstream pull stops at `BRAPI_GENOTYPE_CALLS_MAX_PULL` (default 100,000) and sets `truncated`. When the shared upstream deadline stops a pull after the first page, collected calls remain available, `hasMore` is set, and `warnings` explains the stop. `loadLimit` and the 24,000-byte inline budget bound the preview, with `shown` / `cap` reporting the cut and every collected call staged.
 - Scalar upstream `genotype.values` become single-element arrays in finder results and staged calls. They retain their values; a bare numeric scalar alone does not establish an allele call
 
 ---
@@ -249,6 +262,8 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - Pages each study's observations against the upstream total, preferring embedded observation units on SGN/Breedbase when advertised so zeros are retained; unit totals count raw units, while `loadLimit` counts matching observations. Other servers retain the `/observations` and fallback paths. Study / variable / germplasm subsets are checked on returned rows
 - `extraFilters` are forwarded, then checked against the rows the matrix is built from, as on `brapi_find_observations`: `warnings` names a key the rows contradict and the keys no row can speak to
 - Returns the matrix as a dataframe plus `observationCount`, `germplasmCount`, `variableCount`, and `variableLegend` mapping SQL-safe column names to variable names; `truncated` / `cap` flag a study whose scan stopped before its total (at `loadLimit`, the page cap, a failed, empty, or repeated page, or the call deadline) and the notice names it with the rows examined
+- Long rows retain observation and unit IDs, germplasm name, season, and available field design from embedded units. Use `designLegend` to map relationship columns to their original design levels. `replicateIndex` is encounter order.
+- Wide cells pool observations across studies. `countLegend` maps each value column to its count column, which counts numeric values used by `mean` or `median`, one value when `first` has a row, and zero when no value contributes.
 - `studies` retains the requested IDs; `coverage.studies` distinguishes `contributed`, `empty`, `failed`, `partial`, and `unprocessed` outcomes with collected counts. `coverage.partial` and `truncated` disclose failed or incomplete pulls on both output surfaces. A failed study does not prevent the others from building the matrix; the call fails only when every study failed. `no_observation_path` when the server exposes neither observation route
 
 ---
@@ -269,7 +284,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - VCF POS and PLINK base-pair positions are one-based: valid zero-based BrAPI `start` values 0 and 500 export as 1 and 501. Missing or invalid positions retain `.` (VCF) / `0` (PLINK) placeholders.
 - PLINK allele indices use available REF/ALT labels, or positive numeric labels when metadata cannot resolve the marker. Missing calls use `0 0`. Ambiguous numeric scalar calls remain verbatim in the raw dataframe but export as missing in VCF-lite and PLINK, with a warning; dosage is not inferred into an allele genotype
 - An empty call search returns a queryable zero-row dataframe with its `germplasmDbId` column and no-match guidance
-- `maxCalls` / `maxColumns` can lower `BRAPI_GENOTYPE_CALLS_MAX_PULL` / `BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS` but never raise them; `truncated` means a ceiling fired or the call's 50 s upstream deadline ended the call pull early, and `warnings` names which
+- `maxCalls` / `maxColumns` can lower the configured `BRAPI_GENOTYPE_CALLS_MAX_PULL` / `BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS` ceilings. `truncated` means a ceiling or the shared upstream deadline ended the pull early, and `warnings` names the cause.
 
 ---
 
@@ -277,6 +292,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 - `studyDbId` plus 1–5,000 `observations`; a row with `observationDbId` updates via `PUT`, one without creates via `POST`, and nothing is deleted
 - `mode: "preview"` (default) returns `valid`, `invalid`, `routing` counts, and `perRowWarnings` without writing; `mode: "apply"` asks the caller to confirm (`force: true` skips it) and writes only on the round that redeems the server's record of that prompt, for the same caller, server, study, and rows — a pre-supplied or replayed answer is asked again — and returns `posted`, `updated`, and `studyObservationCount`; failures are `observations_unsupported`, `study_not_found`, `post_unsupported`, `put_unsupported`, and `user_declined`
+- Review `perRowWarnings` for values that conflict with a declared scale and units or update targets outside the study. `flagged` counts each warned row once and appears in the apply confirmation. Review scan-level warnings for incomplete checks. Advisory findings leave the existing validity and write routing intact.
 - Registered only when `BRAPI_ENABLE_WRITES=true`; requires the `brapi:write:observations` scope
 
 ---
@@ -359,6 +375,7 @@ BrAPI-specific:
 - Shared finder contract: the seven filter finders (studies, germplasm, variables, observations, images, locations, variants) take `alias`, `loadLimit`, and `extraFilters` (keys from `brapi_describe_filters`), and return `results`, `hasMore`, `distributions`, and an optional `dataframe` handle; `results` stops at `loadLimit` or 24,000 bytes on either array JSON or serialized escaped row text, whichever binds first, retaining the first matched row even when it alone exceeds the budget. `truncated` / `shown` / `cap` report the cut
 - Dataframe spillover: when `results` holds fewer rows than matched, finders stage the matched set (paging the rest of the result, up to 50 pages and 50,000 rows) in a DuckDB `df_<uuid>` table and return its handle
 - Dialect adapters (`spec`, `brapi-test`, `breedbase`, `cassavabase`, `bms`), detected per connection, translate v2.1 plural filters into the form each server family honors, drop filters it ignores, and switch to `POST /search/{noun}` when a `GET` would narrow a multi-value filter; `BRAPI_<ALIAS>_DIALECT` pins one
+- When a compatible POST search is unavailable, finders can split a scalar-only GET into bounded requests and deduplicate their results by resource ID. Alternatives within one filter are ORed and different filters are ANDed. Check the warnings and coverage for combinations the scan could not complete.
 - Several connections at once under named aliases, with three public Breedbase servers built in and credentials resolved per alias from env vars, so they stay out of the LLM context
 - Capability-aware calls: each connection's `/serverinfo` + `/calls` profile is cached and checked before a tool calls an endpoint; a per-connection concurrency cap and exponential-backoff retries cover 429/5xx
 
@@ -375,7 +392,7 @@ Agent-friendly output:
 
 When a finder's inline `results` holds fewer rows than matched — `loadLimit` or the 24,000-byte inline budget bound first — the response carries a `dataframe` handle: `tableName`, `rowCount`, `columns`, `createdAt`, and `expiresAt`. `totalCount` is the upstream total for unfiltered walks, the matched total for a complete locally filtered walk, and absent when a locally filtered scan is incomplete. `truncated` and `warnings` disclose a stopped walk, with `maxRows` when the row cap fired. Columns renamed to pass the SQL identifier check map back to their upstream keys in `columnLegend`.
 
-Every response that stages a dataframe — the finders, `brapi_raw_get` / `brapi_raw_search` when a row or byte bound trims a list, every matrix from `brapi_build_phenotype_matrix` and `brapi_export_genotype_matrix`, and `brapi_walk_pedigree` when graph/frontier previews are trimmed or fetched relatives are omitted — carries one `notice` naming each table, its row count, coverage, and `brapi_dataframe_describe` then `brapi_dataframe_query`. `brapi_dataframe_export` is named too where it is registered (stdio with `BRAPI_EXPORT_DIR` set). On a finder, the same notice says which bound cut `results`.
+Staging notices name the table and the tools to describe or query it. Finder previews stage collected matches when cut, including the merged collection from `brapi_federated_find`. Raw reads and pedigree walks stage fetched rows omitted from their previews. Matrices are staged for SQL. `brapi_dataframe_export` is available on configured stdio deployments.
 
 ```text
 1. brapi_find_observations { studies: ["s-422"] }
@@ -511,10 +528,11 @@ Every variable is optional.
 | `BRAPI_LOAD_LIMIT` | Default inline row cap for finders; a 24,000-byte budget also bounds the inline rows, and the matched set spills to a dataframe when either cuts them short. | `1000` |
 | `BRAPI_PAGE_SIZE` | Upstream `pageSize` for spillover page walks. The dataframe ceiling is `pageSize × 50`, capped at 50,000 rows. | `1000` |
 | `BRAPI_MAX_CONCURRENT_REQUESTS` | Per-connection concurrency cap. | `4` |
-| `BRAPI_RETRY_MAX_ATTEMPTS` / `BRAPI_RETRY_BASE_DELAY_MS` | Retries on 429/5xx and timeouts, and the exponential-backoff base delay. A timed-out request is retried only while the call's 50 s upstream deadline still fits another attempt. | `3` / `500` |
-| `BRAPI_REQUEST_TIMEOUT_MS` | Per-request HTTP timeout. Every upstream request one tool call makes also shares a 50 s deadline from the call's start, so a stalled server fails the call with a `Timeout` before an MCP client's 60 s default request timeout. | `30000` |
+| `BRAPI_RETRY_MAX_ATTEMPTS` / `BRAPI_RETRY_BASE_DELAY_MS` | Retries on 429/5xx and timeouts, and the exponential-backoff base delay. Eligible timeout retries require room for another attempt in the shared budget. | `3` / `500` |
+| `BRAPI_REQUEST_TIMEOUT_MS` | Default per-request HTTP timeout. Primary embedded observation-unit reads can use the remaining shared call budget. | `30000` |
+| `BRAPI_CALL_DEADLINE_MS` | Shared upstream budget starting at the MCP call's start. Dataframe walks get up to 80% of this budget within the same deadline. Leave headroom under your client's request timeout, which defaults to 60 seconds in the MCP TypeScript SDK. | `50000` |
 | `BRAPI_COMPANION_TIMEOUT_MS` | Timeout for non-critical enrichment calls (FK lookups, count probes), which also skip retries. | `8000` |
-| `BRAPI_SEARCH_POLL_TIMEOUT_MS` / `BRAPI_SEARCH_POLL_INTERVAL_MS` | Async `/search` polling budget and interval; polling also stops at the call's 50 s upstream deadline. | `60000` / `1000` |
+| `BRAPI_SEARCH_POLL_TIMEOUT_MS` / `BRAPI_SEARCH_POLL_INTERVAL_MS` | Async `/search` polling budget and interval. Polling also stops at the shared upstream deadline. | `60000` / `1000` |
 | `BRAPI_DATASET_TTL_SECONDS` | Lifetime of dataframe provenance (the handle's `expiresAt`). | `86400` |
 | `BRAPI_REFERENCE_CACHE_TTL_SECONDS` | TTL for cached capability profiles and reference data (programs, trials, locations, crops). | `3600` |
 | `BRAPI_ALLOW_PRIVATE_IPS` | Allow RFC 1918 / loopback targets. Dev only. | `false` |

@@ -1,6 +1,6 @@
 ---
 name: brapi-guide
-description: Use brapi_* tools to compare plant-breeding phenotypes across studies, verify which trials measured a trait, retrieve genotype calls or export a variant set, and query staged results in SQL.
+description: Use brapi_* tools to compare plant-breeding phenotypes across studies, find records across BrAPI aliases, verify which trials measured a trait, retrieve genotype calls or export a variant set, and query staged results in SQL.
 license: Apache-2.0
 metadata:
   author: "cyanheads"
@@ -27,7 +27,7 @@ Keep every BrAPI ID with the upstream connection that produced it. If comparing 
 
 - Before concluding that a study or measurement is absent, check the scan and its filters. A limited discovery, ignored filter, failed study, or incomplete scan leaves coverage unresolved. Treat a completed empty result as evidence only within the scope actually checked.
 - Before pooling values, compare the variables' scales, units, and methods. Convert compatible units explicitly and keep incompatible measurements separate.
-- Check the available tools before planning file export, cleanup, or observation submission. Dataframe file export requires a configured stdio server, while drop and observation submission are opt-in. Preview observations first and get the user's confirmation before applying the write.
+- Check the available tools before planning file export, cleanup, or observation submission. Dataframe file export requires a configured stdio server, while drop and observation submission are opt-in. Preview observations first. Review the `flagged` count, each `perRowWarnings` item, and warnings about incomplete checks with the user before asking for apply confirmation.
 
 ## Workflows
 
@@ -37,7 +37,19 @@ On SGN/Breedbase, scope `brapi_find_observations` to a study or germplasm to use
 
 Read `coverage` in the performance or matrix result. Contributing studies have collected measurements. Empty, failed, partial, and unprocessed studies have distinct outcomes. An incomplete scoped-unit scan can leave additional studies unseen.
 
-Use `brapi_build_phenotype_matrix` with long form and `aggregate: "all"` to preserve study IDs, categorical values, and replicate rows. A wide matrix aggregates across studies per germplasm and variable. For numeric comparisons, group the long rows by study, germplasm, and variable and count the values that convert successfully. Preserve measured zeros.
+Use `brapi_build_phenotype_matrix` with long form and `aggregate: "all"` to preserve study IDs, observation and unit IDs, categorical values, and replicate rows. Use `designLegend` to identify field design columns from embedded units. A wide matrix pools across studies by germplasm and variable. Use `countLegend` to read the number of values used in each pooled cell. To compare studies separately, group long rows by study, germplasm, and variable. Preserve measured zeros.
+
+### Find germplasm and select variables
+
+Use `studies`, `trials`, or `programs` to scope `brapi_find_germplasm`. Check the warnings before treating results as verified membership. If a scalar-only route expands filters into several requests, skipped combinations mean coverage is partial. For variable text matches, use the ranked `ontologyCandidates` to find likely IDs, then read their scales and methods before choosing one.
+
+### Continue image and pedigree reads
+
+Pass `deferredImageDbIds` from `brapi_get_image` or `deferredRoots` from `brapi_walk_pedigree` into a follow-up call. Pedigree `maxDepth` reports the effective depth. Read `frontier` separately for unresolved expansions among the roots the call processed.
+
+### Find records across BrAPI aliases
+
+Use `brapi_federated_find` with `aliases` and `query: { entity, filters }` for studies, germplasm, or observations across known connections. Check `coverage` per alias before drawing conclusions. Keep the source alias alongside each DbId. Germplasm with the same unambiguous PUI can share one row. Read `sources` and `conflicts` before selecting values from that row.
 
 ### Inspect calls or export a variant set
 

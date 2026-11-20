@@ -92,6 +92,12 @@ export const brapiConnect = tool('brapi_connect', {
 });
 ```
 
+### Upstream call budgets
+
+`BRAPI_CALL_DEADLINE_MS` bounds upstream I/O starting from `ctx.timestamp`, with a 50,000 ms default. The BrAPI client, token exchange, async polls, genotype pulls, and dataframe walks share that deadline. Dataframe walks can spend up to 80% of the configured budget. Keep `BRAPI_REQUEST_TIMEOUT_MS` on ordinary reads and explicit timeouts on companions; embedded observation-unit pages can use the remaining call budget. Timeout retries and backoff share the same deadline.
+
+`CapabilityRegistry` raises `capability_discovery_not_found` when both discovery routes return HTTP 404. Each caller uses the shared error contract. A root URL receives a versioned URL suggestion, and the failure writes neither a fresh capability profile nor a connection registration.
+
 ### Tool — find with dataframe spillover
 
 `find_*` tools share a pattern: pull one page (usually capped at `loadLimit`; germplasm text scans use configured `pageSize`), walk the remaining pages when it shows more exist (the upstream `totalCount` exceeds it, or, with no `totalCount`, it came back full), compute distributions across the full matched set, and return the leading rows within both `loadLimit` and the 24,000-byte inline budget (`INLINE_RESULTS_BUDGET_BYTES`, via `selectInlineRows`). Whenever `results` holds fewer rows than matched, `maybeSpill` materializes the matched set as a canvas dataframe and returns a handle; `discloseInlineTrim` reports the cut as `truncated` / `shown` / `cap` plus one notice naming the bound that fired and, via `stagedDataframeNotice`, the staged table with `brapi_dataframe_describe` / `brapi_dataframe_query`. Every tool that stages a dataframe carries that pointer in its `notice`. `brapi_find_genotype_calls` already uses `truncated` for its pull cap, so it reports the cut through `shown` / `cap` and `inlineTrimNotice`. Spilled rows live in DuckDB only — there is no parallel JSON store. Canvas is mandatory: `src/index.ts` loads `.env` (`parseConfig()`), defaults an unset or empty `CANVAS_PROVIDER_TYPE` to `duckdb`, and startup fails closed when `core.canvas` is undefined (`CANVAS_PROVIDER_TYPE=none`).
@@ -134,6 +140,10 @@ export const brapiFindGermplasm = tool('brapi_find_germplasm', {
   format: (result) => [{ type: 'text', text: renderFindResult(result) }],
 });
 ```
+
+When scalar GET filters need multiple combinations and POST cannot serve the list, the find route runs bounded GETs. Union by resource ID before computing distributions or staging. `appliedFilters` reports the routed filters and expanded dimensions. Use the reported coverage to interpret counts when combinations or pages were skipped. For germplasm `studies`, `trials`, and `programs`, an inconclusive one-scope count control leaves that scope unverified.
+
+`brapi_federated_find` collects full matched rows through the studies, germplasm, and observation finders, then builds one merged preview and stages one merged table when needed. Preserve alias-qualified identity and per-alias coverage. Only a nonblank exact germplasm PUI with one record per contributing alias groups records.
 
 ### Raw and SQL previews
 
@@ -198,6 +208,14 @@ Handlers receive a unified `ctx` object. Currently used surface:
 
 ---
 
+### Analysis and observation review
+
+Long phenotype matrices retain observation IDs, unit IDs, and available embedded field design. `designLegend` maps SQL column names to relationship levels. Wide cells pool by germplasm and variable across studies and `countLegend` maps value columns to the count of contributing values. `replicateIndex` preserves encounter order.
+
+Observation submission reviews available scale and study membership metadata. `flagged` counts warned rows once, and the apply confirmation displays it. Review findings are advisory and preserve the existing routing and consent gate.
+
+The first five distinct image IDs and first twenty distinct pedigree roots are processed in caller order. `deferredImageDbIds` and `deferredRoots` carry the remainder. A positive pedigree depth above ten uses ten and echoes the effective depth as `maxDepth`.
+
 ## Errors
 
 Handlers throw — the framework catches, classifies, and formats.
@@ -244,7 +262,7 @@ Available factories include `notFound`, `validationError`, `forbidden`, `unautho
 
 ```text
 src/
-  index.ts                                # createApp() entry point — registers 25 tools, 6 resources, 2 prompts; inits 7 services
+  index.ts                                # createApp() entry point — registers 26 tools, 6 resources, 2 prompts; inits 7 services
   config/
     server-config.ts                      # BRAPI_* env vars (Zod schema, lazy-parsed)
     alias-credentials.ts                  # Per-alias env-var resolution (BRAPI_<ALIAS>_*) for brapi_connect
@@ -271,6 +289,7 @@ src/
         brapi-walk-pedigree.tool.ts       # BFS DAG walk (ancestors / descendants / both), one edge per pair, loop-closing edges marked, optional diagram
         brapi-find-variables.tool.ts      # find_* — observation variables, free-text ranking via OntologyResolver
         brapi-find-observations.tool.ts   # find_* — observation records
+        brapi-federated-find.tool.ts      # Find records across aliases with per-source coverage
         brapi-find-images.tool.ts         # find_* — image metadata
         brapi-get-image.tool.ts           # Fetch image bytes inline (imagecontent → imageURL fallback)
         brapi-find-locations.tool.ts      # find_* — locations, optional client-side bbox filter
@@ -293,6 +312,7 @@ src/
         raw-routing-hints.ts              # Routing nudges emitted by raw_get / raw_search when a curated tool exists
         canvas-columns.ts                 # SQL-safe column-name sanitizer + variableLegend builder (shared by matrix tools)
         observations.ts                   # Study-anchored observation pull shared by phenotype-matrix and germplasm-performance
+        observation-review.ts             # Advisory scale and study membership checks for observation submission
         genotype-calls.ts                 # Async genotype-call collector shared by find-genotype-calls and export-genotype-matrix
         pedigree-diagram.ts               # Pure Mermaid / DOT renderer for walk_pedigree results (label escaping, Mermaid limits)
     resources/
