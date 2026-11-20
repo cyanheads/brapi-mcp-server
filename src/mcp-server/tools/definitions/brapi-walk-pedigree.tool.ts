@@ -20,6 +20,7 @@ import {
   getBrapiClient,
 } from '@/services/brapi-client/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
@@ -40,6 +41,8 @@ import { code, prose } from '../shared/markdown-literals.js';
 import { renderPedigreeDiagram } from '../shared/pedigree-diagram.js';
 
 const DEFAULT_MAX_DEPTH = 3;
+const MAX_DEPTH = 10;
+const MAX_ROOTS = 20;
 const MAX_NODES = 1_000;
 /**
  * Edge ceiling. Loop detection walks the recorded edges for every pair that
@@ -121,11 +124,11 @@ const OutputSchema = z.object({
   direction: z
     .enum(['ancestors', 'descendants', 'both'])
     .describe('The direction the walk expanded (echoed from the input).'),
-  maxDepth: z
-    .number()
-    .int()
-    .positive()
-    .describe('The maximum depth the walk was allowed to reach (echoed from the input).'),
+  maxDepth: z.number().int().positive().describe('Effective generation limit for this walk.'),
+  deferredRoots: z
+    .array(z.string())
+    .optional()
+    .describe('Pass these unprocessed roots in the next walk.'),
   nodes: z
     .array(NodeSchema)
     .describe(
@@ -248,6 +251,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
         'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -296,8 +300,9 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     germplasmDbIds: z
       .array(NonBlankString)
       .min(1)
-      .max(20)
-      .describe('Starting germplasm (1–20 roots). All roots are walked concurrently.'),
+      .describe(
+        `Walk the first ${MAX_ROOTS} distinct roots. Additional roots are returned for the next call.`,
+      ),
     direction: z
       .enum(['ancestors', 'descendants', 'both'])
       .default('ancestors')
@@ -308,9 +313,10 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       .number()
       .int()
       .positive()
-      .max(10)
       .default(DEFAULT_MAX_DEPTH)
-      .describe(`Max generations to walk per direction (default ${DEFAULT_MAX_DEPTH}, cap 10).`),
+      .describe(
+        `Max generations per direction (default ${DEFAULT_MAX_DEPTH}, clamped to ${MAX_DEPTH}).`,
+      ),
     diagram: z
       .enum(['mermaid', 'dot'])
       .optional()
@@ -351,6 +357,14 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     const hasProgeny = Boolean(profile.supported['germplasm/{germplasmDbId}/progeny']);
 
     const warnings: string[] = [];
+    const distinctRoots = [...new Set(input.germplasmDbIds)];
+    const roots = distinctRoots.slice(0, MAX_ROOTS);
+    const deferredRoots = distinctRoots.slice(MAX_ROOTS);
+    const maxDepth = Math.min(input.maxDepth, MAX_DEPTH);
+    if (maxDepth < input.maxDepth)
+      warnings.push(
+        `Requested depth ${input.maxDepth} exceeds the limit. Walking up to ${maxDepth} generations.`,
+      );
     const wantsAncestors = input.direction === 'ancestors' || input.direction === 'both';
     const wantsDescendants = input.direction === 'descendants' || input.direction === 'both';
 
@@ -373,11 +387,8 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     const rootPedigree = new Map<string, Promise<LookupEnvelope>>();
     const rootNames = new Map<string, string>();
     if (hasPedigree) {
-      for (const id of input.germplasmDbIds) {
-        if (!rootPedigree.has(id)) {
-          rootPedigree.set(id, requestLookup(client, connection, id, 'pedigree', ctx));
-        }
-      }
+      for (const id of roots)
+        rootPedigree.set(id, requestLookup(client, connection, id, 'pedigree', ctx));
       const checks = await Promise.all(
         Array.from(rootPedigree, async ([id, pending]) => ({ id, ...(await checkRoot(pending)) })),
       );
@@ -389,7 +400,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       }
     }
 
-    const state = createWalkState(input.germplasmDbIds, rootNames, {
+    const state = createWalkState(roots, rootNames, {
       ancestor: wantsAncestors && hasPedigree,
       descendant: wantsDescendants && hasProgeny,
     });
@@ -406,7 +417,7 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
       if (wantsDescendants && !hasProgeny)
         frontier.push({ germplasmDbId: id, side: 'descendant', outcome: 'unsupported' });
     }
-    for (let depth = 1; depth <= input.maxDepth; depth++) {
+    for (let depth = 1; depth <= maxDepth; depth++) {
       const upward = state.frontier.ancestor;
       const downward = state.frontier.descendant;
       state.frontier = { ancestor: new Set(), descendant: new Set() };
@@ -538,9 +549,9 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     let edgesDataframe: DataframeHandle | undefined;
     const notices: string[] = [];
     const query = {
-      germplasmDbIds: input.germplasmDbIds,
+      germplasmDbIds: roots,
       direction: input.direction,
-      maxDepth: input.maxDepth,
+      maxDepth,
       coverage: truncated ? 'partial_discovered_graph' : 'discovered_graph',
     };
     if (selectedNodes.bound || selectedEdges.bound) {
@@ -622,11 +633,12 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     const result: Output = {
       alias: connection.alias,
       direction: input.direction,
-      maxDepth: input.maxDepth,
+      maxDepth,
       nodes: previewNodes,
       edges: previewEdges,
       depthReached,
-      rootCount: input.germplasmDbIds.length,
+      rootCount: roots.length,
+      ...(deferredRoots.length > 0 && { deferredRoots }),
       leafCount,
       confirmedLeafCount,
       frontier: selectedFrontier.rows,
@@ -655,6 +667,8 @@ export const brapiWalkPedigree = tool('brapi_walk_pedigree', {
     lines.push(`- nodes: ${result.nodes.length}`);
     lines.push(`- edges: ${result.edges.length}`);
     lines.push(`- rootCount: ${result.rootCount}`);
+    if (result.deferredRoots)
+      lines.push(`Call again with germplasmDbIds ${code(JSON.stringify(result.deferredRoots))}.`);
     lines.push(`- leafCount: ${result.leafCount}`);
     lines.push(`- confirmedLeafCount: ${result.confirmedLeafCount}`);
     lines.push(`- frontierCount: ${result.frontierCount}`);

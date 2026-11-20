@@ -14,6 +14,7 @@ import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import {
   getOntologyResolver,
@@ -22,6 +23,7 @@ import {
 } from '@/services/ontology-resolver/index.js';
 import {
   AliasInput,
+  appliedFindFilters,
   applyDialectFiltersOrFail,
   asString,
   buildExtraFilterChecks,
@@ -263,6 +265,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
         'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -442,6 +445,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'variables');
     const effectiveStudies = [...new Set(input.studies ?? [])];
     const union = new Map<string, Record<string, unknown>>();
+    const rowsByStudy = new Map<string, Map<string, Record<string, unknown>>>();
     const studyCoverage =
       effectiveStudies.length > 1
         ? await collectFindRoutes<Record<string, unknown>>({
@@ -472,21 +476,26 @@ export const brapiFindVariables = tool('brapi_find_variables', {
             }),
             ...(normalizeRow ? { normalizeRow } : {}),
             consume: (id, rows) => {
+              const studyRows = rowsByStudy.get(id) ?? new Map<string, Record<string, unknown>>();
+              rowsByStudy.set(id, studyRows);
               for (const row of rows) {
                 const variableId = row.observationVariableDbId;
                 if (typeof variableId !== 'string' || !variableId)
                   throw serializationError(
                     'Upstream variable row is missing observationVariableDbId.',
                   );
-                const existing = union.get(variableId);
-                if (existing) {
-                  const provenance = existing.studyDbIds as string[];
-                  if (!provenance.includes(id)) provenance.push(id);
-                } else union.set(variableId, { ...row, studyDbIds: [id] });
+                if (!studyRows.has(variableId)) studyRows.set(variableId, row);
               }
             },
           })
         : undefined;
+    for (const id of effectiveStudies) {
+      for (const [variableId, row] of rowsByStudy.get(id) ?? []) {
+        const existing = union.get(variableId);
+        if (existing) (existing.studyDbIds as string[]).push(id);
+        else union.set(variableId, { ...row, studyDbIds: [id] });
+      }
+    }
     const incomplete = studyCoverage?.some((item) => item.status !== 'complete');
     const firstPage = studyCoverage
       ? {
@@ -582,10 +591,8 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     });
 
     const appliedFilters = studyCoverage
-      ? { ...(route.kind === 'search' ? route.searchBody : filters), studyDbId: effectiveStudies }
-      : route.kind === 'search'
-        ? route.searchBody
-        : filters;
+      ? { ...appliedFindFilters(route), studyDbId: effectiveStudies }
+      : appliedFindFilters(route);
     ctx.enrich({
       totalCount,
       returnedCount: results.length,
@@ -678,23 +685,27 @@ function promoteCandidates(
   candidates: OntologyCandidate[],
 ): Record<string, unknown>[] {
   if (candidates.length === 0) return rows;
-  const matchedDbIds = new Set(
-    candidates.map((c) => c.observationVariableDbId).filter((v): v is string => Boolean(v)),
-  );
-  const matchedPuis = new Set(
-    candidates.map((c) => c.termId).filter((v): v is string => Boolean(v)),
-  );
-  const matched: Record<string, unknown>[] = [];
+  const dbRanks = new Map<string, number>();
+  const puiRanks = new Map<string, number>();
+  const matched: Record<string, unknown>[][] = [];
+  for (const [rank, candidate] of candidates.entries()) {
+    matched.push([]);
+    const id = candidate.observationVariableDbId;
+    const pui = candidate.termId;
+    if (id && !dbRanks.has(id)) dbRanks.set(id, rank);
+    else if (!id && pui && !puiRanks.has(pui)) puiRanks.set(pui, rank);
+  }
   const rest: Record<string, unknown>[] = [];
   for (const row of rows) {
     const dbId = row.observationVariableDbId;
     const pui = row.observationVariablePUI;
-    const isMatch =
-      (typeof dbId === 'string' && matchedDbIds.has(dbId)) ||
-      (typeof pui === 'string' && matchedPuis.has(pui));
-    (isMatch ? matched : rest).push(row);
+    const rank =
+      (typeof dbId === 'string' ? dbRanks.get(dbId) : undefined) ??
+      (typeof pui === 'string' ? puiRanks.get(pui) : undefined);
+    const bucket = rank === undefined ? rest : (matched[rank] ?? rest);
+    bucket.push(row);
   }
-  return [...matched, ...rest];
+  return [...matched.flat(), ...rest];
 }
 
 /**

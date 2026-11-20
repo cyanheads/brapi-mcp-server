@@ -4,6 +4,7 @@
  * @module services/brapi-client
  */
 
+export { CALL_DEADLINE_MS } from '@/config/server-config.js';
 export type { Fetcher } from './brapi-client.js';
 export {
   BrapiClient,
@@ -14,7 +15,6 @@ export {
   resetBrapiClient,
 } from './brapi-client.js';
 export {
-  CALL_DEADLINE_MS,
   CALL_DEADLINE_REASON,
   callDeadlineAt,
   callDeadlineExceeded,

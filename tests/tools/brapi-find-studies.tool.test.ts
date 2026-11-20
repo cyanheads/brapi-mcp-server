@@ -473,7 +473,7 @@ describe('brapi_find_studies tool', () => {
     });
   });
 
-  it('downcasts plural filters to singular on CassavaBase, warning when a multi-value list loses values', async () => {
+  it('queries each singular combination on CassavaBase and reports the full filter', async () => {
     const ctx = await connect(fetcher, ['studies'], 'CassavaBase');
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
@@ -493,14 +493,19 @@ describe('brapi_find_studies tool', () => {
     expect(url.searchParams.has('commonCropNames')).toBe(false);
     expect(url.searchParams.has('seasonDbIds')).toBe(false);
     expect(url.searchParams.has('programDbIds')).toBe(false);
+    expect(
+      fetcher.mock.calls.map(([request]) =>
+        new URL(String(request)).searchParams.get('seasonDbId'),
+      ),
+    ).toEqual(['2022', '2023', '2024']);
     expect(getEnrichment(ctx).appliedFilters).toEqual({
       commonCropName: 'Cassava',
-      seasonDbId: '2022',
+      seasonDbId: ['2022', '2023', '2024'],
       programDbId: '162',
     });
     expect(
       getEnrichment(ctx).warnings.some((w) => /'seasonDbIds' downcast to 'seasonDbId'/.test(w)),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('warns when locations / programs / trials filter requested but no rows match', async () => {

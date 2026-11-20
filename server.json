@@ -36,6 +36,13 @@
           "default": "1000"
         },
         {
+          "name": "BRAPI_CALL_DEADLINE_MS",
+          "description": "Total milliseconds for upstream BrAPI requests in one MCP call.",
+          "format": "string",
+          "isRequired": false,
+          "default": "50000"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -79,6 +86,13 @@
           "format": "string",
           "isRequired": false,
           "default": "1000"
+        },
+        {
+          "name": "BRAPI_CALL_DEADLINE_MS",
+          "description": "Total milliseconds for upstream BrAPI requests in one MCP call.",
+          "format": "string",
+          "isRequired": false,
+          "default": "50000"
         },
         {
           "name": "MCP_HTTP_HOST",

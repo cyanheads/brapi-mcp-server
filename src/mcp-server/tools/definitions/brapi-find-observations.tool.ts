@@ -8,7 +8,7 @@
  * @module mcp-server/tools/definitions/brapi-find-observations.tool
  */
 
-import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
+import { type Context, type HandlerContext, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import {
@@ -22,10 +22,12 @@ import {
   resolveDialect,
 } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 import {
   AliasInput,
+  appliedFindFilters,
   applyDialectFiltersOrFail,
   asString,
   type BrapiListResult,
@@ -40,6 +42,7 @@ import {
   discloseInlineTrim,
   ExtraFiltersInput,
   extractRows,
+  type FinderCollection,
   type FindRoute,
   fkMatchCheck,
   InlineTrimEnrichment,
@@ -183,6 +186,28 @@ const SERVER_TO_USER: Record<string, string> = {
   observationTimeStampRangeEnd: 'timestampTo',
 };
 
+const InputSchema = z.object({
+  alias: AliasInput,
+  studies: z.array(NonBlankString).optional().describe('Filter by studyDbIds.'),
+  germplasm: z.array(NonBlankString).optional().describe('Filter by germplasmDbIds.'),
+  variables: z.array(NonBlankString).optional().describe('Filter by observationVariableDbIds.'),
+  observationUnits: z.array(NonBlankString).optional().describe('Filter by observationUnitDbIds.'),
+  observations: z.array(NonBlankString).optional().describe('Filter by observationDbIds.'),
+  seasons: z.array(NonBlankString).optional().describe('Filter by seasonDbIds (e.g. "2022").'),
+  programs: z.array(NonBlankString).optional().describe('Filter by programDbIds.'),
+  trials: z.array(NonBlankString).optional().describe('Filter by trialDbIds.'),
+  observationLevels: z
+    .array(NonBlankString)
+    .optional()
+    .describe('Observation unit level (plot, plant, field, etc.).'),
+  timestampFrom: NonBlankString.optional().describe(
+    'ISO 8601 start of the observation-time window.',
+  ),
+  timestampTo: NonBlankString.optional().describe('ISO 8601 end of the observation-time window.'),
+  loadLimit: LoadLimitInput,
+  extraFilters: ExtraFiltersInput,
+});
+
 export const brapiFindObservations = tool('brapi_find_observations', {
   description:
     'Pull observation records filtered by study, germplasm, variable, season, or observation unit. SGN/Breedbase uses advertised embedded units for study or germplasm scopes. Other GET observation queries without a study, trial, observation unit, or observation anchor run a one-row count probe and skip the bulk pull when the probe fails or reports more than 5,000 rows. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when those bounds cut it short, read the staged dataframe with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
@@ -243,6 +268,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
         'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -295,30 +321,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
       thrownBy: 'service',
     },
   ] as const,
-  input: z.object({
-    alias: AliasInput,
-    studies: z.array(NonBlankString).optional().describe('Filter by studyDbIds.'),
-    germplasm: z.array(NonBlankString).optional().describe('Filter by germplasmDbIds.'),
-    variables: z.array(NonBlankString).optional().describe('Filter by observationVariableDbIds.'),
-    observationUnits: z
-      .array(NonBlankString)
-      .optional()
-      .describe('Filter by observationUnitDbIds.'),
-    observations: z.array(NonBlankString).optional().describe('Filter by observationDbIds.'),
-    seasons: z.array(NonBlankString).optional().describe('Filter by seasonDbIds (e.g. "2022").'),
-    programs: z.array(NonBlankString).optional().describe('Filter by programDbIds.'),
-    trials: z.array(NonBlankString).optional().describe('Filter by trialDbIds.'),
-    observationLevels: z
-      .array(NonBlankString)
-      .optional()
-      .describe('Observation unit level (plot, plant, field, etc.).'),
-    timestampFrom: NonBlankString.optional().describe(
-      'ISO 8601 start of the observation-time window.',
-    ),
-    timestampTo: NonBlankString.optional().describe('ISO 8601 end of the observation-time window.'),
-    loadLimit: LoadLimitInput,
-    extraFilters: ExtraFiltersInput,
-  }),
+  input: InputSchema,
   inputAliases: {
     studyDbId: 'studies',
     studyDbIds: 'studies',
@@ -373,313 +376,7 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     warnings: { render: renderWarningsTrailer },
   },
 
-  async handler(input, ctx) {
-    const capabilities = getCapabilityRegistry();
-    const client = getBrapiClient();
-    const bridge = getCanvasBridge();
-    const config = getServerConfig();
-
-    const connection = await requireRegisteredConnection(ctx, input.alias);
-
-    const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
-    if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
-    const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
-
-    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
-
-    const warnings: string[] = [];
-    const merged = mergeFilters(
-      {
-        studyDbIds: input.studies,
-        germplasmDbIds: input.germplasm,
-        observationVariableDbIds: input.variables,
-        observationUnitDbIds: input.observationUnits,
-        observationDbIds: input.observations,
-        seasonDbIds: input.seasons,
-        programDbIds: input.programs,
-        trialDbIds: input.trials,
-        observationLevels: input.observationLevels,
-        observationTimeStampRangeStart: input.timestampFrom,
-        observationTimeStampRangeEnd: input.timestampTo,
-      },
-      input.extraFilters,
-      warnings,
-    );
-
-    if (input.germplasm?.length && Object.hasOwn(merged, 'germplasmDbId')) {
-      delete merged.germplasmDbId;
-      warnings.push('extraFilters.germplasmDbId was overridden by the named germplasm filter.');
-    }
-    const studyIds = scopeIds(merged.studyDbIds ?? merged.studyDbId);
-    const germplasmIds = scopeIds(merged.germplasmDbIds ?? merged.germplasmDbId);
-    const embeddedRoute =
-      prefersEmbeddedObservations(dialect, profile.supported) &&
-      (studyIds.length > 0 || germplasmIds.length > 0);
-    const fallbackGermplasm =
-      !embeddedRoute && germplasmIds.length ? new Set(germplasmIds) : undefined;
-    const adapted = embeddedRoute
-      ? { filters: merged, requiresEscalation: false }
-      : applyDialectFiltersOrFail(ctx, dialect, 'observations', merged, warnings);
-    const filters = adapted.filters;
-    const route: FindRoute = embeddedRoute
-      ? { kind: 'get', path: '/observationunits', service: 'observationunits', filters }
-      : resolveFindRoute({
-          profile,
-          dialect,
-          endpoint: 'observations',
-          filters,
-          searchBody: merged,
-          warnings,
-          ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
-        });
-
-    const loadLimit = input.loadLimit ?? config.loadLimit;
-    const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'observations');
-    const loadObservations = (pageSize: number) =>
-      loadInitialFindPage<Record<string, unknown>>(
-        client,
-        connection,
-        route,
-        pageSize,
-        ctx,
-        normalizeRow ? { normalizeRow } : {},
-      );
-
-    /**
-     * Danger pattern: querying `/observations` without one of the four
-     * anchors (study, trial, observation-unit, observation). On large
-     * servers (CassavaBase, T3) any unanchored variant —
-     * `?germplasmDbId=X`, `?observationVariableDbId=X`, `?seasonDbId=X`,
-     * or a bare `/observations` — joins across the full observations
-     * table and stalls past the request timeout. Probe with `pageSize=1`
-     * using companion-call options (short timeout, zero retries) so a
-     * stalled count operation surfaces as a single warning instead of
-     * pinning the response. Outcomes:
-     *   1. probe stalls/fails → warn and skip the bulk pull entirely
-     *   2. probe returns a count above the threshold → warn, return only
-     *      the preflight page's rows (one, unless the upstream ignored pageSize)
-     *   3. probe returns a count under the threshold → fall through to
-     *      the normal bulk pull
-     *
-     * Empirically verified on cassavabase.org/brapi/v2:
-     *   - `?germplasmDbId=X`              alone: timeout (>60 s)
-     *   - `?observationVariableDbId=X`    alone: timeout (>60 s)
-     *   - bare `/observations`                  : timeout (>30 s)
-     *   - `?studyDbId=X` (anchored)             : ~15 s OK
-     */
-    const hasAnchor =
-      studyIds.length > 0 ||
-      (input.trials?.length ?? 0) > 0 ||
-      (input.observationUnits?.length ?? 0) > 0 ||
-      (input.observations?.length ?? 0) > 0;
-
-    let firstPage: Awaited<ReturnType<typeof loadObservations>> | undefined;
-    let bulkPullSkipped = false;
-    let embeddedPartial = false;
-    const embeddedRequests: Record<string, unknown>[] = [];
-    if (embeddedRoute) {
-      const rows: Record<string, unknown>[] = [];
-      const seen = new Set<string>();
-      const anchors = studyIds.length ? studyIds : germplasmIds;
-      let pagesFetched = 0;
-      for (const [index, id] of anchors.entries()) {
-        const unitFilters = studyIds.length
-          ? { ...merged, studyDbIds: [id] }
-          : { germplasmDbIds: [id] };
-        const pulled = await collectEmbeddedObservations({
-          client,
-          connection,
-          config,
-          ctx,
-          dialect,
-          filters: unitFilters,
-          loadLimit: MAX_SPILLOVER_ROWS - rows.length,
-          pageLimit: MAX_SPILLOVER_PAGES - pagesFetched,
-          warnings,
-          keep: (row) =>
-            !seen.has(row.observationDbId ?? '') && matchesEmbeddedObservation(row, merged),
-        });
-        embeddedRequests.push(pulled.appliedFilters);
-        pagesFetched += pulled.pagesFetched;
-        embeddedPartial ||= pulled.truncation !== undefined;
-        for (const row of pulled.rawRows) {
-          const id = row.observationDbId;
-          if (typeof id === 'string' && id.length > 0) {
-            if (seen.has(id)) continue;
-            seen.add(id);
-          }
-          rows.push(normalizeRow ? normalizeRow(row) : row);
-        }
-        if (
-          index < anchors.length - 1 &&
-          (rows.length >= MAX_SPILLOVER_ROWS || pagesFetched >= MAX_SPILLOVER_PAGES)
-        ) {
-          embeddedPartial = true;
-          warnings.push(
-            `Embedded observation collection reached its ${MAX_SPILLOVER_ROWS}-row or ${MAX_SPILLOVER_PAGES}-page budget; ${anchors.length - index - 1} remaining ${studyIds.length ? 'studies' : 'germplasm IDs'} were not processed.`,
-          );
-          break;
-        }
-      }
-      firstPage = {
-        rows,
-        hasMore: false,
-        pagesFetched,
-        ...(!embeddedPartial && { totalCount: rows.length }),
-      };
-    }
-    if (!embeddedRoute && !hasAnchor && route.kind === 'get') {
-      const probe = await probeObservationCount({
-        client,
-        connection,
-        route,
-        dialect,
-        config,
-        warnings,
-        ctx,
-      });
-      if (probe === null) {
-        warnings.push(
-          `Observations preflight count probe stalled — the upstream count operation appears unbounded for this query shape, indicating a likely full-table scan. Bulk pull skipped to avoid a long hang. ${OBSERVATION_PREFLIGHT_RECOVERY}`,
-        );
-        firstPage = { rows: [], hasMore: false, pagesFetched: 0 };
-        bulkPullSkipped = true;
-      } else if (
-        typeof probe.totalCount === 'number' &&
-        probe.totalCount > PREFLIGHT_BULK_THRESHOLD
-      ) {
-        warnings.push(
-          `Preflight detected ${probe.totalCount} observations matching this query (no study / trial / observationUnit / observation anchor). Bulk pull skipped to avoid an upstream timeout. ${OBSERVATION_PREFLIGHT_RECOVERY} Returning only the ${probe.rows.length} row(s) the preflight request returned.`,
-        );
-        firstPage = normalizeRow ? { ...probe, rows: probe.rows.map(normalizeRow) } : probe;
-        bulkPullSkipped = true;
-      }
-    }
-    firstPage ??= await loadObservations(loadLimit);
-
-    const spill = await maybeSpill({
-      /** A skipped bulk pull works from the preflight page alone — no walk; the upstream total keeps hasMore honest. */
-      firstPage: bulkPullSkipped ? { ...firstPage, hasMore: false } : firstPage,
-      client,
-      connection,
-      path: '/observations',
-      filters,
-      route,
-      source: 'find_observations',
-      renderInline: (rows, dataframe) =>
-        renderObservationsRows({ results: rows as Output['results'], dataframe }),
-      loadLimit,
-      ctx,
-      bridge,
-      warnings,
-      ...(embeddedPartial
-        ? { preloadedStopReason: 'embedded observation scan stopped early (see warnings)' }
-        : bulkPullSkipped && firstPage.totalCount === undefined
-          ? { preloadedStopReason: 'preflight skipped the bulk observation pull' }
-          : {}),
-      ...(fallbackGermplasm && {
-        rowFilter: (row: Record<string, unknown>) =>
-          typeof row.germplasmDbId === 'string' && fallbackGermplasm.has(row.germplasmDbId),
-      }),
-      ...(normalizeRow ? { normalizeRow } : {}),
-      spillRequestOptions: {
-        timeoutMs: config.companionTimeoutMs,
-        retryMaxAttempts: 0,
-      },
-    });
-    const { fullRows, dataframe, results, rowsScanned, scanComplete, hasMore } = spill;
-    if (fallbackGermplasm && (!scanComplete || fullRows.length < rowsScanned)) {
-      const scannedOf = firstPage.totalCount === undefined ? '' : ` of ${firstPage.totalCount}`;
-      warnings.push(
-        `Germplasm checked client-side: ${fullRows.length} matched among ${rowsScanned}${scannedOf} observation rows scanned.${scanComplete ? '' : ' Remaining rows were not checked.'}`,
-      );
-    }
-
-    const distributions = {
-      observationVariableName: computeDistribution(fullRows, (r) =>
-        asString(r.observationVariableName),
-      ),
-      studyName: computeDistribution(fullRows, (r) => asString(r.studyName)),
-      germplasmName: computeDistribution(fullRows, (r) => asString(r.germplasmName)),
-      observationLevel: computeDistribution(fullRows, (r) => asString(r.observationLevel)),
-      season: computeDistribution(fullRows, (r) => normalizeSeason(r.season)),
-    };
-
-    checkFilterMatchRates(warnings, fullRows.length, [
-      { paramName: 'seasons', requestedValues: input.seasons, distribution: distributions.season },
-      {
-        paramName: 'observationLevels',
-        requestedValues: input.observationLevels,
-        distribution: distributions.observationLevel,
-        caseInsensitive: true,
-        requireEveryRowMatch: true,
-      },
-      fkMatchCheck('studies', input.studies, fullRows, 'studyDbId', {
-        requireEveryRowMatch: true,
-      }),
-      fkMatchCheck('germplasm', input.germplasm, fullRows, 'germplasmDbId', {
-        requireEveryRowMatch: true,
-      }),
-      fkMatchCheck('variables', input.variables, fullRows, 'observationVariableDbId', {
-        requireEveryRowMatch: true,
-      }),
-      fkMatchCheck('observationUnits', input.observationUnits, fullRows, 'observationUnitDbId', {
-        requireEveryRowMatch: true,
-      }),
-      ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
-    ]);
-
-    const totalCount =
-      embeddedRoute || fallbackGermplasm ? fullRows.length : (firstPage.totalCount ?? rowsScanned);
-    const refinementHint = buildRefinementHint(spill, distributions, {
-      availableFilters: [
-        'studies',
-        'germplasm',
-        'variables',
-        'observationUnits',
-        'observations',
-        'seasons',
-        'programs',
-        'trials',
-        'observationLevels',
-        'timestampFrom',
-        'timestampTo',
-      ],
-    });
-
-    const appliedFilters = embeddedRoute
-      ? { upstreamRequests: embeddedRequests, clientSide: merged }
-      : route.kind === 'search'
-        ? route.searchBody
-        : filters;
-    ctx.enrich({
-      totalCount,
-      returnedCount: results.length,
-      appliedFilters,
-      warnings,
-      ...(refinementHint ? { refinementHint } : {}),
-    });
-    if (results.length === 0)
-      ctx.enrich.notice(
-        warnings.length > 0
-          ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
-          : 'No observations matched the applied filters. Try broadening your filters.',
-      );
-    discloseInlineTrim(ctx, spill, loadLimit);
-    if (embeddedPartial)
-      ctx.enrich.notice(
-        'Embedded observation coverage is partial. Inspect warnings and retry with a narrower scope.',
-      );
-
-    const result: Output = {
-      alias: connection.alias,
-      results: results as z.infer<typeof ObservationRowSchema>[],
-      hasMore,
-      distributions,
-    };
-    if (dataframe) result.dataframe = dataframe;
-    return result;
-  },
+  handler: (input, ctx) => findObservations(input, ctx, false),
 
   format: (result) => {
     const lines: string[] = [];
@@ -708,6 +405,335 @@ export const brapiFindObservations = tool('brapi_find_observations', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** Run the single-source finder or collect its matched rows for federation. */
+export function findObservations(
+  input: z.output<typeof InputSchema>,
+  ctx: HandlerContext<'unknown_alias' | 'all_filters_dropped'>,
+  collectOnly: true,
+): Promise<FinderCollection>;
+export function findObservations(
+  input: z.output<typeof InputSchema>,
+  ctx: HandlerContext<'unknown_alias' | 'all_filters_dropped'>,
+  collectOnly: false,
+): Promise<Output>;
+export async function findObservations(
+  input: z.output<typeof InputSchema>,
+  ctx: HandlerContext<'unknown_alias' | 'all_filters_dropped'>,
+  collectOnly: boolean,
+): Promise<Output | FinderCollection> {
+  const capabilities = getCapabilityRegistry();
+  const client = getBrapiClient();
+  const bridge = getCanvasBridge();
+  const config = getServerConfig();
+
+  const connection = await requireRegisteredConnection(ctx, input.alias);
+
+  const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
+  if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
+  const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
+
+  const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
+  const warnings: string[] = [];
+  const merged = mergeFilters(
+    {
+      studyDbIds: input.studies,
+      germplasmDbIds: input.germplasm,
+      observationVariableDbIds: input.variables,
+      observationUnitDbIds: input.observationUnits,
+      observationDbIds: input.observations,
+      seasonDbIds: input.seasons,
+      programDbIds: input.programs,
+      trialDbIds: input.trials,
+      observationLevels: input.observationLevels,
+      observationTimeStampRangeStart: input.timestampFrom,
+      observationTimeStampRangeEnd: input.timestampTo,
+    },
+    input.extraFilters,
+    warnings,
+  );
+
+  if (input.germplasm?.length && Object.hasOwn(merged, 'germplasmDbId')) {
+    delete merged.germplasmDbId;
+    warnings.push('extraFilters.germplasmDbId was overridden by the named germplasm filter.');
+  }
+  const studyIds = scopeIds(merged.studyDbIds ?? merged.studyDbId);
+  const germplasmIds = scopeIds(merged.germplasmDbIds ?? merged.germplasmDbId);
+  const embeddedRoute =
+    prefersEmbeddedObservations(dialect, profile.supported) &&
+    (studyIds.length > 0 || germplasmIds.length > 0);
+  const fallbackGermplasm =
+    !embeddedRoute && germplasmIds.length ? new Set(germplasmIds) : undefined;
+  const adapted = embeddedRoute
+    ? { filters: merged, requiresEscalation: false }
+    : applyDialectFiltersOrFail(ctx, dialect, 'observations', merged, warnings);
+  const filters = adapted.filters;
+  const hasAnchor = [
+    'studyDbId',
+    'studyDbIds',
+    'trialDbId',
+    'trialDbIds',
+    'observationUnitDbId',
+    'observationUnitDbIds',
+    'observationDbId',
+    'observationDbIds',
+  ].some((key) => scopeIds(filters[key]).length > 0);
+  const route: FindRoute = embeddedRoute
+    ? { kind: 'get', path: '/observationunits', service: 'observationunits', filters }
+    : resolveFindRoute({
+        profile,
+        dialect,
+        endpoint: 'observations',
+        filters,
+        searchBody: merged,
+        warnings,
+        ...(!hasAnchor && { getFanoutPreflightMaxTotal: PREFLIGHT_BULK_THRESHOLD }),
+        ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
+      });
+
+  const loadLimit = input.loadLimit ?? config.loadLimit;
+  const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'observations');
+  const loadObservations = (pageSize: number) =>
+    loadInitialFindPage<Record<string, unknown>>(
+      client,
+      connection,
+      route,
+      pageSize,
+      ctx,
+      normalizeRow ? { normalizeRow } : {},
+    );
+
+  /**
+   * Danger pattern: querying `/observations` without one of the four
+   * anchors (study, trial, observation-unit, observation). On large
+   * servers (CassavaBase, T3) any unanchored variant —
+   * `?germplasmDbId=X`, `?observationVariableDbId=X`, `?seasonDbId=X`,
+   * or a bare `/observations` — joins across the full observations
+   * table and stalls past the request timeout. Probe with `pageSize=1`
+   * using companion-call options (short timeout, zero retries) so a
+   * stalled count operation surfaces as a single warning instead of
+   * pinning the response. Outcomes:
+   *   1. probe stalls/fails → warn and skip the bulk pull entirely
+   *   2. probe returns a count above the threshold → warn, return only
+   *      the preflight page's rows (one, unless the upstream ignored pageSize)
+   *   3. probe returns a count under the threshold → fall through to
+   *      the normal bulk pull
+   *
+   * Empirically verified on cassavabase.org/brapi/v2:
+   *   - `?germplasmDbId=X`              alone: timeout (>60 s)
+   *   - `?observationVariableDbId=X`    alone: timeout (>60 s)
+   *   - bare `/observations`                  : timeout (>30 s)
+   *   - `?studyDbId=X` (anchored)             : ~15 s OK
+   */
+  let firstPage: Awaited<ReturnType<typeof loadObservations>> | undefined;
+  let bulkPullSkipped = false;
+  let embeddedPartial = false;
+  const embeddedRequests: Record<string, unknown>[] = [];
+  if (embeddedRoute) {
+    const rows: Record<string, unknown>[] = [];
+    const seen = new Set<string>();
+    const anchors = studyIds.length ? studyIds : germplasmIds;
+    let pagesFetched = 0;
+    for (const [index, id] of anchors.entries()) {
+      const unitFilters = studyIds.length
+        ? { ...merged, studyDbIds: [id] }
+        : { germplasmDbIds: [id] };
+      const pulled = await collectEmbeddedObservations({
+        client,
+        connection,
+        config,
+        ctx,
+        dialect,
+        filters: unitFilters,
+        loadLimit: MAX_SPILLOVER_ROWS - rows.length,
+        pageLimit: MAX_SPILLOVER_PAGES - pagesFetched,
+        warnings,
+        keep: (row) =>
+          !seen.has(row.observationDbId ?? '') && matchesEmbeddedObservation(row, merged),
+      });
+      embeddedRequests.push(pulled.appliedFilters);
+      pagesFetched += pulled.pagesFetched;
+      embeddedPartial ||= pulled.truncation !== undefined;
+      for (const row of pulled.rawRows) {
+        const id = row.observationDbId;
+        if (typeof id === 'string' && id.length > 0) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+        }
+        rows.push(normalizeRow ? normalizeRow(row) : row);
+      }
+      if (
+        index < anchors.length - 1 &&
+        (rows.length >= MAX_SPILLOVER_ROWS || pagesFetched >= MAX_SPILLOVER_PAGES)
+      ) {
+        embeddedPartial = true;
+        warnings.push(
+          `Embedded observation collection reached its ${MAX_SPILLOVER_ROWS}-row or ${MAX_SPILLOVER_PAGES}-page budget; ${anchors.length - index - 1} remaining ${studyIds.length ? 'studies' : 'germplasm IDs'} were not processed.`,
+        );
+        break;
+      }
+    }
+    firstPage = {
+      rows,
+      hasMore: false,
+      pagesFetched,
+      ...(!embeddedPartial && { totalCount: rows.length }),
+    };
+  }
+  if (!embeddedRoute && !hasAnchor && route.kind === 'get' && !route.fanout) {
+    const probe = await probeObservationCount({
+      client,
+      connection,
+      route,
+      dialect,
+      config,
+      warnings,
+      ctx,
+    });
+    if (probe === null) {
+      warnings.push(
+        `Observations preflight count probe stalled — the upstream count operation appears unbounded for this query shape, indicating a likely full-table scan. Bulk pull skipped to avoid a long hang. ${OBSERVATION_PREFLIGHT_RECOVERY}`,
+      );
+      firstPage = { rows: [], hasMore: false, pagesFetched: 0 };
+      bulkPullSkipped = true;
+    } else if (
+      typeof probe.totalCount === 'number' &&
+      probe.totalCount > PREFLIGHT_BULK_THRESHOLD
+    ) {
+      warnings.push(
+        `Preflight detected ${probe.totalCount} observations matching this query (no study / trial / observationUnit / observation anchor). Bulk pull skipped to avoid an upstream timeout. ${OBSERVATION_PREFLIGHT_RECOVERY} Returning only the ${probe.rows.length} row(s) the preflight request returned.`,
+      );
+      firstPage = normalizeRow ? { ...probe, rows: probe.rows.map(normalizeRow) } : probe;
+      bulkPullSkipped = true;
+    }
+  }
+  firstPage ??= await loadObservations(loadLimit);
+
+  const spill = await maybeSpill({
+    /** A skipped bulk pull works from the preflight page alone — no walk; the upstream total keeps hasMore honest. */
+    firstPage: bulkPullSkipped ? { ...firstPage, hasMore: false } : firstPage,
+    client,
+    connection,
+    path: '/observations',
+    filters,
+    route,
+    source: 'find_observations',
+    renderInline: (rows, dataframe) =>
+      renderObservationsRows({ results: rows as Output['results'], dataframe }),
+    loadLimit,
+    ctx,
+    bridge,
+    warnings,
+    collectOnly,
+    ...(embeddedPartial
+      ? { preloadedStopReason: 'embedded observation scan stopped early (see warnings)' }
+      : bulkPullSkipped && firstPage.totalCount === undefined
+        ? { preloadedStopReason: 'preflight skipped the bulk observation pull' }
+        : {}),
+    ...(fallbackGermplasm && {
+      rowFilter: (row: Record<string, unknown>) =>
+        typeof row.germplasmDbId === 'string' && fallbackGermplasm.has(row.germplasmDbId),
+    }),
+    ...(normalizeRow ? { normalizeRow } : {}),
+    spillRequestOptions: {
+      timeoutMs: config.companionTimeoutMs,
+      retryMaxAttempts: 0,
+    },
+  });
+  const { fullRows, dataframe, results, rowsScanned, scanComplete, hasMore } = spill;
+  if (fallbackGermplasm && (!scanComplete || fullRows.length < rowsScanned)) {
+    const scannedOf = firstPage.totalCount === undefined ? '' : ` of ${firstPage.totalCount}`;
+    warnings.push(
+      `Germplasm checked client-side: ${fullRows.length} matched among ${rowsScanned}${scannedOf} observation rows scanned.${scanComplete ? '' : ' Remaining rows were not checked.'}`,
+    );
+  }
+
+  const distributions = {
+    observationVariableName: computeDistribution(fullRows, (r) =>
+      asString(r.observationVariableName),
+    ),
+    studyName: computeDistribution(fullRows, (r) => asString(r.studyName)),
+    germplasmName: computeDistribution(fullRows, (r) => asString(r.germplasmName)),
+    observationLevel: computeDistribution(fullRows, (r) => asString(r.observationLevel)),
+    season: computeDistribution(fullRows, (r) => normalizeSeason(r.season)),
+  };
+
+  checkFilterMatchRates(warnings, fullRows.length, [
+    { paramName: 'seasons', requestedValues: input.seasons, distribution: distributions.season },
+    {
+      paramName: 'observationLevels',
+      requestedValues: input.observationLevels,
+      distribution: distributions.observationLevel,
+      caseInsensitive: true,
+      requireEveryRowMatch: true,
+    },
+    fkMatchCheck('studies', input.studies, fullRows, 'studyDbId', {
+      requireEveryRowMatch: true,
+    }),
+    fkMatchCheck('germplasm', input.germplasm, fullRows, 'germplasmDbId', {
+      requireEveryRowMatch: true,
+    }),
+    fkMatchCheck('variables', input.variables, fullRows, 'observationVariableDbId', {
+      requireEveryRowMatch: true,
+    }),
+    fkMatchCheck('observationUnits', input.observationUnits, fullRows, 'observationUnitDbId', {
+      requireEveryRowMatch: true,
+    }),
+    ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
+  ]);
+
+  const totalCount =
+    embeddedRoute || fallbackGermplasm ? fullRows.length : (firstPage.totalCount ?? rowsScanned);
+  const refinementHint = buildRefinementHint(spill, distributions, {
+    availableFilters: [
+      'studies',
+      'germplasm',
+      'variables',
+      'observationUnits',
+      'observations',
+      'seasons',
+      'programs',
+      'trials',
+      'observationLevels',
+      'timestampFrom',
+      'timestampTo',
+    ],
+  });
+
+  if (collectOnly) return { rows: fullRows, rowsScanned, scanComplete, warnings };
+
+  const appliedFilters = embeddedRoute
+    ? { upstreamRequests: embeddedRequests, clientSide: merged }
+    : appliedFindFilters(route);
+  ctx.enrich({
+    totalCount,
+    returnedCount: results.length,
+    appliedFilters,
+    warnings,
+    ...(refinementHint ? { refinementHint } : {}),
+  });
+  if (results.length === 0)
+    ctx.enrich.notice(
+      warnings.length > 0
+        ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
+        : 'No observations matched the applied filters. Try broadening your filters.',
+    );
+  discloseInlineTrim(ctx, spill, loadLimit);
+  if (embeddedPartial)
+    ctx.enrich.notice(
+      'Embedded observation coverage is partial. Inspect warnings and retry with a narrower scope.',
+    );
+
+  const result: Output = {
+    alias: connection.alias,
+    results: results as z.infer<typeof ObservationRowSchema>[],
+    hasMore,
+    distributions,
+  };
+  if (dataframe) result.dataframe = dataframe;
+  return result;
+}
 
 function normalizeSeason(value: unknown): string | undefined {
   const nonEmpty = (v: unknown): string | undefined =>

@@ -122,6 +122,135 @@ describe('brapi_build_phenotype_matrix tool', () => {
   const heights = (pairs: readonly (readonly [string, string])[]) =>
     pairs.map(([g, value]) => obsRow(g, g.toUpperCase(), 'v1', 'Height', value));
 
+  it('exposes the observation identity and leaves absent design metadata null', async () => {
+    const ctx = await connect(fetcher);
+    const { result, staged } = await build(
+      ctx,
+      [{ ...obsRow('g1', 'G1', 'v1', 'Height', '10'), observationUnitDbId: 'u1' }],
+      { shape: 'long' },
+    );
+    expect(staged[0]).toMatchObject({
+      observationDbId: 'obs_g1_v1',
+      observationUnitDbId: 'u1',
+      germplasmName: 'G1',
+      season: null,
+      entryType: null,
+    });
+    expect(brapiBuildPhenotypeMatrix.format?.(result)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining('observationUnitDbId') }),
+      ]),
+    );
+  });
+
+  it('maps collision-safe count columns and counts only the values used by the mean', async () => {
+    const ctx = await connect(fetcher);
+    const { result, staged } = await build(
+      ctx,
+      [
+        ...heights([
+          ['g1', '10'],
+          ['g1', 'not numeric'],
+          ['g2', 'bad'],
+        ]),
+        obsRow('g1', 'G1', 'n_v1', 'Collision', '20'),
+      ],
+      {},
+    );
+    expect(result).toMatchObject({ countLegend: { v1: 'n_v1_2', n_v1: 'n_n_v1' } });
+    expect(staged).toMatchObject([
+      { v1: 10, n_v1: 20, n_v1_2: 1, n_n_v1: 1 },
+      { v1: null, n_v1: null, n_v1_2: 0, n_n_v1: 0 },
+    ]);
+  });
+
+  it('retains embedded design levels, with nulls for missing values and unique columns', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const query = new URL(url).searchParams;
+      const studyId = query.get('studyDbIds') ?? query.get('studyDbId') ?? 'study1';
+      const rows = studyId === 'study2' ? [obsRow('g1', 'G1', 'v1', 'Height', '40', 'study2')] : [];
+      if (!pathnameOf(url).endsWith('/observationunits')) {
+        return jsonResponse(envelope({ data: rows }, { totalCount: rows.length }));
+      }
+      const unit = {
+        observationUnitDbId: 'unit1',
+        studyDbId: 'study1',
+        germplasmDbId: 'g1',
+        germplasmName: 'G1',
+        observationUnitPosition: {
+          entryType: 'check',
+          positionCoordinateX: '7',
+          positionCoordinateXType: 'GRID_COL',
+          observationLevelRelationships: [
+            { levelName: 'rep', levelCode: '3' },
+            { levelName: 'REP', levelCode: 'other' },
+            { levelName: 'value', levelCode: 'reserved' },
+            { levelName: '__proto__', levelCode: 'upstream level' },
+          ],
+        },
+        observations: [
+          { ...obsRow('g1', 'G1', 'v1', 'Height', '10'), seasonDbId: 's1' },
+          obsRow('g1', 'G1', 'v1', 'Height', '20'),
+          obsRow('g1', 'G1', 'v1', 'Height', 'bad'),
+        ],
+      };
+      return jsonResponse(envelope({ data: [unit] }, { totalCount: 1 }));
+    });
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    const definition = {
+      ...brapiBuildPhenotypeMatrix,
+      handler: (parsed, contractCtx) =>
+        brapiBuildPhenotypeMatrix.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiBuildPhenotypeMatrix;
+    const args = { studies: ['study1', 'study2'] };
+    const long = await runToolContract(
+      definition,
+      { ...args, shape: 'long' },
+      {
+        context: { tenantId: 't1' },
+      },
+    );
+    expect(long.structuredContent).toMatchObject({
+      designLegend: { rep: 'rep', REP_2: 'REP', value_2: 'value' },
+    });
+    expect(long.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining('`value_2` → value') }),
+      ]),
+    );
+    const rows = register.mock.calls[0]?.[1].rows;
+    expect(rows?.[0]).toMatchObject({
+      observationUnitDbId: 'unit1',
+      entryType: 'check',
+      season: 's1',
+      rep: '3',
+      REP_2: 'other',
+      value: '10',
+      value_2: 'reserved',
+      positionCoordinateX: '7',
+      positionCoordinateXType: 'GRID_COL',
+    });
+    expect(rows?.[1]).toMatchObject({ replicateIndex: 1, rep: '3' });
+    expect(Object.getOwnPropertyDescriptor(rows?.[0] ?? {}, '__proto__')?.value).toBe(
+      'upstream level',
+    );
+    expect(rows?.[3]).toMatchObject({
+      studyDbId: 'study2',
+      replicateIndex: 0,
+      rep: null,
+      entryType: null,
+    });
+    const wide = await runToolContract(definition, args, { context: { tenantId: 't1' } });
+    expect(wide.structuredContent).toMatchObject({ countLegend: { v1: 'n_v1' } });
+    expect(wide.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining('count in `n_v1`') }),
+      ]),
+    );
+    expect(register.mock.calls[1]?.[1].rows).toMatchObject([{ v1: 70 / 3, n_v1: 3 }]);
+  });
+
   it.each([
     {
       label: 'mean averages each germplasm’s replicates',
@@ -173,7 +302,15 @@ describe('brapi_build_phenotype_matrix tool', () => {
     const { result, staged } = await build(ctx, heights(pairs), { shape: 'wide', aggregate });
 
     expect(staged).toEqual(
-      cells.map(([g, v1]) => ({ germplasmDbId: g, germplasmName: g.toUpperCase(), v1 })),
+      cells.map(([g, v1]) => ({
+        germplasmDbId: g,
+        germplasmName: g.toUpperCase(),
+        v1,
+        n_v1:
+          aggregate === 'first'
+            ? 1
+            : pairs.filter(([id, value]) => id === g && Number.isFinite(Number(value))).length,
+      })),
     );
     expect(result).toMatchObject({
       observationCount: pairs.length,
@@ -182,7 +319,7 @@ describe('brapi_build_phenotype_matrix tool', () => {
       variableLegend: { v1: 'Height' },
       dataframe: { rowCount: cells.length },
     });
-    expect(result.dataframe?.columns).toEqual(['germplasmDbId', 'germplasmName', 'v1']);
+    expect(result.dataframe?.columns).toEqual(['germplasmDbId', 'germplasmName', 'v1', 'n_v1']);
     expect(result.warnings.some((w) => /^Variable 'v1': all values are non-numeric/.test(w))).toBe(
       nonNumeric,
     );
@@ -211,7 +348,7 @@ describe('brapi_build_phenotype_matrix tool', () => {
       value,
       replicateIndex,
     });
-    expect(staged).toEqual([long('g1', '10', 0), long('g1', '20', 1), long('g2', '30', 0)]);
+    expect(staged).toMatchObject([long('g1', '10', 0), long('g1', '20', 1), long('g2', '30', 0)]);
     expect(result.observationCount).toBe(3);
     expect(result.dataframe?.rowCount).toBe(3);
     expect(result.warnings.some((w) => /aggregate.*all.*long/i.test(w))).toBe(warns);

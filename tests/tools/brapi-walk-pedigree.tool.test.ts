@@ -125,6 +125,28 @@ describe('brapi_walk_pedigree tool', () => {
     resetTestServices();
   });
 
+  it('defers excess distinct roots and reports the effective depth', async () => {
+    const ctx = await connect(fetcher, [], ['germplasm', PROGENY]);
+    const roots = Array.from({ length: 20 }, (_, index) => String(index));
+    const calls = serveFixture(fetcher, {
+      progeny: Object.fromEntries(roots.map((root) => [root, { progeny: [] }])),
+    });
+    const result = await walk(ctx, {
+      germplasmDbIds: ['0', ...roots, 'later2', 'later1', 'later2'],
+      direction: 'descendants',
+      maxDepth: 11,
+    });
+    expect(result).toMatchObject({
+      rootCount: 20,
+      maxDepth: 10,
+      deferredRoots: ['later2', 'later1'],
+      frontier: [],
+    });
+    expect(calls).toEqual(roots.map((root) => `progeny:${root}`));
+    expect(result.warnings.join(' ')).toContain('10');
+    expect(textOf(result)).toMatch(/later2.*later1/);
+  });
+
   it('characterizes a depth-boundary terminal without expanding beyond the requested side', async () => {
     const ctx = await connect(fetcher, [PROGENY]);
     const calls = serveFixture(fetcher, {

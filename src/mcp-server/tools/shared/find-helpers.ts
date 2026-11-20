@@ -171,11 +171,12 @@ export function spillWalkCeiling(): number {
 /**
  * Wall-clock budget for one spill walk — every page, retry, and backoff after
  * the first page — inside the call deadline every upstream request shares
- * (`CALL_DEADLINE_MS`); the walk stops at whichever ends first. Leaves the
+ * (`BRAPI_CALL_DEADLINE_MS`); the walk stops at whichever ends first. Leaves the
  * dataframe registration room under the MCP SDK client's 60 s default request
  * timeout; rows the budget cuts off leave the dataframe marked truncated.
  */
-export const SPILL_WALK_DEADLINE_MS = 40_000;
+const SPILL_WALK_FRACTION = 0.8;
+export const SPILL_WALK_DEADLINE_MS = CALL_DEADLINE_MS * SPILL_WALK_FRACTION;
 
 /**
  * Byte budget for a find_* tool's inline `results[]`: the UTF-8 length of the
@@ -486,6 +487,11 @@ export function applyDialectFiltersOrFail(
 export type FindRoute =
   | {
       filters: Record<string, unknown>;
+      fanout?: {
+        dimensions: [string, unknown[]][];
+        preflightMaxTotal?: number;
+        warnings: string[];
+      };
       kind: 'get';
       path: string;
       service: string;
@@ -501,6 +507,7 @@ export interface ResolveFindRouteInput {
   dialect: BrapiDialect;
   endpoint: string;
   filters: Record<string, unknown>;
+  getFanoutPreflightMaxTotal?: number;
   profile: CapabilityProfile;
   /**
    * Set by the dialect adapter when at least one multi-value array filter
@@ -543,7 +550,34 @@ export function resolveFindRoute(input: ResolveFindRouteInput): FindRoute {
   const escalate = input.requiresEscalation === true && searchSupported && !searchDisabled;
 
   if (getSupported && !escalate) {
-    return { kind: 'get', service, path, filters: input.filters };
+    const route: FindRoute = { kind: 'get', service, path, filters: input.filters };
+    if (input.requiresEscalation) {
+      const dimensions: [string, unknown[]][] = [];
+      for (const [key, values] of Object.entries(input.searchBody)) {
+        if (!Array.isArray(values) || values.length < 2) continue;
+        const sample = input.dialect.adaptGetFilters(input.endpoint, { [key]: values.slice(0, 2) });
+        if (!sample.requiresEscalation) continue;
+        const wireKey = Object.keys(sample.filters)[0];
+        if (wireKey !== undefined && Object.hasOwn(route.filters, wireKey)) {
+          dimensions.push([wireKey, [...new Set(values)]]);
+        }
+      }
+      if (dimensions.length) {
+        route.fanout = {
+          dimensions,
+          warnings: input.warnings,
+          ...(input.getFanoutPreflightMaxTotal !== undefined && {
+            preflightMaxTotal: input.getFanoutPreflightMaxTotal,
+          }),
+        };
+        for (let index = input.warnings.length - 1; index >= 0; index--) {
+          if (input.warnings[index]?.includes('only the first value')) {
+            input.warnings.splice(index, 1);
+          }
+        }
+      }
+    }
+    return route;
   }
 
   if (searchSupported && !searchDisabled) {
@@ -960,9 +994,12 @@ export interface LoadedRows<T> {
   hasMore: boolean;
   /** Pages actually consumed — useful for telemetry. */
   pagesFetched: number;
+  partialReason?: string;
   /** Explicit first-page request size, when decoupled from the preview limit. */
   requestedPageSize?: number;
   rows: T[];
+  /** Upstream rows examined when this page holds a deduplicated union. */
+  rowsScanned?: number;
   /** Page stride reported by the upstream for the loaded first page. */
   servedPageSize?: number;
   /** Total rows advertised by the server (may be larger than `rows.length`). */
@@ -998,6 +1035,9 @@ export async function loadInitialFindPage<T>(
   ctx: Context,
   options: { normalizeRow?: (row: T) => T; pageSize?: number } = {},
 ): Promise<LoadedRows<T>> {
+  if (route.kind === 'get' && route.fanout) {
+    return collectGetUnion(client, connection, route, route.fanout, ctx, options.normalizeRow);
+  }
   const pageSize = options.pageSize ?? loadLimit;
   const envelope = await fetchFindRoutePage<T>(client, connection, route, pageSize, 0, ctx);
   let rows = extractRows<T>(envelope.result);
@@ -1027,6 +1067,123 @@ export interface FindRouteCoverage {
   status: 'complete' | 'partial' | 'failed' | 'unprocessed';
 }
 
+/** Report the scalar dimensions used by a GET union instead of just its first tuple. */
+export function appliedFindFilters(route: FindRoute): Record<string, unknown> {
+  if (route.kind === 'search') return route.searchBody;
+  return route.fanout
+    ? { ...route.filters, ...Object.fromEntries(route.fanout.dimensions) }
+    : route.filters;
+}
+
+const FIND_ROW_IDS = new Map([
+  ['/germplasm', 'germplasmDbId'],
+  ['/studies', 'studyDbId'],
+  ['/locations', 'locationDbId'],
+  ['/images', 'imageDbId'],
+  ['/observations', 'observationDbId'],
+  ['/variants', 'variantDbId'],
+  ['/variables', 'observationVariableDbId'],
+]);
+
+type GetRoute = Extract<FindRoute, { kind: 'get' }>;
+
+/** Lazily expand scalar GET tuples in input order, without building a Cartesian array. */
+export function findRouteBranches(route: FindRoute): {
+  count: bigint;
+  routes: Iterable<FindRoute>;
+} {
+  if (route.kind !== 'get' || !route.fanout) return { count: 1n, routes: [route] };
+  const { path, service, filters } = route;
+  const dimensions = route.fanout.dimensions.toReversed();
+  const count = dimensions.reduce((total, [, values]) => total * BigInt(values.length), 1n);
+  return {
+    count,
+    routes: (function* () {
+      for (let index = 0; index < MAX_SPILLOVER_PAGES && BigInt(index) < count; index++) {
+        let position = index;
+        const selected = { ...filters };
+        for (const [key, values] of dimensions) {
+          selected[key] = values[position % values.length];
+          position = Math.floor(position / values.length);
+        }
+        yield { kind: 'get' as const, path, service, filters: selected };
+      }
+    })(),
+  };
+}
+
+async function collectGetUnion<T>(
+  client: BrapiClient,
+  connection: RegisteredServer,
+  route: GetRoute,
+  fanout: NonNullable<GetRoute['fanout']>,
+  ctx: Context,
+  normalizeRow?: (row: T) => T,
+): Promise<LoadedRows<T>> {
+  const branches = findRouteBranches(route);
+  const branchFilters: Record<string, unknown>[] = [];
+  function* routes() {
+    for (const branch of branches.routes) {
+      const id = String(branchFilters.length);
+      branchFilters.push(appliedFindFilters(branch));
+      yield { id, route: branch };
+    }
+  }
+  const byRoute = new Map<string, T[]>();
+  const coverage = await collectFindRoutes<T>({
+    client,
+    connection,
+    ctx,
+    routes: routes(),
+    ...(fanout.preflightMaxTotal !== undefined && {
+      preflightMaxTotal: fanout.preflightMaxTotal,
+    }),
+    ...(normalizeRow && { normalizeRow }),
+    consume(id, rows) {
+      const branch = byRoute.get(id);
+      if (branch) for (const row of rows) branch.push(row);
+      else byRoute.set(id, rows);
+    },
+  });
+  const rows: T[] = [];
+  const seen = new Set<string>();
+  const idKey = FIND_ROW_IDS.get(route.path);
+  for (const { id } of coverage) {
+    for (const row of byRoute.get(id) ?? []) {
+      const key = idKey && (row as Record<string, unknown>)[idKey];
+      if (typeof key === 'string' || typeof key === 'number') {
+        if (seen.has(String(key))) continue;
+        seen.add(String(key));
+      }
+      rows.push(row);
+    }
+  }
+  const incomplete = coverage.filter((item) => item.status !== 'complete');
+  const skipped = branches.count - BigInt(coverage.length);
+  const partial = incomplete.length > 0 || skipped > 0n;
+  if (partial) {
+    if (incomplete.length) {
+      fanout.warnings.push(
+        `Incomplete GET combinations: ${incomplete.map(({ id, reason }) => `${JSON.stringify(branchFilters[Number(id)])} (${reason ?? 'not started'})`).join(', ')}.`,
+      );
+    }
+    if (skipped > 0n) {
+      fanout.warnings.push(
+        `Skipped ${skipped} GET combinations after the first ${coverage.length} of the ordered Cartesian product ${JSON.stringify(Object.fromEntries(fanout.dimensions))}.`,
+      );
+    }
+  }
+  return {
+    rows,
+    hasMore: false,
+    pagesFetched: coverage.reduce((total, item) => total + item.pagesFetched, 0),
+    rowsScanned: coverage.reduce((total, item) => total + item.rowsScanned, 0),
+    ...(partial
+      ? { partialReason: 'GET combination collection stopped early (see warnings)' }
+      : { totalCount: rows.length }),
+  };
+}
+
 /**
  * Drain independent routes into one caller-owned union. Page reservations and
  * row reservations are shared across workers, including requests in flight;
@@ -1037,118 +1194,191 @@ export async function collectFindRoutes<T>(input: {
   client: BrapiClient;
   connection: RegisteredServer;
   ctx: Context;
-  routes: { id: string; route: FindRoute }[];
+  routes: Iterable<{ id: string; route: FindRoute }>;
+  preflightMaxTotal?: number;
   normalizeRow?: (row: T) => T;
   consume: (id: string, rows: T[]) => void;
 }): Promise<FindRouteCoverage[]> {
   const config = getServerConfig();
-  const deadline = Math.min(callDeadlineAt(input.ctx), Date.now() + SPILL_WALK_DEADLINE_MS);
+  const deadline = Math.min(
+    callDeadlineAt(input.ctx, config.callDeadlineMs),
+    Date.now() + Math.floor(config.callDeadlineMs * SPILL_WALK_FRACTION),
+  );
   const pageSize = Math.min(config.pageSize, MAX_SPILLOVER_ROWS);
-  const tasks = input.routes.map(({ id, route }) => ({
+  const asTask = ({ id, route }: { id: string; route: FindRoute }) => ({
     route,
     coverage: { id, status: 'unprocessed', rowsScanned: 0, pagesFetched: 0 } as FindRouteCoverage,
-  }));
-  const pending = tasks.values();
+  });
+  const tasks = Array.isArray(input.routes) ? input.routes.map(asTask) : [];
+  function* streamTasks() {
+    for (const route of input.routes) {
+      if (
+        pages >= MAX_SPILLOVER_PAGES ||
+        rowsReserved >= MAX_SPILLOVER_ROWS ||
+        Date.now() >= deadline
+      )
+        break;
+      const task = asTask(route);
+      tasks.push(task);
+      yield task;
+    }
+  }
+  const pending = Array.isArray(input.routes) ? tasks.values() : streamTasks();
   let pages = 0;
   let rowsReserved = 0;
   let firstFailure: unknown;
   let anySucceeded = false;
   const budgetReason = () =>
     Date.now() >= deadline ? 'deadline' : pages >= MAX_SPILLOVER_PAGES ? 'page_cap' : 'row_cap';
-  const worker = async () => {
-    for (const entry of pending) {
+  const collectBranch = async (item: FindRouteCoverage, route: FindRoute) => {
+    let previous: string | undefined;
+    let previousPageSize: number | undefined;
+    for (let page = input.preflightMaxTotal === undefined ? 0 : -1; ; page++) {
       if (input.ctx.signal.aborted)
-        throw requestCancelled('Variable collection cancelled by the caller.');
-      const item = entry.coverage;
-      let previous: string | undefined;
-      let previousPageSize: number | undefined;
-      for (let page = 0; ; page++) {
-        if (input.ctx.signal.aborted)
-          throw requestCancelled('Variable collection cancelled by the caller.');
-        const remaining = deadline - Date.now();
-        if (
-          remaining <= 0 ||
-          pages >= MAX_SPILLOVER_PAGES ||
-          rowsReserved + pageSize > MAX_SPILLOVER_ROWS
-        ) {
-          item.reason = budgetReason();
-          break;
-        }
-        pages++;
-        rowsReserved += pageSize;
-        let envelope: BrapiEnvelope<BrapiListResult<T> | T[]>;
-        try {
-          envelope = await fetchFindRoutePage<T>(
-            input.client,
-            input.connection,
-            entry.route,
-            pageSize,
-            page,
-            input.ctx,
-            {
-              timeoutMs: Math.min(config.requestTimeoutMs, remaining),
-              deadlineMs: remaining,
-              retryOnTimeout: false,
-            },
-          );
-        } catch (error) {
-          rowsReserved -= pageSize;
-          if (input.ctx.signal.aborted) throw error;
-          firstFailure ??= error;
-          item.status = item.pagesFetched === 0 ? 'failed' : 'partial';
-          item.reason =
-            error instanceof McpError && typeof error.data?.reason === 'string'
-              ? error.data.reason
-              : 'upstream_failure';
-          break;
-        }
-        const rawRows = extractRows<T>(envelope.result);
-        rowsReserved -= Math.max(0, pageSize - rawRows.length);
-        item.pagesFetched++;
-        anySucceeded = true;
-        item.status = 'partial';
-        const key = firstRowKey(rawRows);
-        if (rawRows.length > 0 && key === previous) {
-          item.reason = 'repeated_page';
-          break;
-        }
-        previous = key;
-        const rows = rawRows.slice(0, pageSize);
-        item.rowsScanned += rows.length;
-        input.consume(item.id, input.normalizeRow ? rows.map(input.normalizeRow) : rows);
-        const pagination = envelope.metadata?.pagination;
-        const total = pagination?.totalCount;
-        const servedPageSize = pagination?.pageSize ?? pageSize;
-        if (previousPageSize !== undefined && servedPageSize !== previousPageSize) {
-          item.reason = 'page_size_changed';
-          break;
-        }
-        previousPageSize = servedPageSize;
-        if (rawRows.length > pageSize) {
-          item.reason = 'oversized_page';
-          break;
-        }
-        if (
-          (total !== undefined && item.rowsScanned >= total) ||
-          (total === undefined && !isFullPage(rows.length, pageSize, pagination))
-        ) {
+        throw requestCancelled('Find collection cancelled by the caller.');
+      const remaining = deadline - Date.now();
+      const preflight = page < 0;
+      const requestedSize = preflight ? 1 : pageSize;
+      if (
+        remaining <= 0 ||
+        pages >= MAX_SPILLOVER_PAGES ||
+        rowsReserved + requestedSize > MAX_SPILLOVER_ROWS
+      ) {
+        item.reason = budgetReason();
+        break;
+      }
+      pages++;
+      rowsReserved += requestedSize;
+      let envelope: BrapiEnvelope<BrapiListResult<T> | T[]>;
+      try {
+        envelope = await fetchFindRoutePage<T>(
+          input.client,
+          input.connection,
+          route,
+          requestedSize,
+          Math.max(0, page),
+          input.ctx,
+          {
+            timeoutMs: Math.min(
+              preflight ? config.companionTimeoutMs : config.requestTimeoutMs,
+              remaining,
+            ),
+            deadlineMs: remaining,
+            retryOnTimeout: false,
+            ...(preflight && { retryMaxAttempts: 0 }),
+          },
+        );
+      } catch (error) {
+        rowsReserved -= requestedSize;
+        if (input.ctx.signal.aborted) throw error;
+        if (!preflight) firstFailure ??= error;
+        item.status = item.pagesFetched === 0 ? 'failed' : 'partial';
+        item.reason =
+          error instanceof McpError && typeof error.data?.reason === 'string'
+            ? error.data.reason
+            : 'upstream_failure';
+        break;
+      }
+      const rawRows = extractRows<T>(envelope.result);
+      rowsReserved -= Math.max(0, requestedSize - rawRows.length);
+      item.pagesFetched++;
+      anySucceeded = true;
+      item.status = 'partial';
+      const pagination = envelope.metadata?.pagination;
+      const total = pagination?.totalCount;
+      if (preflight && input.preflightMaxTotal !== undefined) {
+        if (total === 0 && rawRows.length === 0) {
           item.status = 'complete';
           break;
         }
-        if (rows.length === 0) {
-          item.reason = 'empty_page_before_total';
+        if (total !== undefined && total > input.preflightMaxTotal) {
+          const rows = rawRows.slice(0, 1);
+          item.rowsScanned = rows.length;
+          input.consume(item.id, input.normalizeRow ? rows.map(input.normalizeRow) : rows);
+          item.reason = 'observation_preflight_bulk_limit';
           break;
         }
+        continue;
+      }
+      const key = firstRowKey(rawRows);
+      if (rawRows.length > 0 && key === previous) {
+        item.reason = 'repeated_page';
+        break;
+      }
+      previous = key;
+      const rows = rawRows.slice(0, pageSize);
+      item.rowsScanned += rows.length;
+      input.consume(item.id, input.normalizeRow ? rows.map(input.normalizeRow) : rows);
+      const servedPageSize = pagination?.pageSize ?? pageSize;
+      if (previousPageSize !== undefined && servedPageSize !== previousPageSize) {
+        item.reason = 'page_size_changed';
+        break;
+      }
+      previousPageSize = servedPageSize;
+      if (rawRows.length > pageSize) {
+        item.reason = 'oversized_page';
+        break;
+      }
+      if (
+        (total !== undefined && item.rowsScanned >= total) ||
+        (total === undefined && !isFullPage(rows.length, pageSize, pagination))
+      ) {
+        item.status = 'complete';
+        break;
+      }
+      if (rows.length === 0) {
+        item.reason = 'empty_page_before_total';
+        break;
+      }
+    }
+  };
+  const worker = async () => {
+    for (const { coverage, route } of pending) {
+      if (input.ctx.signal.aborted) {
+        throw requestCancelled('Find collection cancelled by the caller.');
+      }
+      if (route.kind !== 'get' || !route.fanout) {
+        await collectBranch(coverage, route);
+        continue;
+      }
+      const branches = findRouteBranches(route);
+      let attempted = 0n;
+      let complete = 0n;
+      for (const branch of branches.routes) {
+        const item = asTask({ id: coverage.id, route: branch }).coverage;
+        await collectBranch(item, branch);
+        if (item.status === 'unprocessed') {
+          coverage.reason ??= item.reason ?? 'not_started';
+          break;
+        }
+        attempted++;
+        coverage.pagesFetched += item.pagesFetched;
+        coverage.rowsScanned += item.rowsScanned;
+        if (item.status === 'complete') complete++;
+        else {
+          coverage.reason ??= item.reason ?? 'incomplete';
+          route.fanout.warnings.push(
+            `Incomplete GET combination ${JSON.stringify(appliedFindFilters(branch))}: ${item.reason ?? 'incomplete'}.`,
+          );
+        }
+      }
+      if (complete === branches.count) coverage.status = 'complete';
+      else if (coverage.pagesFetched > 0) coverage.status = 'partial';
+      else if (attempted > 0n) coverage.status = 'failed';
+      if (attempted < branches.count) {
+        route.fanout.warnings.push(
+          `Skipped ${branches.count - attempted} GET combinations for study '${coverage.id}' after the first ${attempted} of the ordered Cartesian product ${JSON.stringify(Object.fromEntries(route.fanout.dimensions))}.`,
+        );
       }
     }
   };
   // Settle every worker before propagating cancellation, so no sibling fetch
   // continues in the background after the operation has returned.
-  const settled = await Promise.allSettled(
-    Array.from({ length: Math.min(config.maxConcurrentRequests, input.routes.length) }, worker),
-  );
-  if (input.ctx.signal.aborted)
-    throw requestCancelled('Variable collection cancelled by the caller.');
+  const workers = Array.isArray(input.routes)
+    ? Math.min(config.maxConcurrentRequests, input.routes.length)
+    : config.maxConcurrentRequests;
+  const settled = await Promise.allSettled(Array.from({ length: workers }, worker));
+  if (input.ctx.signal.aborted) throw requestCancelled('Find collection cancelled by the caller.');
   for (const result of settled) if (result.status === 'rejected') throw result.reason;
   if (!anySucceeded && firstFailure !== undefined) throw firstFailure;
   return tasks.map((task) => task.coverage);
@@ -1214,6 +1444,32 @@ async function fetchFindRoutePage<T>(
     ctx,
     buildRequestOptions(connection, { pageSize, page }, pollOptions),
   );
+}
+
+/** Probe a route using the same transport and a bounded companion request. */
+export async function probeFindRouteTotal(
+  client: BrapiClient,
+  connection: RegisteredServer,
+  route: FindRoute,
+  ctx: Context,
+): Promise<number | undefined> {
+  const config = getServerConfig();
+  const remaining = Math.min(
+    config.companionTimeoutMs,
+    callDeadlineAt(ctx, config.callDeadlineMs) - Date.now(),
+  );
+  if (remaining <= 0) return undefined;
+  try {
+    const page = await fetchFindRoutePage(client, connection, route, 1, 0, ctx, {
+      timeoutMs: remaining,
+      deadlineMs: remaining,
+      retryMaxAttempts: 0,
+    });
+    return page.metadata?.pagination?.totalCount;
+  } catch (error) {
+    if (ctx.signal.aborted || !(error instanceof McpError)) throw error;
+    return undefined;
+  }
 }
 
 export interface SpillInput<T> {
@@ -1433,6 +1689,8 @@ export function toDataframeHandle(
 export interface MaybeSpillInput<T> {
   bridge: CanvasBridge;
   client: BrapiClient;
+  /** Collect the full matched set for a federated caller without staging a source table. */
+  collectOnly?: boolean;
   connection: RegisteredServer;
   ctx: Context;
   filters: Record<string, unknown>;
@@ -1513,6 +1771,14 @@ export interface MaybeSpillResult<T> {
   scanComplete: boolean;
 }
 
+/** Full matched rows and coverage from one finder before federated presentation. */
+export interface FinderCollection {
+  rows: Record<string, unknown>[];
+  rowsScanned: number;
+  scanComplete: boolean;
+  warnings: string[];
+}
+
 /**
  * Resolve a find_* call's full row set, its inline `results`, and its
  * dataframe. Walks the remaining pages when the first page shows more exist
@@ -1550,18 +1816,31 @@ export async function maybeSpill<T extends Record<string, unknown>>(
   if (input.route) spillInput.route = input.route;
   if (input.spillRequestOptions) spillInput.pageRequestOptions = input.spillRequestOptions;
 
+  const preloadedStopReason = input.preloadedStopReason ?? firstPage.partialReason;
   const walk: SpillWalk<T> = firstPage.hasMore
     ? await walkSpillPages(spillInput)
     : {
         fullRows: applyRowTransforms(firstPage.rows, rowMapper, rowFilter),
-        pagesFetched: 1,
+        pagesFetched: firstPage.pagesFetched,
         reachedRowCap: false,
-        rowsScanned: firstPage.rows.length,
+        rowsScanned: firstPage.rowsScanned ?? firstPage.rows.length,
         scanComplete:
-          input.preloadedStopReason === undefined &&
+          preloadedStopReason === undefined &&
           (firstPage.totalCount === undefined || firstPage.rows.length >= firstPage.totalCount),
-        ...(input.preloadedStopReason && { stopReason: input.preloadedStopReason }),
+        ...(preloadedStopReason && { stopReason: preloadedStopReason }),
       };
+
+  if (input.collectOnly) {
+    const warning = noteSpillStop(input.ctx, input.source, walk, firstPage.totalCount);
+    if (warning) input.warnings?.push(warning);
+    return {
+      fullRows: walk.fullRows,
+      results: walk.fullRows,
+      hasMore: !walk.scanComplete,
+      rowsScanned: walk.rowsScanned,
+      scanComplete: walk.scanComplete,
+    };
+  }
 
   const view = input.inlineView ? input.inlineView(walk.fullRows) : walk.fullRows;
   const renderInline = input.renderInline;
@@ -1715,14 +1994,15 @@ async function walkSpillPages<T extends Record<string, unknown>>(
   let pagesFetched = reuseFirstPage ? 1 : 0;
   let stopReason: string | undefined;
   const route = input.route ?? getRouteForPath(input.path, input.filters);
-  const walkDeadlineAt = Date.now() + SPILL_WALK_DEADLINE_MS;
-  const callAt = callDeadlineAt(input.ctx);
+  const walkBudgetMs = Math.floor(config.callDeadlineMs * SPILL_WALK_FRACTION);
+  const walkDeadlineAt = Date.now() + walkBudgetMs;
+  const callAt = callDeadlineAt(input.ctx, config.callDeadlineMs);
   const deadlineAt = Math.min(walkDeadlineAt, callAt);
   const baseTimeoutMs = input.pageRequestOptions?.timeoutMs ?? config.requestTimeoutMs;
   const budgetLabel =
     callAt < walkDeadlineAt
-      ? `this call's ${CALL_DEADLINE_MS / 1000} s deadline for upstream requests`
-      : `the ${SPILL_WALK_DEADLINE_MS / 1000} s dataframe walk time budget`;
+      ? `this call's ${config.callDeadlineMs / 1000} s deadline for upstream requests`
+      : `the ${walkBudgetMs / 1000} s dataframe walk time budget`;
   let previousFirstRow = reuseFirstPage ? firstRowKey(input.firstPage) : undefined;
   let previousPageSize = reuseFirstPage ? (input.firstPageServedSize ?? pageSize) : undefined;
   /** An empty page, or with no reported total a short one: the upstream has no rows past it. */

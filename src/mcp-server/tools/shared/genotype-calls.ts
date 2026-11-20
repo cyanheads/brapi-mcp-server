@@ -12,9 +12,9 @@
 
 import { type Context, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
+import { getServerConfig } from '@/config/server-config.js';
 import {
   type BrapiClient,
-  CALL_DEADLINE_MS,
   CALL_DEADLINE_REASON,
   callDeadlineAt,
 } from '@/services/brapi-client/index.js';
@@ -153,7 +153,8 @@ export async function collectCalls(input: CollectCallsInput): Promise<CollectCal
   const rows: WireCallRow[] = [];
   let truncated = false;
   let stopReason: string | undefined;
-  const deadlineLabel = `this call's ${CALL_DEADLINE_MS / 1000} s deadline for upstream requests`;
+  const { callDeadlineMs } = getServerConfig();
+  const deadlineLabel = `this call's ${callDeadlineMs / 1000} s deadline for upstream requests`;
 
   const firstBody = { ...input.body, page: 0 };
   const first = await input.client.postSearch<Record<string, unknown>>(
@@ -208,7 +209,7 @@ export async function collectCalls(input: CollectCallsInput): Promise<CollectCal
     if (input.ctx.signal.aborted) {
       throw requestCancelled('Genotype-call pull cancelled by the caller.');
     }
-    if (Date.now() >= callDeadlineAt(input.ctx)) {
+    if (Date.now() >= callDeadlineAt(input.ctx, callDeadlineMs)) {
       stopReason = `${deadlineLabel} ran out before page ${page}`;
       break;
     }

@@ -99,6 +99,24 @@ describe('server environment configuration', () => {
     expect(() => getServerConfig()).toThrow(/BRAPI_DEFAULT_BASE_URL/);
   });
 
+  it.each([undefined, '', `\${user_config.BRAPI_CALL_DEADLINE_MS}`])(
+    'uses the default upstream deadline for %j',
+    (value) => {
+      vi.stubEnv('BRAPI_CALL_DEADLINE_MS', value);
+      expect(getServerConfig().callDeadlineMs).toBe(50_000);
+    },
+  );
+
+  it('parses a deployment override for the upstream deadline', () => {
+    vi.stubEnv('BRAPI_CALL_DEADLINE_MS', '80000');
+    expect(getServerConfig().callDeadlineMs).toBe(80_000);
+  });
+
+  it.each(['0', '1.5', 'invalid'])('rejects an invalid upstream deadline %s', (value) => {
+    vi.stubEnv('BRAPI_CALL_DEADLINE_MS', value);
+    expect(() => getServerConfig()).toThrow(/BRAPI_CALL_DEADLINE_MS/);
+  });
+
   it('preserves a valid URL containing a literal placeholder segment', () => {
     const url = `https://example.org/\${instance}/brapi/v2`;
     vi.stubEnv('BRAPI_DEFAULT_BASE_URL', url);

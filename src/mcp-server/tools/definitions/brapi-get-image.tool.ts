@@ -13,6 +13,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
@@ -22,7 +23,7 @@ import {
   NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
-import { literal } from '../shared/markdown-literals.js';
+import { code, literal } from '../shared/markdown-literals.js';
 
 const MAX_IMAGES_PER_CALL = 5;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -88,6 +89,10 @@ const ImageWarningSchema = z
 const OutputSchema = z.object({
   alias: z.string().describe('Connection alias the call used.'),
   images: z.array(ImagePayloadSchema).describe('Successfully loaded images.'),
+  deferredImageDbIds: z
+    .array(z.string())
+    .optional()
+    .describe('Pass these remaining IDs in the next image call.'),
   errors: z.array(ImageErrorSchema).describe('Images that could not be loaded, one entry per id.'),
   warnings: z
     .array(ImageWarningSchema)
@@ -124,6 +129,7 @@ export const brapiGetImage = tool('brapi_get_image', {
         'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -179,8 +185,9 @@ export const brapiGetImage = tool('brapi_get_image', {
     imageDbIds: z
       .array(NonBlankString)
       .min(1)
-      .max(MAX_IMAGES_PER_CALL)
-      .describe(`1–${MAX_IMAGES_PER_CALL} image identifiers.`),
+      .describe(
+        `Fetch the first ${MAX_IMAGES_PER_CALL} distinct image IDs. Additional IDs are returned for the next call.`,
+      ),
     alias: AliasInput,
   }),
   inputAliases: {
@@ -214,8 +221,12 @@ export const brapiGetImage = tool('brapi_get_image', {
 
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
+    const distinctIds = [...new Set(input.imageDbIds)];
+    const deferredImageDbIds = distinctIds.slice(MAX_IMAGES_PER_CALL);
     const loaded = await Promise.all(
-      input.imageDbIds.map((id) => fetchOne(id, hasImageContent, connection, dialect, client, ctx)),
+      distinctIds
+        .slice(0, MAX_IMAGES_PER_CALL)
+        .map((id) => fetchOne(id, hasImageContent, connection, dialect, client, ctx)),
     );
 
     const images: z.infer<typeof ImagePayloadSchema>[] = [];
@@ -233,6 +244,7 @@ export const brapiGetImage = tool('brapi_get_image', {
       images,
       errors,
       warnings,
+      ...(deferredImageDbIds.length > 0 && { deferredImageDbIds }),
     };
     return result;
   },
@@ -240,6 +252,8 @@ export const brapiGetImage = tool('brapi_get_image', {
   format: (result) => {
     const blocks: { type: 'text'; text: string }[] = [];
     const header: string[] = [];
+    if (result.deferredImageDbIds)
+      header.push(`Call again with imageDbIds ${code(JSON.stringify(result.deferredImageDbIds))}.`);
     header.push(literal`# ${result.images.length} image(s) loaded — \`${result.alias}\``);
     if (result.errors.length > 0) {
       header.push(literal`⚠ ${result.errors.length} failed — see below.`);

@@ -21,6 +21,7 @@ import {
   requireRegisteredConnection,
 } from '@/mcp-server/tools/shared/find-helpers.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 
 export const brapiVariableResource = resource('brapi://variable/{observationVariableDbId}', {
   name: 'brapi-variable',
@@ -62,6 +63,7 @@ export const brapiVariableResource = resource('brapi://variable/{observationVari
         'Ask the operator to check that the credentials configured for the default alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,

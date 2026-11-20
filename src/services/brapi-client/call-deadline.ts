@@ -12,23 +12,19 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { type McpError, timeout } from '@cyanheads/mcp-ts-core/errors';
 
-/**
- * Wall-clock budget, from the start of a tool call, for every upstream request
- * the call makes. Leaves headroom under the client's 60 s default for the work
- * after the last response (canvas registration, formatting).
- */
-export const CALL_DEADLINE_MS = 50_000;
-
 /** `data.reason` on a request the call deadline cut short or never sent. */
 export const CALL_DEADLINE_REASON = 'call_deadline_exceeded';
 
 /** Recovery hint on every `Timeout` the client surfaces. */
 export const UPSTREAM_TIMEOUT_HINT =
+  'The BrAPI endpoint is slow or not answering. Retry later, or reduce the amount of data requested from that endpoint.';
+
+const CALL_DEADLINE_HINT =
   'The BrAPI server is slow or not answering. Retry later, or narrow the request so the call needs fewer upstream requests.';
 
 /** Epoch ms at which the call `ctx` belongs to stops waiting on upstream requests. */
-export function callDeadlineAt(ctx: Pick<Context, 'timestamp'>): number {
-  return Date.parse(ctx.timestamp) + CALL_DEADLINE_MS;
+export function callDeadlineAt(ctx: Pick<Context, 'timestamp'>, callDeadlineMs: number): number {
+  return Date.parse(ctx.timestamp) + callDeadlineMs;
 }
 
 /**
@@ -37,10 +33,11 @@ export function callDeadlineAt(ctx: Pick<Context, 'timestamp'>): number {
  */
 export function callDeadlineExceeded(
   operation: string,
-  details: { sent: boolean; retryAttempts?: number },
+  callDeadlineMs: number,
+  details: { sent: boolean; retryAttempts?: number; primaryRead?: boolean },
   cause?: unknown,
 ): McpError {
-  const seconds = CALL_DEADLINE_MS / 1000;
+  const seconds = callDeadlineMs / 1000;
   const attempts =
     details.retryAttempts && details.retryAttempts > 1
       ? ` (${details.retryAttempts} attempts)`
@@ -52,10 +49,10 @@ export function callDeadlineExceeded(
     message,
     {
       reason: CALL_DEADLINE_REASON,
-      callDeadlineMs: CALL_DEADLINE_MS,
+      callDeadlineMs,
       operation,
       ...(details.retryAttempts !== undefined && { retryAttempts: details.retryAttempts }),
-      recovery: { hint: UPSTREAM_TIMEOUT_HINT },
+      recovery: { hint: details.primaryRead ? UPSTREAM_TIMEOUT_HINT : CALL_DEADLINE_HINT },
     },
     cause === undefined ? undefined : { cause },
   );

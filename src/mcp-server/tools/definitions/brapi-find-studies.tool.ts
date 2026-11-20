@@ -9,15 +9,17 @@
  * @module mcp-server/tools/definitions/brapi-find-studies.tool
  */
 
-import { tool, z } from '@cyanheads/mcp-ts-core';
+import { type HandlerContext, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import {
   AliasInput,
+  appliedFindFilters,
   applyDialectFiltersOrFail,
   asString,
   asStringArray,
@@ -30,6 +32,7 @@ import {
   dialectRowMapper,
   discloseInlineTrim,
   ExtraFiltersInput,
+  type FinderCollection,
   fkMatchCheck,
   InlineTrimEnrichment,
   LoadLimitInput,
@@ -143,6 +146,25 @@ const SERVER_TO_USER: Record<string, string> = {
   active: 'active',
 };
 
+const InputSchema = z.object({
+  alias: AliasInput,
+  crop: NonBlankString.optional().describe('Filter by common crop name (single value).'),
+  trialTypes: z.array(NonBlankString).optional().describe('Filter by study types.'),
+  seasons: z.array(NonBlankString).optional().describe('Filter by seasons (e.g. "2022").'),
+  locations: z
+    .array(NonBlankString)
+    .optional()
+    .describe(
+      'Filter by locationDbIds (server-side identifiers, not display names). On servers that ignore this filter on /studies, it is applied client-side over the scanned studies, and a study with no locationDbId never matches.',
+    ),
+  programs: z.array(NonBlankString).optional().describe('Filter by programDbIds.'),
+  trials: z.array(NonBlankString).optional().describe('Filter by trialDbIds.'),
+  studyNames: z.array(NonBlankString).optional().describe('Filter by study display name.'),
+  active: z.boolean().optional().describe('Restrict to active / inactive studies.'),
+  loadLimit: LoadLimitInput,
+  extraFilters: ExtraFiltersInput,
+});
+
 export const brapiFindStudies = tool('brapi_find_studies', {
   description:
     'Locate studies matching crop, trial type, season, location, or program. Enriches results with program/trial/location context in one call. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
@@ -203,6 +225,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
         'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -255,24 +278,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       thrownBy: 'service',
     },
   ] as const,
-  input: z.object({
-    alias: AliasInput,
-    crop: NonBlankString.optional().describe('Filter by common crop name (single value).'),
-    trialTypes: z.array(NonBlankString).optional().describe('Filter by study types.'),
-    seasons: z.array(NonBlankString).optional().describe('Filter by seasons (e.g. "2022").'),
-    locations: z
-      .array(NonBlankString)
-      .optional()
-      .describe(
-        'Filter by locationDbIds (server-side identifiers, not display names). On servers that ignore this filter on /studies, it is applied client-side over the scanned studies, and a study with no locationDbId never matches.',
-      ),
-    programs: z.array(NonBlankString).optional().describe('Filter by programDbIds.'),
-    trials: z.array(NonBlankString).optional().describe('Filter by trialDbIds.'),
-    studyNames: z.array(NonBlankString).optional().describe('Filter by study display name.'),
-    active: z.boolean().optional().describe('Restrict to active / inactive studies.'),
-    loadLimit: LoadLimitInput,
-    extraFilters: ExtraFiltersInput,
-  }),
+  input: InputSchema,
   inputAliases: {
     seasonDbId: 'seasons',
     seasonDbIds: 'seasons',
@@ -331,190 +337,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     warnings: { render: renderWarningsTrailer },
   },
 
-  async handler(input, ctx) {
-    const capabilities = getCapabilityRegistry();
-    const client = getBrapiClient();
-    const bridge = getCanvasBridge();
-    const config = getServerConfig();
-
-    const connection = await requireRegisteredConnection(ctx, input.alias);
-
-    const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
-    if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
-    const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
-
-    const dialect = await resolveDialect(connection, ctx, capabilityLookup);
-
-    const warnings: string[] = [];
-    const merged = mergeFilters(
-      {
-        commonCropNames: input.crop !== undefined ? [input.crop] : undefined,
-        studyTypes: input.trialTypes,
-        seasonDbIds: input.seasons,
-        locationDbIds: input.locations,
-        programDbIds: input.programs,
-        trialDbIds: input.trials,
-        studyNames: input.studyNames,
-        active: input.active,
-      },
-      input.extraFilters,
-      warnings,
-    );
-
-    // A dialect whose server ignores `locationDbIds` on /studies would drop
-    // it and widen the call to every location. Keep it off the wire and
-    // match `row.locationDbId` client-side over the spill walk instead.
-    const dialectDropsLocations =
-      input.locations !== undefined &&
-      input.locations.length > 0 &&
-      dialect
-        .adaptGetFilters('studies', { locationDbIds: input.locations })
-        .dropped.includes('locationDbIds');
-    const clientLocations = dialectDropsLocations ? new Set(input.locations) : undefined;
-    const { locationDbIds: _clientSide, ...mergedWithoutLocations } = merged;
-    const wireFilters = clientLocations ? mergedWithoutLocations : merged;
-
-    const adapted = applyDialectFiltersOrFail(ctx, dialect, 'studies', wireFilters, warnings);
-    const filters = adapted.filters;
-    const route = resolveFindRoute({
-      profile,
-      dialect,
-      endpoint: 'studies',
-      filters,
-      searchBody: wireFilters,
-      warnings,
-      ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
-    });
-
-    const loadLimit = input.loadLimit ?? config.loadLimit;
-    const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'studies');
-    const firstPage = await loadInitialFindPage<Record<string, unknown>>(
-      client,
-      connection,
-      route,
-      loadLimit,
-      ctx,
-      normalizeRow ? { normalizeRow } : {},
-    );
-
-    const spill = await maybeSpill({
-      firstPage,
-      client,
-      connection,
-      path: '/studies',
-      filters,
-      route,
-      source: 'find_studies',
-      renderInline: (rows, dataframe) =>
-        renderStudiesRows({ results: rows as Output['results'], dataframe }),
-      loadLimit,
-      ctx,
-      bridge,
-      warnings,
-      ...(normalizeRow ? { normalizeRow } : {}),
-      ...(clientLocations
-        ? {
-            rowFilter: (row: Record<string, unknown>) => {
-              const id = asString(row.locationDbId);
-              return id !== undefined && clientLocations.has(id);
-            },
-          }
-        : {}),
-    });
-    const { fullRows, dataframe, rowsScanned, scanComplete, results, hasMore } = spill;
-
-    const distributions = {
-      programName: computeDistribution(fullRows, (r) => asString(r.programName)),
-      studyType: computeDistribution(fullRows, (r) => asString(r.studyType)),
-      seasons: computeDistribution(fullRows, (r) => asStringArray(r.seasons)),
-      locationName: computeDistribution(fullRows, (r) => asString(r.locationName)),
-      commonCropName: computeDistribution(fullRows, (r) => asString(r.commonCropName)),
-    };
-
-    checkFilterMatchRates(warnings, fullRows.length, [
-      { paramName: 'seasons', requestedValues: input.seasons, distribution: distributions.seasons },
-      {
-        paramName: 'trialTypes',
-        requestedValues: input.trialTypes,
-        distribution: distributions.studyType,
-        caseInsensitive: true,
-      },
-      {
-        paramName: 'crop',
-        requestedValues: input.crop !== undefined ? [input.crop] : undefined,
-        distribution: distributions.commonCropName,
-        caseInsensitive: true,
-      },
-      fkMatchCheck(
-        'locations',
-        clientLocations ? undefined : input.locations,
-        fullRows,
-        'locationDbId',
-      ),
-      fkMatchCheck('programs', input.programs, fullRows, 'programDbId'),
-      fkMatchCheck('trials', input.trials, fullRows, 'trialDbId'),
-      ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
-    ]);
-
-    const upstreamTotal = firstPage.totalCount ?? rowsScanned;
-    // With the location filter applied here, counts describe the matched set
-    // (as bbox does on brapi_find_locations); the upstream total goes in the warning.
-    let totalCount = upstreamTotal;
-    if (clientLocations) {
-      totalCount = fullRows.length;
-      const scannedOf = firstPage.totalCount === undefined ? '' : ` of ${firstPage.totalCount}`;
-      warnings.push(
-        scanComplete
-          ? `Filter 'locations' applied client-side — this server ignores locationDbIds on /studies. ${fullRows.length} of ${rowsScanned} upstream studies matched; a study with no locationDbId never matches.`
-          : `Filter 'locations' applied client-side — this server ignores locationDbIds on /studies. ${fullRows.length} matched among the first ${rowsScanned}${scannedOf} upstream studies; the rest were not checked. Narrow with crop, seasons, programs, or trials to bring the set into one scan.`,
-      );
-    }
-    const refinementHint = buildRefinementHint(spill, distributions, {
-      availableFilters: [
-        'crop',
-        'trialTypes',
-        'seasons',
-        'locations',
-        'programs',
-        'trials',
-        'studyNames',
-        'active',
-      ],
-    });
-
-    ctx.log.info('find_studies completed', {
-      baseUrl: connection.baseUrl,
-      totalCount,
-      returnedCount: results.length,
-      spilled: dataframe !== undefined,
-    });
-
-    const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
-    ctx.enrich({
-      totalCount,
-      returnedCount: results.length,
-      appliedFilters,
-      ...(clientLocations ? { clientSideFilters: { locations: [...clientLocations] } } : {}),
-      warnings,
-      ...(refinementHint ? { refinementHint } : {}),
-    });
-    if (results.length === 0)
-      ctx.enrich.notice(
-        warnings.length > 0
-          ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
-          : 'No rows matched the applied filters. Try broadening crop, seasons, programs, trials, studyNames, or active.',
-      );
-    discloseInlineTrim(ctx, spill, loadLimit);
-
-    const result: Output = {
-      alias: connection.alias,
-      results: results as z.infer<typeof StudyRowSchema>[],
-      hasMore,
-      distributions,
-    };
-    if (dataframe) result.dataframe = dataframe;
-    return result;
-  },
+  handler: (input, ctx) => findStudies(input, ctx, false),
 
   format: (result) => {
     const lines: string[] = [];
@@ -542,6 +365,209 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** Run the single-source finder or collect its matched rows for federation. */
+export function findStudies(
+  input: z.output<typeof InputSchema>,
+  ctx: HandlerContext<'unknown_alias' | 'all_filters_dropped'>,
+  collectOnly: true,
+): Promise<FinderCollection>;
+export function findStudies(
+  input: z.output<typeof InputSchema>,
+  ctx: HandlerContext<'unknown_alias' | 'all_filters_dropped'>,
+  collectOnly: false,
+): Promise<Output>;
+export async function findStudies(
+  input: z.output<typeof InputSchema>,
+  ctx: HandlerContext<'unknown_alias' | 'all_filters_dropped'>,
+  collectOnly: boolean,
+): Promise<Output | FinderCollection> {
+  const capabilities = getCapabilityRegistry();
+  const client = getBrapiClient();
+  const bridge = getCanvasBridge();
+  const config = getServerConfig();
+
+  const connection = await requireRegisteredConnection(ctx, input.alias);
+
+  const capabilityLookup: { auth?: typeof connection.resolvedAuth } = {};
+  if (connection.resolvedAuth) capabilityLookup.auth = connection.resolvedAuth;
+  const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
+
+  const dialect = await resolveDialect(connection, ctx, capabilityLookup);
+
+  const warnings: string[] = [];
+  const merged = mergeFilters(
+    {
+      commonCropNames: input.crop !== undefined ? [input.crop] : undefined,
+      studyTypes: input.trialTypes,
+      seasonDbIds: input.seasons,
+      locationDbIds: input.locations,
+      programDbIds: input.programs,
+      trialDbIds: input.trials,
+      studyNames: input.studyNames,
+      active: input.active,
+    },
+    input.extraFilters,
+    warnings,
+  );
+
+  // A dialect whose server ignores `locationDbIds` on /studies would drop
+  // it and widen the call to every location. Keep it off the wire and
+  // match `row.locationDbId` client-side over the spill walk instead.
+  const dialectDropsLocations =
+    input.locations !== undefined &&
+    input.locations.length > 0 &&
+    dialect
+      .adaptGetFilters('studies', { locationDbIds: input.locations })
+      .dropped.includes('locationDbIds');
+  const clientLocations = dialectDropsLocations ? new Set(input.locations) : undefined;
+  const { locationDbIds: _clientSide, ...mergedWithoutLocations } = merged;
+  const wireFilters = clientLocations ? mergedWithoutLocations : merged;
+
+  const adapted = applyDialectFiltersOrFail(ctx, dialect, 'studies', wireFilters, warnings);
+  const filters = adapted.filters;
+  const route = resolveFindRoute({
+    profile,
+    dialect,
+    endpoint: 'studies',
+    filters,
+    searchBody: wireFilters,
+    warnings,
+    ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
+  });
+
+  const loadLimit = input.loadLimit ?? config.loadLimit;
+  const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'studies');
+  const firstPage = await loadInitialFindPage<Record<string, unknown>>(
+    client,
+    connection,
+    route,
+    loadLimit,
+    ctx,
+    normalizeRow ? { normalizeRow } : {},
+  );
+
+  const spill = await maybeSpill({
+    firstPage,
+    client,
+    connection,
+    path: '/studies',
+    filters,
+    route,
+    source: 'find_studies',
+    renderInline: (rows, dataframe) =>
+      renderStudiesRows({ results: rows as Output['results'], dataframe }),
+    loadLimit,
+    ctx,
+    bridge,
+    warnings,
+    collectOnly,
+    ...(normalizeRow ? { normalizeRow } : {}),
+    ...(clientLocations
+      ? {
+          rowFilter: (row: Record<string, unknown>) => {
+            const id = asString(row.locationDbId);
+            return id !== undefined && clientLocations.has(id);
+          },
+        }
+      : {}),
+  });
+  const { fullRows, dataframe, rowsScanned, scanComplete, results, hasMore } = spill;
+
+  const distributions = {
+    programName: computeDistribution(fullRows, (r) => asString(r.programName)),
+    studyType: computeDistribution(fullRows, (r) => asString(r.studyType)),
+    seasons: computeDistribution(fullRows, (r) => asStringArray(r.seasons)),
+    locationName: computeDistribution(fullRows, (r) => asString(r.locationName)),
+    commonCropName: computeDistribution(fullRows, (r) => asString(r.commonCropName)),
+  };
+
+  checkFilterMatchRates(warnings, fullRows.length, [
+    { paramName: 'seasons', requestedValues: input.seasons, distribution: distributions.seasons },
+    {
+      paramName: 'trialTypes',
+      requestedValues: input.trialTypes,
+      distribution: distributions.studyType,
+      caseInsensitive: true,
+    },
+    {
+      paramName: 'crop',
+      requestedValues: input.crop !== undefined ? [input.crop] : undefined,
+      distribution: distributions.commonCropName,
+      caseInsensitive: true,
+    },
+    fkMatchCheck(
+      'locations',
+      clientLocations ? undefined : input.locations,
+      fullRows,
+      'locationDbId',
+    ),
+    fkMatchCheck('programs', input.programs, fullRows, 'programDbId'),
+    fkMatchCheck('trials', input.trials, fullRows, 'trialDbId'),
+    ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
+  ]);
+
+  const upstreamTotal = firstPage.totalCount ?? rowsScanned;
+  // With the location filter applied here, counts describe the matched set
+  // (as bbox does on brapi_find_locations); the upstream total goes in the warning.
+  let totalCount = upstreamTotal;
+  if (clientLocations) {
+    totalCount = fullRows.length;
+    const scannedOf = firstPage.totalCount === undefined ? '' : ` of ${firstPage.totalCount}`;
+    warnings.push(
+      scanComplete
+        ? `Filter 'locations' applied client-side — this server ignores locationDbIds on /studies. ${fullRows.length} of ${rowsScanned} upstream studies matched; a study with no locationDbId never matches.`
+        : `Filter 'locations' applied client-side — this server ignores locationDbIds on /studies. ${fullRows.length} matched among the first ${rowsScanned}${scannedOf} upstream studies; the rest were not checked. Narrow with crop, seasons, programs, or trials to bring the set into one scan.`,
+    );
+  }
+  const refinementHint = buildRefinementHint(spill, distributions, {
+    availableFilters: [
+      'crop',
+      'trialTypes',
+      'seasons',
+      'locations',
+      'programs',
+      'trials',
+      'studyNames',
+      'active',
+    ],
+  });
+
+  ctx.log.info('find_studies completed', {
+    baseUrl: connection.baseUrl,
+    totalCount,
+    returnedCount: results.length,
+    spilled: dataframe !== undefined,
+  });
+
+  if (collectOnly) return { rows: fullRows, rowsScanned, scanComplete, warnings };
+
+  const appliedFilters = appliedFindFilters(route);
+  ctx.enrich({
+    totalCount,
+    returnedCount: results.length,
+    appliedFilters,
+    ...(clientLocations ? { clientSideFilters: { locations: [...clientLocations] } } : {}),
+    warnings,
+    ...(refinementHint ? { refinementHint } : {}),
+  });
+  if (results.length === 0)
+    ctx.enrich.notice(
+      warnings.length > 0
+        ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
+        : 'No rows matched the applied filters. Try broadening crop, seasons, programs, trials, studyNames, or active.',
+    );
+  discloseInlineTrim(ctx, spill, loadLimit);
+
+  const result: Output = {
+    alias: connection.alias,
+    results: results as z.infer<typeof StudyRowSchema>[],
+    hasMore,
+    distributions,
+  };
+  if (dataframe) result.dataframe = dataframe;
+  return result;
+}
 
 /** Render the exact row section used by both formatting and preview sizing. */
 function renderStudiesRows(result: Pick<Output, 'results' | 'dataframe'>): string {

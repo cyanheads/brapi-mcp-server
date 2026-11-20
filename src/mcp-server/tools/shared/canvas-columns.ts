@@ -86,18 +86,28 @@ export function sanitizeColumnName(raw: string): string {
  * (`_2`, `_3`, …). Returns the column names in order plus a legend mapping each
  * safe column name back to its original ID.
  */
-export function buildUniqueColumns(ids: readonly string[]): {
+export function buildUniqueColumns(
+  ids: readonly string[],
+  reserved: readonly string[] = [],
+): {
   columns: string[];
   toOriginal: Record<string, string>;
 } {
-  const used = new Map<string, number>();
+  const used = new Set(reserved.map((name) => name.toLowerCase()));
+  const nextSuffix = new Map<string, number>();
   const columns: string[] = [];
-  const toOriginal: Record<string, string> = {};
+  const toOriginal: Record<string, string> = Object.create(null);
   for (const id of ids) {
     const base = sanitizeColumnName(id);
-    const count = (used.get(base) ?? 0) + 1;
-    used.set(base, count);
-    const colName = count === 1 ? base : `${base}_${count}`;
+    const key = base.toLowerCase();
+    let colName = base;
+    let count = nextSuffix.get(key) ?? 2;
+    while (used.has(colName.toLowerCase())) {
+      const suffix = `_${count++}`;
+      colName = `${base.slice(0, 63 - suffix.length)}${suffix}`;
+    }
+    if (count > 2) nextSuffix.set(key, count);
+    used.add(colName.toLowerCase());
     columns.push(colName);
     toOriginal[colName] = id;
   }
@@ -149,7 +159,7 @@ export function sanitizeRowColumns(rows: ReadonlyArray<Record<string, unknown>>)
   }
 
   const rewritten = rows.map((row) => {
-    const out: Record<string, unknown> = {};
+    const out: Record<string, unknown> = Object.create(null);
     for (const [key, value] of Object.entries(row)) {
       out[rename.get(key) ?? key] = value;
     }

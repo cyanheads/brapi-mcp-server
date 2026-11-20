@@ -12,6 +12,42 @@ import { OntologyResolver, type VariableLike } from '@/services/ontology-resolve
 const resolver = new OntologyResolver();
 
 describe('OntologyResolver', () => {
+  const cassava = [
+    {
+      observationVariableDbId: '78776',
+      observationVariableName: 'dry matter content percentage|month 10|boiled root|COMP:0000195',
+      observationVariablePUI: 'COMP:0000195',
+    },
+    {
+      observationVariableDbId: '77889',
+      observationVariableName: 'dry matter content by QST in percentage|CO_334:0002058',
+      observationVariablePUI: 'CO_334:0002058',
+    },
+    {
+      observationVariableDbId: '70741',
+      observationVariableName: 'dry matter content percentage|CO_334:0000092',
+      observationVariablePUI: 'CO_334:0000092',
+      trait: { traitName: 'dry matter content percentage' },
+    },
+  ];
+
+  it('preserves exact PUI and composite name segment matches', () => {
+    expect(resolver.match('CO_334:0000092', cassava)[0]).toMatchObject({
+      observationVariableDbId: '70741',
+      source: 'puiMatch',
+    });
+    expect(resolver.match('month 10', cassava)[0]?.observationVariableDbId).toBe('78776');
+  });
+
+  it.each(['dry matter content', 'dry matter content percentage'])(
+    'ranks the CassavaBase base variable first for %s',
+    (query) => {
+      expect(resolver.match(query, cassava, { limit: 1 })[0]).toMatchObject({
+        observationVariableDbId: '70741',
+        name: 'dry matter content percentage|CO_334:0000092',
+      });
+    },
+  );
   it('matches on observationVariableName (substring)', () => {
     const variables: VariableLike[] = [
       { observationVariableDbId: 'v1', observationVariableName: 'Dry Matter %' },
@@ -106,7 +142,7 @@ describe('OntologyResolver', () => {
       {
         observationVariableDbId: 'trait',
         observationVariableName: 'Y',
-        trait: { traitName: 'plant height' },
+        trait: { traitName: 'mature plant height' },
       },
       { observationVariableDbId: 'sub', observationVariableName: 'tall plant height' },
       { observationVariableDbId: 'exact', observationVariableName: 'plant height' },

@@ -27,6 +27,7 @@
         "BRAPI_DEFAULT_BASE_URL": "${user_config.BRAPI_DEFAULT_BASE_URL}",
         "BRAPI_ENABLE_WRITES": "${user_config.BRAPI_ENABLE_WRITES}",
         "BRAPI_PAGE_SIZE": "${user_config.BRAPI_PAGE_SIZE}",
+        "BRAPI_CALL_DEADLINE_MS": "${user_config.BRAPI_CALL_DEADLINE_MS}",
         "MCP_LOG_LEVEL": "${user_config.MCP_LOG_LEVEL}"
       }
     }
@@ -59,6 +60,13 @@
       "type": "string",
       "required": false,
       "default": "1000"
+    },
+    "BRAPI_CALL_DEADLINE_MS": {
+      "title": "Upstream Call Deadline",
+      "description": "Total milliseconds for upstream BrAPI requests in one MCP call.",
+      "type": "string",
+      "required": false,
+      "default": "50000"
     },
     "MCP_LOG_LEVEL": {
       "title": "Log Level",

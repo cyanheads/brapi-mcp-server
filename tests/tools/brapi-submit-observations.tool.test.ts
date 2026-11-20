@@ -6,7 +6,7 @@
  * @module tests/tools/brapi-submit-observations.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, expectInputRequired } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
@@ -24,6 +24,7 @@ import {
 interface ConnectOptions {
   ctxOptions?: Parameters<typeof createMockContext>[0];
   methods?: ('GET' | 'POST' | 'PUT')[];
+  units?: boolean;
 }
 
 async function connect(fetcher: MockFetcher, options: ConnectOptions = {}) {
@@ -37,6 +38,9 @@ async function connect(fetcher: MockFetcher, options: ConnectOptions = {}) {
           calls: [
             { service: 'observations', methods, versions: ['2.1'] },
             { service: 'studies', methods: ['GET'], versions: ['2.1'] },
+            ...(options.units
+              ? [{ service: 'observationunits', methods: ['GET'], versions: ['2.1'] }]
+              : []),
           ],
         }),
       );
@@ -77,6 +81,14 @@ function setupReadCalls(
     ) {
       return jsonResponse(
         envelope({ data: [] }, { totalCount: options.studyObservationCount ?? 99 }),
+      );
+    }
+    if (path.endsWith('/observations') && (init?.method ?? 'GET') === 'GET') {
+      return jsonResponse(
+        envelope(
+          { data: [{ observationDbId: 'obs-existing', studyDbId: 'study-1' }] },
+          { totalCount: 1 },
+        ),
       );
     }
     if (path.endsWith('/observations') && (init?.method ?? 'GET') === 'POST') {
@@ -212,6 +224,98 @@ describe('brapi_submit_observations tool', () => {
       );
     }
   });
+
+  it.each([true, false])(
+    'checks study membership only to the extent the source proves it (complete=%s)',
+    async (complete) => {
+      const ctx = await connect(fetcher, { units: true });
+      const studyDbId = 'study-1';
+      const variables = [
+        {
+          observationVariableDbId: 'yield',
+          scale: { dataType: 'Numerical', validValues: { minimumValue: 0, maximumValue: 2 } },
+        },
+        {
+          observationVariableDbId: 'class',
+          scale: {
+            dataType: 'Code',
+            validValues: { categories: [{ value: 'A', label: 'A class' }] },
+          },
+        },
+        { observationVariableDbId: 'date', scale: { dataType: 'Date', dateFormat: 'YYYY-MM-DD' } },
+      ];
+      fetcher.mockImplementation(async (url: string) => {
+        const path = pathnameOf(url);
+        if (path.endsWith('/studies/study-1')) return jsonResponse(envelope({ studyDbId }));
+        if (path.endsWith('/variables'))
+          return jsonResponse(envelope({ data: variables }, { totalCount: 3 }));
+        const data = path.endsWith('/observationunits')
+          ? [{ studyDbId, observationUnitDbId: 'plot' }]
+          : [{ studyDbId, observationDbId: 'obs' }];
+        return jsonResponse(envelope({ data }, { totalCount: complete ? 1 : 10 }));
+      });
+      const input = brapiSubmitObservations.input.parse({
+        studyDbId,
+        observations: [
+          {
+            observationUnitDbId: 'missing',
+            observationVariableDbId: 'yield',
+            value: '-1',
+            observationDbId: 'unknown',
+          },
+          { observationUnitDbId: 'plot', observationVariableDbId: 'class', value: 'B' },
+          { observationUnitDbId: 'plot', observationVariableDbId: 'date', value: '2026-02-30' },
+          { observationUnitDbId: 'plot', observationVariableDbId: 'yield', value: '2' },
+          { observationUnitDbId: 'plot', observationVariableDbId: 'yield', value: 'abc' },
+        ],
+      });
+      const output = await brapiSubmitObservations.handler(input, ctx);
+      expect(output.result).toMatchObject({ mode: 'preview', valid: 5, invalid: 0, flagged: 4 });
+      expect(output.result.perRowWarnings.filter((w) => w.rowIndex === 0)).toHaveLength(
+        complete ? 3 : 1,
+      );
+      expect(output.result.perRowWarnings.map((w) => w.rowIndex)).toContain(4);
+      expect(renderText(output)).toContain('flagged: 4');
+      if (!complete) expect(renderText(output)).toMatch(/incomplete|partial/i);
+      const asked = await expectInputRequired(() =>
+        brapiSubmitObservations.handler({ ...input, mode: 'apply' }, ctx),
+      );
+      expect(JSON.stringify(asked.inputRequests)).toContain('4 flagged');
+      expect(writeMethods(fetcher)).toEqual([]);
+    },
+  );
+
+  it.each([200, 400])(
+    'keeps preview and confirmation available when the advisory variable GET returns %i without an envelope',
+    async (status) => {
+      const ctx = await connect(fetcher);
+      fetcher.mockImplementation(async (url: string) => {
+        if (pathnameOf(url).endsWith('/variables')) {
+          if (status === 400)
+            throw new McpError(JsonRpcErrorCode.ValidationError, 'HTTP 400', { status });
+          return new Response(null, { status });
+        }
+        return jsonResponse(envelope({ studyDbId: 'study-1' }));
+      });
+      const input = brapiSubmitObservations.input.parse({
+        studyDbId: 'study-1',
+        observations: [
+          { observationUnitDbId: 'plot', observationVariableDbId: 'yield', value: '42' },
+        ],
+      });
+      const preview = await brapiSubmitObservations.handler(input, ctx);
+      expect(preview.result).toMatchObject({
+        mode: 'preview',
+        valid: 1,
+        flagged: 0,
+        warnings: expect.arrayContaining([expect.stringContaining('/variables')]),
+      });
+      await expectInputRequired(() =>
+        brapiSubmitObservations.handler({ ...input, mode: 'apply' }, ctx),
+      );
+      expect(writeMethods(fetcher)).toEqual([]);
+    },
+  );
 
   it('apply without a prior answer asks for confirmation and writes nothing', async () => {
     const ctx = await connect(fetcher);

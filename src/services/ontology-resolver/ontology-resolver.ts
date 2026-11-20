@@ -39,6 +39,12 @@ export interface VariableLike {
   };
 }
 
+interface ScoredCandidate {
+  candidate: OntologyCandidate;
+  nameLength?: number;
+  score: number;
+}
+
 export class OntologyResolver {
   /**
    * Rank a pool of variables against a free-text query. Returns up to
@@ -58,7 +64,7 @@ export class OntologyResolver {
       return variables.slice(0, limit).map((v) => toCandidate(v, 'nameMatch'));
     }
 
-    const scored: { candidate: OntologyCandidate; score: number }[] = [];
+    const scored: ScoredCandidate[] = [];
 
     for (const variable of variables) {
       if (options.ontologyDbId && variable.ontologyDbId !== options.ontologyDbId) continue;
@@ -66,23 +72,27 @@ export class OntologyResolver {
       if (match) scored.push(match);
     }
 
-    scored.sort((a, b) => b.score - a.score);
+    scored.sort((a, b) => b.score - a.score || (a.nameLength ?? 0) - (b.nameLength ?? 0));
     return scored.slice(0, limit).map((s) => s.candidate);
   }
 
-  private scoreOne(
-    variable: VariableLike,
-    query: string,
-  ): { candidate: OntologyCandidate; score: number } | undefined {
-    const pui = variable.observationVariablePUI?.toLowerCase();
+  private scoreOne(variable: VariableLike, query: string): ScoredCandidate | undefined {
+    const pui = variable.observationVariablePUI?.trim().toLowerCase();
     if (pui && pui === query) {
       return { candidate: toCandidate(variable, 'puiMatch'), score: 100 };
     }
 
-    const name = variable.observationVariableName?.toLowerCase();
-    if (name) {
-      if (name === query) return { candidate: toCandidate(variable, 'nameMatch'), score: 90 };
-      if (name.includes(query)) return { candidate: toCandidate(variable, 'nameMatch'), score: 60 };
+    const rawName = variable.observationVariableName?.trim().toLowerCase();
+    const suffix = pui ? `|${pui}` : '';
+    const name =
+      suffix && rawName?.endsWith(suffix) ? rawName.slice(0, -suffix.length).trimEnd() : rawName;
+    const traitName = (variable.trait?.traitName ?? variable.trait?.name)?.trim().toLowerCase();
+    const nameLength = (name || traitName || '').length;
+    if (name === query || traitName === query || rawName === query) {
+      return { candidate: toCandidate(variable, 'nameMatch'), score: 90, nameLength };
+    }
+    if (rawName?.includes(query) || name?.includes(query)) {
+      return { candidate: toCandidate(variable, 'nameMatch'), score: 60, nameLength };
     }
 
     const synonymMatch = variable.synonyms?.find((s) => s.toLowerCase().includes(query));
@@ -97,9 +107,8 @@ export class OntologyResolver {
       return { candidate: toCandidate(variable, 'synonymMatch'), score: 40 };
     }
 
-    const traitName = (variable.trait?.traitName ?? variable.trait?.name)?.toLowerCase();
     if (traitName?.includes(query)) {
-      return { candidate: toCandidate(variable, 'nameMatch'), score: 35 };
+      return { candidate: toCandidate(variable, 'nameMatch'), score: 35, nameLength };
     }
 
     const traitClass = variable.trait?.traitClass?.toLowerCase();

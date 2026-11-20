@@ -297,8 +297,8 @@ export class ServerRegistry {
     body: Record<string, unknown>,
     ctx: Context,
   ): Promise<TokenResponse> {
-    const { requestTimeoutMs } = this.serverConfig;
-    const callRemainingMs = callDeadlineAt(ctx) - Date.now();
+    const { requestTimeoutMs, callDeadlineMs } = this.serverConfig;
+    const callRemainingMs = callDeadlineAt(ctx, callDeadlineMs) - Date.now();
     const clipped = callRemainingMs < requestTimeoutMs;
     try {
       return await this.tokenFetcher(tokenUrl, body, ctx, {
@@ -307,7 +307,14 @@ export class ServerRegistry {
       });
     } catch (err) {
       if (ctx.signal.aborted || !isTimeout(err)) throw err;
-      if (clipped) throw callDeadlineExceeded('POST /token', { sent: true }, err);
+      if (clipped) {
+        throw callDeadlineExceeded(
+          'POST /token',
+          callDeadlineMs,
+          { sent: true, primaryRead: true },
+          err,
+        );
+      }
       const shown = displayTokenUrl(tokenUrl);
       throw timeout(
         `Token exchange at ${shown} did not answer within ${requestTimeoutMs} ms.`,

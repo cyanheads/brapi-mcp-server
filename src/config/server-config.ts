@@ -32,6 +32,9 @@ export const GENOTYPE_CALLS_MAX_PULL_CEILING = 500_000;
  */
 export const GENOTYPE_MATRIX_MAX_COLUMNS_CEILING = 500_000;
 
+/** Default call budget leaves headroom under a 60-second MCP client timeout. */
+export const CALL_DEADLINE_MS = 50_000;
+
 export const ServerConfigSchema = z.object({
   defaultBaseUrl: z
     .string()
@@ -92,7 +95,7 @@ export const ServerConfigSchema = z.object({
     .min(0)
     .default(3)
     .describe(
-      "Max retries on 429/5xx and timeouts before surfacing. A timed-out request is retried only while the call's 50 s upstream deadline still fits another attempt.",
+      'Max retries on 429/5xx and timeouts before surfacing. A timed-out request is retried only while the upstream call budget still fits another attempt.',
     ),
   retryBaseDelayMs: z.coerce
     .number()
@@ -113,6 +116,12 @@ export const ServerConfigSchema = z.object({
     .positive()
     .default(30_000)
     .describe('Per-request HTTP timeout.'),
+  callDeadlineMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(CALL_DEADLINE_MS)
+    .describe('Total milliseconds for upstream requests in one tool call.'),
   companionTimeoutMs: z.coerce
     .number()
     .int()
@@ -218,6 +227,7 @@ export function getServerConfig(): ServerConfig {
     retryBaseDelayMs: 'BRAPI_RETRY_BASE_DELAY_MS',
     referenceCacheTtlSeconds: 'BRAPI_REFERENCE_CACHE_TTL_SECONDS',
     requestTimeoutMs: 'BRAPI_REQUEST_TIMEOUT_MS',
+    callDeadlineMs: 'BRAPI_CALL_DEADLINE_MS',
     companionTimeoutMs: 'BRAPI_COMPANION_TIMEOUT_MS',
     searchPollTimeoutMs: 'BRAPI_SEARCH_POLL_TIMEOUT_MS',
     searchPollIntervalMs: 'BRAPI_SEARCH_POLL_INTERVAL_MS',

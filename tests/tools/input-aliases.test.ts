@@ -22,12 +22,14 @@ function probe(definition: AnyToolDefinition) {
 }
 
 describe('identifier input aliases', () => {
-  it('characterizes canonical image arrays and their bound', async () => {
+  it('accepts nonempty canonical image arrays for bounded processing', async () => {
     const result = await runToolContract(probe(brapiGetImage), { imageDbIds: ['a', 'b'] });
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toEqual({ received: { imageDbIds: ['a', 'b'] } });
     expect(brapiGetImage.input.safeParse({ imageDbIds: [] }).success).toBe(false);
-    expect(brapiGetImage.input.safeParse({ imageDbIds: Array(6).fill('a') }).success).toBe(false);
+    const overCap = ['a', 'b', 'c', 'd', 'e', 'f'];
+    const deferred = await runToolContract(probe(brapiGetImage), { imageDbIds: overCap });
+    expect(deferred.structuredContent).toEqual({ received: { imageDbIds: overCap } });
   });
   it('accepts a lone imageDbId through the real framework contract', async () => {
     const result = await runToolContract(probe(brapiGetImage), { imageDbId: 'a' });

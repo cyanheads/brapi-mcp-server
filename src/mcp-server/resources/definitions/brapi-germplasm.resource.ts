@@ -9,6 +9,7 @@
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { brapiGetGermplasm } from '@/mcp-server/tools/definitions/brapi-get-germplasm.tool.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 
 export const brapiGermplasmResource = resource('brapi://germplasm/{germplasmDbId}', {
   name: 'brapi-germplasm',
@@ -50,6 +51,7 @@ export const brapiGermplasmResource = resource('brapi://germplasm/{germplasmDbId
         'Ask the operator to check that the credentials configured for the default alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,

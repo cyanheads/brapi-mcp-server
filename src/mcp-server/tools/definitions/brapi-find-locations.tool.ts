@@ -14,10 +14,12 @@ import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { resolveCountryName } from '@/services/iso-country/index.js';
 import {
   AliasInput,
+  appliedFindFilters,
   applyDialectFiltersOrFail,
   asString,
   buildExtraFilterChecks,
@@ -203,6 +205,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
         'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -493,7 +496,7 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       locationType: computeDistribution(filteredFull, (r) => asString(r.locationType)),
     };
 
-    const appliedFilters = route.kind === 'search' ? route.searchBody : filters;
+    const appliedFilters = appliedFindFilters(route);
     const sentCodes = appliedFilters.countryCodes ?? appliedFilters.countryCode;
     const requestedCountryCodes = (Array.isArray(sentCodes) ? sentCodes : [sentCodes]).filter(
       (code): code is string | number =>

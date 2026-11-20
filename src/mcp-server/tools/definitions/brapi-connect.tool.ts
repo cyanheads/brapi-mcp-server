@@ -17,6 +17,7 @@ import {
   resolveConnectInput,
 } from '@/config/alias-credentials.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import {
   type CapabilityLookupOptions,
   getCapabilityRegistry,
@@ -119,6 +120,7 @@ export const brapiConnect = tool('brapi_connect', {
         'Retry brapi_connect with credentials that have read access to this server, or ask the operator to configure such credentials for this alias server-side.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,

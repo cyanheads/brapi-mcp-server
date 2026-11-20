@@ -89,6 +89,120 @@ describe('brapi_find_germplasm tool', () => {
     resetTestServices();
   });
 
+  it('unions distinct germplasm matches from singular GET filters', async () => {
+    const ctx = await connect(fetcher, 'CassavaBase');
+    fetcher.mockImplementation(async (url: string) => {
+      const name = new URL(url).searchParams.get('germplasmName');
+      return jsonResponse(envelope({ data: [{ germplasmDbId: name }] }, { totalCount: 1 }));
+    });
+    const result = await brapiFindGermplasm.handler(
+      brapiFindGermplasm.input.parse({ names: ['TMEB419', 'TMEB693', 'TMEB419'] }),
+      ctx,
+    );
+    expect(result.results.map((row) => row.germplasmDbId)).toEqual(['TMEB419', 'TMEB693']);
+  });
+
+  it('walks each scalar combination and stages overlapping IDs once', async () => {
+    const ctx = await connect(fetcher, 'CassavaBase');
+    const requests: string[] = [];
+    fetcher.mockImplementation(async (url: string) => {
+      const filters = new URL(url).searchParams;
+      const name = filters.get('germplasmName');
+      const crop = filters.get('commonCropName');
+      const page = filters.get('page') ?? '0';
+      requests.push(`${name}/${crop}/${page}`);
+      const id = page === '0' ? 'shared' : `${name}/${crop}`;
+      return jsonResponse(
+        envelope({ data: [{ germplasmDbId: id }] }, { totalCount: 2, pageSize: 1 }),
+      );
+    });
+    const result = await brapiFindGermplasm.handler(
+      brapiFindGermplasm.input.parse({ names: ['A', 'B'], crops: ['X', 'Y'], loadLimit: 1 }),
+      ctx,
+    );
+    expect(new Set(requests)).toEqual(
+      new Set(['A/X/0', 'A/X/1', 'A/Y/0', 'A/Y/1', 'B/X/0', 'B/X/1', 'B/Y/0', 'B/Y/1']),
+    );
+    expect(result.results.map((row) => row.germplasmDbId)).toEqual(['shared']);
+    expect(result.dataframe).toMatchObject({ rowCount: 5 });
+    expect(getEnrichment(ctx).totalCount).toBe(5);
+  });
+
+  it('holds other filters fixed when verifying named germplasm scopes', async () => {
+    const ctx = await connect(fetcher, 'CassavaBase');
+    const requests: string[] = [];
+    fetcher.mockImplementation(async (url: string) => {
+      const filters = new URL(url).searchParams;
+      const study = filters.get('studyDbId');
+      const trial = filters.get('trialDbId');
+      const crop = filters.get('commonCropName');
+      requests.push(`${study}/${trial}/${crop}`);
+      return jsonResponse(
+        envelope(
+          { data: [{ germplasmDbId: 'G1' }] },
+          {
+            totalCount: study ? 1 : 2,
+          },
+        ),
+      );
+    });
+    const definition = {
+      ...brapiFindGermplasm,
+      handler: (input, contractCtx) =>
+        brapiFindGermplasm.handler(input, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFindGermplasm;
+    const result = await runToolContract(
+      definition,
+      { studies: ['S1'], trials: ['T1'], crops: ['Cassava'] },
+      {
+        context: { tenantId: 't1' },
+      },
+    );
+    expect(requests).toEqual(['S1/T1/Cassava', 'null/T1/Cassava', 'S1/null/Cassava']);
+    const warning = "Could not verify whether 'trials' narrowed the germplasm results.";
+    expect(result.structuredContent).toMatchObject({ warnings: [warning] });
+    expect(
+      result.content.map((part) => (part.type === 'text' ? part.text : '')).join('\n'),
+    ).toContain(warning);
+  });
+
+  it('reports a Cartesian suffix when the shared page budget runs out', async () => {
+    const ctx = await connect(fetcher, 'CassavaBase');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+    const result = await brapiFindGermplasm.handler(
+      brapiFindGermplasm.input.parse({
+        names: Array.from({ length: 10 }, (_, index) => `name-${index}`),
+        crops: Array.from({ length: 10 }, (_, index) => `crop-${index}`),
+      }),
+      ctx,
+    );
+    expect(fetcher).toHaveBeenCalledTimes(50);
+    expect(result).toMatchObject({ results: [], hasMore: true });
+    expect(getEnrichment(ctx).warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Skipped 50 GET combinations after the first 50'),
+      ]),
+    );
+  });
+
+  it('retains an empty scoped result when its control fails and rejects blank scope IDs', async () => {
+    const ctx = await connect(fetcher, 'CassavaBase');
+    fetcher.mockImplementation(async (url: string) =>
+      new URL(url).searchParams.has('programDbId')
+        ? jsonResponse(envelope({ data: [] }, { totalCount: 0 }))
+        : jsonResponse({ error: 'unavailable' }, 503),
+    );
+    await expect(
+      brapiFindGermplasm.handler(brapiFindGermplasm.input.parse({ programs: ['P1'] }), ctx),
+    ).resolves.toMatchObject({ results: [], hasMore: false });
+    expect(getEnrichment(ctx).warnings).toEqual(
+      expect.arrayContaining([
+        "Could not verify whether 'programs' narrowed the germplasm results.",
+      ]),
+    );
+    expect(brapiFindGermplasm.input.safeParse({ studies: [' '] }).success).toBe(false);
+  });
+
   it('returns rows and distributions', async () => {
     const ctx = await connect(fetcher);
     const rows = [

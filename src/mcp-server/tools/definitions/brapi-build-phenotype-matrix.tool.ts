@@ -23,6 +23,7 @@ import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import { buildUniqueColumns } from '../shared/canvas-columns.js';
 import {
@@ -65,7 +66,7 @@ const OutputSchema = z.object({
   shape: z
     .enum(['wide', 'long'])
     .describe(
-      'Matrix shape — wide (one row per germplasm, one column per variable) or long (one row per observation).',
+      'Requested shape — wide pools observations across studies by germplasm and variable; long keeps one row per observation.',
     ),
   aggregate: z
     .enum(['mean', 'median', 'first', 'all'])
@@ -92,8 +93,18 @@ const OutputSchema = z.object({
     .describe(
       'Wide-matrix column name (SQL-safe, derived from observationVariableDbId) → observationVariableName.',
     ),
+  countLegend: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe(
+      'Wide value column → count column. Counts report the observations used by the pooled cell.',
+    ),
+  designLegend: z
+    .record(z.string(), z.string())
+    .optional()
+    .describe('Long design column → original observation unit relationship level name.'),
   dataframe: DataframeHandleSchema.optional().describe(
-    'The matrix, staged; absent when no observations were found. Long-form columns: germplasmDbId, observationVariableDbId, studyDbId, value, replicateIndex. Wide-form columns: germplasmDbId, germplasmName, then one per variable (see variableLegend).',
+    'The staged matrix. Long rows include germplasm, variable, study, and observation IDs, value, encounter replicateIndex, season, and available field design. Wide rows include germplasm ID and name, then value and count columns (see variableLegend and countLegend). Absent when no observations were found.',
   ),
   warnings: z
     .array(z.string())
@@ -154,6 +165,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
         'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -237,7 +249,7 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       .enum(['wide', 'long'])
       .default('wide')
       .describe(
-        'Matrix shape. `wide` — one row per germplasm, one column per variable, cell = aggregated value. `long` — one row per observation with columns: germplasmDbId, observationVariableDbId, studyDbId, value, replicateIndex. When `aggregate:"all"` is combined with `shape:"wide"`, the output falls back to long form with a replicateIndex column.',
+        'Matrix shape. Wide rows pool observations across requested studies by germplasm and variable and show the count used by each cell. Long rows keep each observation, its identity, and available field design. The `all` aggregate always produces long rows.',
       ),
     aggregate: z
       .enum(['mean', 'median', 'first', 'all'])
@@ -373,8 +385,12 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
         varOrder.push(o.observationVariableDbId);
       }
     }
-    const { columns: variableColumns, toOriginal: columnToVariable } = buildUniqueColumns(varOrder);
-    const variableLegend: Record<string, string> = {};
+    const wideKeys = ['germplasmDbId', 'germplasmName'];
+    const { columns: variableColumns, toOriginal: columnToVariable } = buildUniqueColumns(
+      varOrder,
+      wideKeys,
+    );
+    const variableLegend: Record<string, string> = Object.create(null);
     for (const col of variableColumns) {
       const varId = columnToVariable[col];
       if (varId !== undefined) variableLegend[col] = varDisplay.get(varId) ?? varId;
@@ -391,16 +407,35 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
 
     // Build the matrix rows
     let matrixRows: Record<string, unknown>[];
+    let countLegend: Record<string, string> | undefined;
+    let designLegend: Record<string, string> | undefined;
     if (effectiveShape === 'long') {
-      matrixRows = buildLongRows(filteredObs);
+      const levels = new Set<string>();
+      for (const observation of filteredObs) {
+        for (const level of observation.position?.levels.keys() ?? []) levels.add(level);
+      }
+      const columns = buildUniqueColumns([...levels], LONG_COLUMNS);
+      designLegend = columns.columns.length ? columns.toOriginal : undefined;
+      matrixRows = buildLongRows(filteredObs, Object.entries(columns.toOriginal));
     } else {
-      matrixRows = buildWideRows(
-        filteredObs,
-        input.aggregate,
-        variableColumns,
-        columnToVariable,
-        warnings,
+      const { columns: countColumns } = buildUniqueColumns(
+        variableColumns.map((column) => `n_${column}`),
+        [...wideKeys, ...variableColumns],
       );
+      const cells = variableColumns.flatMap((column, index) => {
+        const variableId = columnToVariable[column];
+        const countColumn = countColumns[index];
+        return variableId !== undefined && countColumn !== undefined
+          ? [{ column, variableId, countColumn }]
+          : [];
+      });
+      countLegend = Object.fromEntries(
+        cells.map(({ column, countColumn }) => [column, countColumn]),
+      );
+      warnings.push(
+        'Wide cells pool observations across requested studies by germplasm and variable.',
+      );
+      matrixRows = buildWideRows(filteredObs, input.aggregate, cells, warnings);
     }
 
     // Distinct germplasm count (from filteredObs, not matrixRows)
@@ -416,6 +451,8 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
       germplasmCount: germplasmSet.size,
       variableCount: varOrder.length,
       variableLegend,
+      ...(countLegend ? { countLegend } : {}),
+      ...(designLegend ? { designLegend } : {}),
       warnings,
     };
 
@@ -482,7 +519,20 @@ export const brapiBuildPhenotypeMatrix = tool('brapi_build_phenotype_matrix', {
     if (legendEntries.length > 0) {
       lines.push('## Variable legend');
       for (const [col, name] of legendEntries) {
-        lines.push(literal`- \`${col}\` → ${name}`);
+        const count = result.countLegend?.[col];
+        lines.push(
+          count
+            ? literal`- \`${col}\` → ${name} (count in \`${count}\`)`
+            : literal`- \`${col}\` → ${name}`,
+        );
+      }
+      lines.push('');
+    }
+
+    if (result.designLegend) {
+      lines.push('## Design legend');
+      for (const [column, level] of Object.entries(result.designLegend)) {
+        lines.push(literal`- \`${column}\` → ${level}`);
       }
       lines.push('');
     }
@@ -538,20 +588,52 @@ function everyStudyFailed(failed: StudyObservationOutcome[]): McpError {
 // Long-form row builder
 // ---------------------------------------------------------------------------
 
-function buildLongRows(obs: NormObs[]): Record<string, unknown>[] {
+const LONG_COLUMNS = [
+  'germplasmDbId',
+  'observationVariableDbId',
+  'studyDbId',
+  'value',
+  'replicateIndex',
+  'observationUnitDbId',
+  'observationDbId',
+  'germplasmName',
+  'season',
+  'positionCoordinateX',
+  'positionCoordinateY',
+  'positionCoordinateXType',
+  'positionCoordinateYType',
+  'entryType',
+];
+
+function buildLongRows(
+  obs: NormObs[],
+  designColumns: [column: string, level: string][],
+): Record<string, unknown>[] {
   // Group by (germplasmDbId, observationVariableDbId, studyDbId) to assign replicate index
   const replicateCounts = new Map<string, number>();
   return obs.map((o) => {
     const key = `${o.germplasmDbId}|${o.observationVariableDbId}|${o.studyDbId}`;
     const idx = replicateCounts.get(key) ?? 0;
     replicateCounts.set(key, idx + 1);
-    return {
+    const row: Record<string, unknown> = Object.assign(Object.create(null), {
       germplasmDbId: o.germplasmDbId,
       observationVariableDbId: o.observationVariableDbId,
       studyDbId: o.studyDbId,
       value: o.value,
       replicateIndex: idx,
-    };
+      observationUnitDbId: o.observationUnitDbId ?? null,
+      observationDbId: o.observationDbId ?? null,
+      germplasmName: o.germplasmName,
+      season: o.season ?? null,
+      positionCoordinateX: o.position?.positionCoordinateX ?? null,
+      positionCoordinateY: o.position?.positionCoordinateY ?? null,
+      positionCoordinateXType: o.position?.positionCoordinateXType ?? null,
+      positionCoordinateYType: o.position?.positionCoordinateYType ?? null,
+      entryType: o.position?.entryType ?? null,
+    });
+    for (const [column, level] of designColumns)
+      row[column] = o.position?.levels.get(level) ?? null;
+    return row;
   });
 }
 
@@ -562,14 +644,13 @@ function buildLongRows(obs: NormObs[]): Record<string, unknown>[] {
 function buildWideRows(
   obs: NormObs[],
   aggregate: 'mean' | 'median' | 'first' | 'all',
-  variableColumns: string[],
-  columnToVariable: Record<string, string>,
+  cells: { column: string; countColumn: string; variableId: string }[],
   warnings: string[],
 ): Record<string, unknown>[] {
   if (aggregate === 'all') {
     // Caller already redirected to long for 'all' + 'wide' — this branch should
     // not be reached, but guard defensively.
-    return buildLongRows(obs);
+    return buildLongRows(obs, []);
   }
 
   // Group observations: germplasmDbId → variableDbId → values[]
@@ -579,7 +660,7 @@ function buildWideRows(
 
   for (const o of obs) {
     if (!germplasmNames.has(o.germplasmDbId)) {
-      germplasmNames.set(o.germplasmDbId, o.germplasmName);
+      germplasmNames.set(o.germplasmDbId, o.germplasmName ?? o.germplasmDbId);
     }
     let byVar = groups.get(o.germplasmDbId);
     if (!byVar) {
@@ -595,19 +676,18 @@ function buildWideRows(
   const rows: Record<string, unknown>[] = [];
 
   for (const [germplasmDbId, byVar] of groups) {
-    const row: Record<string, unknown> = {
+    const row: Record<string, unknown> = Object.assign(Object.create(null), {
       germplasmDbId,
       germplasmName: germplasmNames.get(germplasmDbId) ?? germplasmDbId,
-    };
+    });
 
-    for (const col of variableColumns) {
-      const varId = columnToVariable[col];
-      const vals = varId ? byVar.get(varId) : undefined;
-      if (!vals || vals.length === 0) {
-        row[col] = null;
-        continue;
-      }
-      row[col] = aggregateValues(vals, aggregate, varId as string, nonNumericWarned, warnings);
+    for (const { column, countColumn, variableId } of cells) {
+      const values = byVar.get(variableId);
+      const [value, count] = values
+        ? aggregateValues(values, aggregate, variableId, nonNumericWarned, warnings)
+        : [null, 0];
+      row[column] = value;
+      row[countColumn] = count;
     }
 
     rows.push(row);
@@ -626,9 +706,10 @@ function aggregateValues(
   varId: string,
   nonNumericWarned: Set<string>,
   warnings: string[],
-): string | number | null {
+): [value: string | number | null, count: number] {
   if (aggregate === 'first') {
-    return values[0] ?? null;
+    const first = values[0];
+    return first === undefined ? [null, 0] : [first, 1];
   }
 
   // numeric aggregation
@@ -640,19 +721,19 @@ function aggregateValues(
         `Variable '${varId}': all values are non-numeric — cannot compute ${aggregate}. Cell set to null. Use aggregate:"first" or "all" for categorical traits.`,
       );
     }
-    return null;
+    return [null, 0];
   }
 
   if (aggregate === 'mean') {
-    return nums.reduce((a, b) => a + b, 0) / nums.length;
+    return [nums.reduce((a, b) => a + b, 0) / nums.length, nums.length];
   }
 
   // median (nums is non-empty here — guarded above)
   const sorted = [...nums].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   const hi = sorted[mid];
-  if (hi === undefined) return null;
-  if (sorted.length % 2 !== 0) return hi;
+  if (hi === undefined) return [null, 0];
+  if (sorted.length % 2 !== 0) return [hi, nums.length];
   const lo = sorted[mid - 1];
-  return lo === undefined ? hi : (lo + hi) / 2;
+  return [lo === undefined ? hi : (lo + hi) / 2, nums.length];
 }

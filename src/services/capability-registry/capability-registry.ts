@@ -143,7 +143,7 @@ export class CapabilityRegistry {
       throwIfAuthRejected(err, baseUrl, '/serverinfo', options.auth !== undefined);
       throwIfPrivateAddress(err, baseUrl);
       const message = err instanceof Error ? err.message : String(err);
-      failures.push({ endpoint: '/serverinfo', message, transient: isTransientFailure(err) });
+      failures.push(discoveryFailure('/serverinfo', message, err));
       ctx.log.warning('Failed to fetch /serverinfo; falling back to /calls-only profile', {
         baseUrl,
         error: message,
@@ -160,6 +160,9 @@ export class CapabilityRegistry {
 
     if (calls.length === 0 && failures.some((f) => f.transient)) {
       throw discoveryUnavailable(baseUrl, failures);
+    }
+    if (!ctx.signal.aborted && failures.length === 2 && failures.every((f) => f.status === 404)) {
+      throw discoveryNotFound(baseUrl);
     }
 
     const crops = await this.fetchCrops(baseUrl, ctx, options.auth, warnings);
@@ -215,7 +218,7 @@ export class CapabilityRegistry {
       throwIfAuthRejected(err, baseUrl, '/calls', auth !== undefined);
       throwIfPrivateAddress(err, baseUrl);
       const message = err instanceof Error ? err.message : String(err);
-      failures.push({ endpoint: '/calls', message, transient: isTransientFailure(err) });
+      failures.push(discoveryFailure('/calls', message, err));
       ctx.log.warning('Failed to fetch /calls fallback', {
         baseUrl,
         error: message,
@@ -270,8 +273,47 @@ const DISCOVERY_UNAVAILABLE_REASON = 'capability_discovery_unavailable';
 interface DiscoveryFailure {
   endpoint: '/serverinfo' | '/calls';
   message: string;
+  status: unknown;
   /** Slow, unreachable, or 5xx — a later attempt can succeed. */
   transient: boolean;
+}
+
+function discoveryFailure(
+  endpoint: DiscoveryFailure['endpoint'],
+  message: string,
+  error: unknown,
+): DiscoveryFailure {
+  return {
+    endpoint,
+    message,
+    transient: isTransientFailure(error),
+    status: error instanceof McpError ? (error.data?.status ?? error.data?.httpStatus) : undefined,
+  };
+}
+
+/** Shared error contract for callers that load or refresh a capability profile. */
+export const DISCOVERY_NOT_FOUND_ERROR = {
+  reason: 'capability_discovery_not_found',
+  code: JsonRpcErrorCode.NotFound,
+  when: 'Both /serverinfo and /calls return HTTP 404.',
+  recovery: 'Verify the full BrAPI base URL, including its API version prefix.',
+  thrownBy: 'service',
+} as const;
+
+function discoveryNotFound(baseUrl: string): McpError {
+  const url = new URL(baseUrl);
+  const hint =
+    url.pathname === '/'
+      ? `Verify the full BrAPI base URL. If this server uses the standard BrAPI v2 prefix, use ${url.origin}/brapi/v2.`
+      : DISCOVERY_NOT_FOUND_ERROR.recovery;
+  return new McpError(
+    DISCOVERY_NOT_FOUND_ERROR.code,
+    `BrAPI discovery at ${url.origin}${url.pathname} returned HTTP 404 for both /serverinfo and /calls.`,
+    {
+      reason: DISCOVERY_NOT_FOUND_ERROR.reason,
+      recovery: { hint },
+    },
+  );
 }
 
 /**

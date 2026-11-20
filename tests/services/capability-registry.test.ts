@@ -55,6 +55,7 @@ const baseConfig: ServerConfig = {
   retryBaseDelayMs: 1,
   referenceCacheTtlSeconds: 3_600,
   requestTimeoutMs: 1_000,
+  callDeadlineMs: 50_000,
   companionTimeoutMs: 500,
   searchPollTimeoutMs: 5_000,
   searchPollIntervalMs: 1,
@@ -368,6 +369,24 @@ describe('CapabilityRegistry', () => {
         client.get.mockClear();
         await registry.profile(BASE_URL, ctx);
         expect(client.get).not.toHaveBeenCalled();
+      });
+
+      it('rejects two discovery 404s without caching the empty profile', async () => {
+        const fetcher = vi.fn(async () => new Response(null, { status: 404 }));
+        const realClient = new BrapiClient(baseConfig, fetcher);
+        const realRegistry = new CapabilityRegistry(baseConfig, () => realClient);
+        const ctx = createMockContext();
+        for (let i = 0; i < 2; i++) {
+          await expect(
+            realRegistry.profile('https://brapi.example.org', ctx),
+          ).rejects.toMatchObject({
+            data: {
+              reason: 'capability_discovery_not_found',
+              recovery: { hint: expect.stringContaining('https://brapi.example.org/brapi/v2') },
+            },
+          });
+        }
+        expect(fetcher).toHaveBeenCalledTimes(4);
       });
 
       it('caches an empty profile for a server that answers but advertises nothing', async () => {

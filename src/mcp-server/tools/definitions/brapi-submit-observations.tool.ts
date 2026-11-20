@@ -23,18 +23,19 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
   AliasInput,
   buildRequestOptions,
   companionRequestOptions,
-  extractRows,
   isUpstreamNotFound,
   NonBlankString,
   requireRegisteredConnection,
 } from '../shared/find-helpers.js';
 import { code, literal, prose } from '../shared/markdown-literals.js';
+import { reviewStudyRows } from '../shared/observation-review.js';
 
 const ObservationRowSchema = z
   .object({
@@ -100,7 +101,9 @@ const PreviewBranchSchema = z
     mode: z.literal('preview').describe('Discriminator — `preview` reports validation only.'),
     studyDbId: z.string().describe('Study the rows belong to.'),
     studyName: z.string().optional().describe('Display name of the study, when available.'),
-    valid: z.number().int().nonnegative().describe('Rows that pass per-row validation.'),
+    valid: z.number().int().nonnegative().describe('Structurally valid rows.'),
+    flagged: z.number().int().nonnegative().describe('Rows with one or more advisory warnings.'),
+    warnings: z.array(z.string()).optional().describe('Incomplete or unavailable study checks.'),
     invalid: z
       .number()
       .int()
@@ -196,12 +199,6 @@ const OutputSchema = z.object({
 
 type Output = z.infer<typeof OutputSchema>;
 
-interface RowDecision {
-  observationDbId: string | undefined;
-  rowIndex: number;
-  warnings: string[];
-}
-
 const SUBMIT_ERRORS = [
   {
     reason: 'upstream_not_found',
@@ -244,6 +241,7 @@ const SUBMIT_ERRORS = [
       'Ask the operator to check that the credentials configured for this alias are valid and that the upstream IdP issues access tokens for this grant.',
     thrownBy: 'service',
   },
+  DISCOVERY_NOT_FOUND_ERROR,
   {
     reason: 'capability_discovery_unavailable',
     code: JsonRpcErrorCode.ServiceUnavailable,
@@ -411,73 +409,26 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
       );
     }
     const studyName = studyLookup.studyName;
-    const knownVariables = await fetchStudyVariables(input.studyDbId, connection, client, ctx);
-
-    const decisions: RowDecision[] = [];
-    const perRowWarnings: z.infer<typeof PerRowWarningSchema>[] = [];
-    let valid = 0;
-    let invalid = 0;
-    let postCount = 0;
-    let putCount = 0;
-
-    for (const [i, row] of input.observations.entries()) {
-      const rowWarnings: string[] = [];
-      let structurallyValid = true;
-
-      if (!row.observationUnitDbId) {
-        rowWarnings.push('observationUnitDbId is required.');
-        structurallyValid = false;
-      }
-      if (!row.observationVariableDbId) {
-        rowWarnings.push('observationVariableDbId is required.');
-        structurallyValid = false;
-      }
-      if (row.value === '') {
-        rowWarnings.push('value is empty — submitted as an empty string.');
-      }
-      if (
-        row.observationVariableDbId &&
-        knownVariables.size > 0 &&
-        !knownVariables.has(row.observationVariableDbId)
-      ) {
-        rowWarnings.push(
-          `observationVariableDbId '${row.observationVariableDbId}' is not exposed by study '${input.studyDbId}'. The server may reject the row.`,
-        );
-      }
-
-      const decision: RowDecision = {
-        rowIndex: i,
-        observationDbId: row.observationDbId,
-        warnings: rowWarnings,
-      };
-      decisions.push(decision);
-
-      if (structurallyValid) {
-        valid++;
-        if (row.observationDbId) putCount++;
-        else postCount++;
-      } else {
-        invalid++;
-      }
-
-      for (const warning of rowWarnings) {
-        const entry: z.infer<typeof PerRowWarningSchema> = { rowIndex: i, warning };
-        if (row.observationVariableDbId)
-          entry.observationVariableDbId = row.observationVariableDbId;
-        if (row.observationUnitDbId) entry.observationUnitDbId = row.observationUnitDbId;
-        perRowWarnings.push(entry);
-      }
-    }
+    const review = await reviewStudyRows(input, connection, profile, dialect, config, client, ctx);
+    companionWarnings.push(...review.notes);
+    const { flagged, perRowWarnings } = review;
+    const valid = input.observations.length;
+    const postRows = input.observations.filter((row) => !row.observationDbId);
+    const putRows = input.observations.filter((row) => row.observationDbId);
+    const postCount = postRows.length;
+    const putCount = putRows.length;
 
     if (input.mode === 'preview') {
       const branch: z.infer<typeof PreviewBranchSchema> = {
         mode: 'preview',
         studyDbId: input.studyDbId,
         valid,
-        invalid,
+        invalid: 0,
+        flagged,
+        ...(companionWarnings.length > 0 && { warnings: companionWarnings }),
         routing: { postCount, putCount },
         perRowWarnings,
-        knownVariableCount: knownVariables.size,
+        knownVariableCount: review.knownVariableCount,
       };
       if (studyName) branch.studyName = studyName;
       return { alias: connection.alias, result: branch };
@@ -517,7 +468,7 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
             confirm: inputRequired.elicit({
               message: [
                 `Apply ${valid} observation row(s) to study \`${input.studyDbId}\`${studyName ? ` (${studyName})` : ''}?`,
-                `POST ${postCount} new · PUT ${putCount} update · ${invalid} skipped (structural errors).`,
+                `POST ${postCount} new · PUT ${putCount} update · ${flagged} flagged for review.`,
               ].join('\n'),
               requestedSchema: ConfirmSchema,
             }),
@@ -535,15 +486,6 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
         });
       }
     }
-
-    const validRows = decisions.flatMap((d) => {
-      if (d.warnings.some(isStructural)) return [];
-      const row = input.observations[d.rowIndex];
-      return row ? [row] : [];
-    });
-
-    const postRows = validRows.filter((r) => !r.observationDbId);
-    const putRows = validRows.filter((r) => r.observationDbId);
 
     const [postedEnv, updatedEnv] = await Promise.all([
       postRows.length > 0
@@ -610,6 +552,8 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
       lines.push('');
       lines.push(`- valid: ${r.valid}`);
       lines.push(`- invalid: ${r.invalid}`);
+      lines.push(`- flagged: ${r.flagged}`);
+      for (const warning of r.warnings ?? []) lines.push(literal`- ${warning}`);
       lines.push(`- routing: POST ${r.routing.postCount} · PUT ${r.routing.putCount}`);
       lines.push(`- knownVariableCount: ${r.knownVariableCount}`);
       lines.push('- mode: preview · no writes performed');
@@ -700,41 +644,6 @@ function hashRows(rows: z.infer<typeof ObservationRowSchema>[]): string {
   return createHash('sha256').update(JSON.stringify(rows)).digest('hex');
 }
 
-function isStructural(warning: string): boolean {
-  return warning.endsWith('is required.');
-}
-
-async function fetchStudyVariables(
-  studyDbId: string,
-  connection: RegisteredServer,
-  client: BrapiClient,
-  ctx: Context,
-): Promise<Set<string>> {
-  try {
-    const env = await client.get<unknown>(
-      connection.baseUrl,
-      '/variables',
-      ctx,
-      buildRequestOptions(connection, { studyDbId, pageSize: 1000 }),
-    );
-    const known = new Set<string>();
-    const rows = extractRows<Record<string, unknown>>(
-      env.result as { data?: Record<string, unknown>[] } | Record<string, unknown>[],
-    );
-    for (const row of rows) {
-      const id = row.observationVariableDbId;
-      if (typeof id === 'string' && id.length > 0) known.add(id);
-    }
-    return known;
-  } catch (err) {
-    ctx.log.debug('Could not load study variables for validation', {
-      studyDbId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return new Set();
-  }
-}
-
 async function fetchStudyExistence(
   studyDbId: string,
   connection: RegisteredServer,
@@ -790,7 +699,7 @@ async function fetchStudyObservationCount(
 }
 
 function buildPutBody(rows: z.infer<typeof ObservationRowSchema>[]): Record<string, unknown> {
-  const map: Record<string, unknown> = {};
+  const map: Record<string, unknown> = Object.create(null);
   for (const row of rows) {
     if (!row.observationDbId) continue;
     map[row.observationDbId] = row;

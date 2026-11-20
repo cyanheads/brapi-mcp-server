@@ -27,9 +27,9 @@
  *      `/observations?germplasmDbId=…` per germplasm and filter back to the
  *      study, stopping at the first failed request.
  *
- * Failure contract: these requests are primary data — `BRAPI_REQUEST_TIMEOUT_MS`
- * per attempt, 429/5xx retried, every request bounded by the client's call
- * deadline (`CALL_DEADLINE_MS` from the tool call's start). A timeout is not
+ * Failure contract: embedded observation-unit pages can use the full upstream
+ * call budget, while other observation reads use the per-request timeout.
+ * Retryable HTTP failures are retried within the shared call deadline. A timeout is not
  * retried and ends the study's pull without a fallback request. A study is empty only on a definitive answer (no rows on
  * any path with no error along the way, or 0 observation units); otherwise its
  * first error is thrown and the consuming tool applies its own policy.
@@ -68,6 +68,7 @@ export interface RawObservationRow {
   germplasmDbId?: string | null;
   germplasmName?: string | null;
   observationDbId?: string | null;
+  observationUnitDbId?: string | null;
   observationVariableDbId?: string | null;
   observationVariableName?: string | null;
   season?: unknown;
@@ -80,13 +81,55 @@ export interface RawObservationRow {
 /** Normalized observation — required fields are non-empty strings after extraction. */
 export interface NormObs {
   germplasmDbId: string;
-  germplasmName: string;
+  germplasmName: string | null;
+  observationDbId?: string;
+  observationUnitDbId?: string;
   observationVariableDbId: string;
   observationVariableName: string;
+  position?: ObservationPosition;
   /** Human season label (`"spring 2013"` / seasonDbId), when the row carries one. */
   season?: string;
   studyDbId: string;
   value: string;
+}
+
+interface ObservationPosition {
+  entryType: string | null;
+  levels: ReadonlyMap<string, string>;
+  positionCoordinateX: string | number | null;
+  positionCoordinateXType: string | null;
+  positionCoordinateY: string | number | null;
+  positionCoordinateYType: string | null;
+}
+
+function observedText(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function readPosition(value: unknown): ObservationPosition | undefined {
+  if (!value || typeof value !== 'object') return;
+  const record = value as Record<string, unknown>;
+  const levels = new Map<string, string>();
+  const relationships: unknown[] = Array.isArray(record.observationLevelRelationships)
+    ? record.observationLevelRelationships
+    : [];
+  for (const level of relationships) {
+    if (!level || typeof level !== 'object') continue;
+    const entry = level as Record<string, unknown>;
+    const name = observedText(entry.levelName);
+    const code = observedText(entry.levelCode);
+    if (name && code !== null && !levels.has(name)) levels.set(name, code);
+  }
+  const x = record.positionCoordinateX;
+  const y = record.positionCoordinateY;
+  return {
+    levels,
+    positionCoordinateX: typeof x === 'number' ? x : observedText(x),
+    positionCoordinateY: typeof y === 'number' ? y : observedText(y),
+    positionCoordinateXType: observedText(record.positionCoordinateXType),
+    positionCoordinateYType: observedText(record.positionCoordinateYType),
+    entryType: observedText(record.entryType),
+  };
 }
 
 /** Filters that scope an observation pull beyond the study anchor. */
@@ -540,7 +583,7 @@ export async function collectEmbeddedObservations(args: {
             pageSize: config.pageSize,
             page,
           },
-          { dialect, retryOnTimeout: false },
+          { dialect, retryOnTimeout: false, useCallBudget: true },
         ),
       );
     } catch (error) {
@@ -914,12 +957,11 @@ function extractEmbeddedObservations(
   for (const unit of units) {
     const unitStudyDbId = (unit.studyDbId as string | null | undefined) ?? studyDbId;
     const unitGermplasmDbId = (unit.germplasmDbId as string | null | undefined) ?? 'unknown';
-    const unitGermplasmName =
-      typeof unit.germplasmName === 'string' && unit.germplasmName.length > 0
-        ? unit.germplasmName
-        : unitGermplasmDbId;
+    const unitGermplasmName = observedText(unit.germplasmName);
+    const unitId = observedText(unit.observationUnitDbId);
     const embedded = unit.observations;
     if (!Array.isArray(embedded)) continue;
+    const position = readPosition(unit.observationUnitPosition);
     for (const raw of embedded) {
       if (!raw || typeof raw !== 'object') continue;
       const r = raw as RawObservationRow;
@@ -928,9 +970,14 @@ function extractEmbeddedObservations(
       if (!varId || val === null || val === undefined) continue;
       embeddedCount++;
       const season = seasonLabel(r);
+      const observationUnitDbId = unitId ?? observedText(r.observationUnitDbId);
+      const observationDbId = observedText(r.observationDbId);
       const norm: NormObs = {
         germplasmDbId: unitGermplasmDbId,
-        germplasmName: unitGermplasmName,
+        germplasmName: unitGermplasmName ?? observedText(r.germplasmName),
+        ...(observationUnitDbId ? { observationUnitDbId } : {}),
+        ...(observationDbId ? { observationDbId } : {}),
+        ...(position ? { position } : {}),
         observationVariableDbId: String(varId),
         observationVariableName:
           typeof r.observationVariableName === 'string' && r.observationVariableName.length > 0
@@ -1018,12 +1065,13 @@ export function normalizeObsRow(row: RawObservationRow): NormObs | null {
   const studyId = row.studyDbId ?? null;
   const val = row.value ?? null;
   if (!varId || !germId || !studyId || val === null || val === undefined) return null;
+  const observationDbId = observedText(row.observationDbId);
+  const observationUnitDbId = observedText(row.observationUnitDbId);
   const norm: NormObs = {
     germplasmDbId: String(germId),
-    germplasmName:
-      typeof row.germplasmName === 'string' && row.germplasmName.length > 0
-        ? row.germplasmName
-        : String(germId),
+    germplasmName: observedText(row.germplasmName),
+    ...(observationDbId ? { observationDbId } : {}),
+    ...(observationUnitDbId ? { observationUnitDbId } : {}),
     observationVariableDbId: String(varId),
     observationVariableName:
       typeof row.observationVariableName === 'string' && row.observationVariableName.length > 0

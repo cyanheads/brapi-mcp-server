@@ -305,10 +305,24 @@ describe('brapi_get_image tool', () => {
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
   });
 
-  it('rejects more than 5 imageDbIds at input parse time', () => {
-    expect(() =>
-      brapiGetImage.input.parse({ imageDbIds: ['1', '2', '3', '4', '5', '6'] }),
-    ).toThrow();
+  it('fetches the first five distinct IDs and returns every deferred ID in order', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) =>
+      pathnameOf(url).endsWith('/imagecontent')
+        ? pngResponse()
+        : jsonResponse(envelope({ imageDbId: pathnameOf(url).split('/').at(-1) })),
+    );
+    const result = await brapiGetImage.handler(
+      brapiGetImage.input.parse({
+        imageDbIds: ['a', 'a', 'b', 'c', 'd', 'e', 'later2', 'later1', 'later2'],
+      }),
+      ctx,
+    );
+    expect(result.images.map((image) => image.imageDbId)).toEqual(['a', 'b', 'c', 'd', 'e']);
+    expect(result).toMatchObject({ deferredImageDbIds: ['later2', 'later1'] });
+    const rendered = JSON.stringify(brapiGetImage.format?.(result));
+    expect(rendered).toMatch(/later2.*later1/);
+    expect(fetcher.mock.calls.every(([url]) => !String(url).includes('later'))).toBe(true);
   });
 
   it('returns a per-image error when the imageURL fallback returns non-image bytes', async () => {

@@ -38,6 +38,7 @@ const baseConfig: ServerConfig = {
   retryBaseDelayMs: 1,
   referenceCacheTtlSeconds: 3_600,
   requestTimeoutMs: 1_000,
+  callDeadlineMs: 50_000,
   companionTimeoutMs: 500,
   searchPollTimeoutMs: 5_000,
   searchPollIntervalMs: 1,
@@ -842,6 +843,71 @@ describe('BrapiClient', () => {
       expect((data as { recovery?: { hint?: string } }).recovery?.hint).toMatch(/\w/);
       return error as McpError;
     };
+
+    it('keeps the ordinary request timeout when the call can wait longer', async () => {
+      fetcher.mockResolvedValue(Response.json({ metadata: {}, result: { data: [] } }));
+      await client.get(BASE_URL, '/observations', withRemaining(20_000));
+      expect(fetcher.mock.calls[0]?.[1]).toBe(1_000);
+    });
+
+    it('lets a primary read complete past the ordinary request timeout after a fast retry', async () => {
+      vi.useFakeTimers();
+      try {
+        const c = new BrapiClient({ ...baseConfig, retryMaxAttempts: 1 }, fetcher);
+        fetcher.mockRejectedValueOnce(serviceUnavailable('Temporary outage'));
+        fetcher.mockImplementationOnce(
+          (_url, timeoutMs) =>
+            new Promise((resolve, reject) => {
+              setTimeout(() => {
+                if (timeoutMs < 2_000) reject(timeout('Stub per-request timeout'));
+                else resolve(Response.json({ metadata: {}, result: { data: [] } }));
+              }, 2_000);
+            }),
+        );
+        const pending = c.get(BASE_URL, '/observationunits', withRemaining(5_000), {
+          useCallBudget: true,
+          retryOnTimeout: false,
+        });
+        const assertion = expect(pending).resolves.toMatchObject({ result: { data: [] } });
+        await Promise.all([assertion, vi.runAllTimersAsync()]);
+        expect(fetcher).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('ends a stalled primary read at the configured shared deadline with request-specific guidance', async () => {
+      vi.useFakeTimers();
+      try {
+        const c = new BrapiClient({ ...baseConfig, callDeadlineMs: 7_000 }, fetcher);
+        fetcher.mockImplementation(stalled(8_000));
+        const pending = c.get(BASE_URL, '/observationunits', callStartedAgo(2_000), {
+          useCallBudget: true,
+          retryOnTimeout: false,
+        });
+        const assertion = expect(pending).rejects.toMatchObject({
+          message: expect.stringContaining('7 s deadline'),
+          data: {
+            reason: 'call_deadline_exceeded',
+            callDeadlineMs: 7_000,
+            recovery: { hint: expect.stringContaining('that endpoint') },
+          },
+        });
+        await Promise.all([assertion, vi.advanceTimersByTimeAsync(5_000)]);
+        expect(fetcher).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('preserves an explicit shorter attempt timeout on a primary read', async () => {
+      fetcher.mockResolvedValue(Response.json({ metadata: {}, result: { data: [] } }));
+      await client.get(BASE_URL, '/observationunits', withRemaining(20_000), {
+        useCallBudget: true,
+        timeoutMs: 500,
+      });
+      expect(fetcher.mock.calls[0]?.[1]).toBe(500);
+    });
 
     it('skips a timeout retry when the remaining budget cannot fit another attempt', async () => {
       const c = new BrapiClient(

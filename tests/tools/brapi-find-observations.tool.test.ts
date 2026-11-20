@@ -217,7 +217,7 @@ describe('brapi_find_observations tool', () => {
   // drops it entirely. Locks in the Issue 1 fix.
   it('downcasts germplasm/variable/unit plurals to singular and drops studies on the BrAPI Test Server', async () => {
     const ctx = await connect(fetcher, ['observations'], 'BrAPI Community Test Server');
-    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+    fetcher.mockImplementation(async () => jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
 
     await brapiFindObservations.handler(
       brapiFindObservations.input.parse({
@@ -229,6 +229,7 @@ describe('brapi_find_observations tool', () => {
     );
 
     const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.get('pageSize')).toBe('1'); // The dropped study is not a wire anchor.
     expect(url.searchParams.getAll('germplasmDbId')).toEqual(['germplasm1']);
     expect(url.searchParams.getAll('observationVariableDbId')).toEqual(['variable1']);
     expect(url.searchParams.has('studyDbId')).toBe(false);
@@ -245,6 +246,34 @@ describe('brapi_find_observations tool', () => {
   // the query to the unfiltered baseline. The agent gets a typed error with
   // a recovery hint instead of an unfiltered result + warning that's easy
   // to miss.
+  it('preflights every unanchored scalar branch before pulling bulk observations', async () => {
+    const ctx = await connect(fetcher, ['observations'], 'BrAPI Community Test Server');
+    const calls: string[] = [];
+    fetcher.mockImplementation(async (url: string) => {
+      const params = new URL(url).searchParams;
+      const id = params.get('observationVariableDbId');
+      calls.push(`${id}/${params.get('pageSize')}`);
+      return jsonResponse(
+        envelope(
+          { data: [{ observationDbId: id }] },
+          {
+            totalCount: id === 'large' ? 6000 : 1,
+          },
+        ),
+      );
+    });
+    const result = await brapiFindObservations.handler(
+      brapiFindObservations.input.parse({ variables: ['large', 'small'] }),
+      ctx,
+    );
+    expect(calls).toEqual(['large/1', 'small/1', 'small/10']);
+    expect(result.results.map((row) => row.observationDbId)).toEqual(['large', 'small']);
+    expect(result.hasMore).toBe(true);
+    expect(getEnrichment(ctx).warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('observation_preflight_bulk_limit')]),
+    );
+  });
+
   it('throws all_filters_dropped when every agent filter is dropped by the dialect', async () => {
     const ctx = await connect(fetcher, ['observations'], 'BrAPI Community Test Server');
     fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));

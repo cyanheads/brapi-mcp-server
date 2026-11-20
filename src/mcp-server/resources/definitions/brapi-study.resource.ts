@@ -9,6 +9,7 @@
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { brapiGetStudy } from '@/mcp-server/tools/definitions/brapi-get-study.tool.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 
 export const brapiStudyResource = resource('brapi://study/{studyDbId}', {
   name: 'brapi-study',
@@ -50,6 +51,7 @@ export const brapiStudyResource = resource('brapi://study/{studyDbId}', {
         'Ask the operator to check that the credentials configured for the default alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,

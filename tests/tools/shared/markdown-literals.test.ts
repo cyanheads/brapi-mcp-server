@@ -261,6 +261,7 @@ describe('formatter boundary wiring', () => {
           studyName: payload,
           valid: 1,
           invalid: 0,
+          flagged: 1,
           routing: { postCount: 1, putCount: 0 },
           knownVariableCount: 1,
           perRowWarnings: [{ rowIndex: 0, ...observation, warning: payload }],

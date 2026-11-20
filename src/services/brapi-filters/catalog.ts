@@ -196,19 +196,19 @@ const GERMPLASM: FilterDescriptor[] = [
   {
     name: 'programDbIds',
     type: 'string[]',
-    description: 'Programs the germplasm is associated with.',
+    description: 'Programs the germplasm is associated with. Use programs in brapi_find_germplasm.',
     example: 'program-1',
   },
   {
     name: 'trialDbIds',
     type: 'string[]',
-    description: 'Trials the germplasm has been tested in.',
+    description: 'Trials the germplasm has been tested in. Use trials in brapi_find_germplasm.',
     example: 'trial-1',
   },
   {
     name: 'studyDbIds',
     type: 'string[]',
-    description: 'Studies the germplasm has been tested in.',
+    description: 'Studies the germplasm has been tested in. Use studies in brapi_find_germplasm.',
     example: 'study-1',
   },
   {

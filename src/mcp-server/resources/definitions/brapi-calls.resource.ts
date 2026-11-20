@@ -9,6 +9,7 @@
 import { type HandlerContext, resource } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { requireRegisteredConnection } from '@/mcp-server/tools/shared/find-helpers.js';
+import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 
 async function loadCallsProfile(ctx: HandlerContext<'unknown_alias'>) {
@@ -58,6 +59,7 @@ export const brapiCallsResource = resource('brapi://calls', {
         'Ask the operator to check that the credentials configured for the default alias are valid and that the upstream IdP issues access tokens for this grant.',
       thrownBy: 'service',
     },
+    DISCOVERY_NOT_FOUND_ERROR,
     {
       reason: 'capability_discovery_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,

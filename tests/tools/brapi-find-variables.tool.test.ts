@@ -494,6 +494,32 @@ describe('brapi_find_variables tool', () => {
     expect(url.searchParams.has('traitClasses')).toBe(false);
   });
 
+  it('expands scalar filters inside each study walk and preserves study provenance', async () => {
+    const ctx = await connect(fetcher, ['variables'], 'CassavaBase');
+    const requests: string[] = [];
+    fetcher.mockImplementation(async (url: string) => {
+      const params = new URL(url).searchParams;
+      const variable = params.get('observationVariableDbId');
+      requests.push(`${params.get('studyDbId')}/${variable}`);
+      return jsonResponse(
+        envelope({ data: [{ observationVariableDbId: variable }] }, { totalCount: 1 }),
+      );
+    });
+    const result = await brapiFindVariables.handler(
+      brapiFindVariables.input.parse({ studies: ['S1', 'S2'], variables: ['V1', 'V2'] }),
+      ctx,
+    );
+    expect(new Set(requests)).toEqual(new Set(['S1/V1', 'S1/V2', 'S2/V1', 'S2/V2']));
+    expect(result.results).toEqual([
+      expect.objectContaining({ observationVariableDbId: 'V1', studyDbIds: ['S1', 'S2'] }),
+      expect.objectContaining({ observationVariableDbId: 'V2', studyDbIds: ['S1', 'S2'] }),
+    ]);
+    expect(result.studyCoverage).toMatchObject([
+      { id: 'S1', status: 'complete', pagesFetched: 2 },
+      { id: 'S2', status: 'complete', pagesFetched: 2 },
+    ]);
+  });
+
   it('escalates GET → POST /search when multi-value filters would be downcast (#15)', async () => {
     // BrAPI Community Test Server singularizes plural GET filters but its
     // POST /search routes work natively with multi-value arrays. When the
@@ -619,6 +645,37 @@ describe('brapi_find_variables inline budget (#66)', () => {
 
   const ids = (s: Record<string, unknown>) =>
     (s.results as { observationVariableDbId: string }[]).map((r) => r.observationVariableDbId);
+
+  it('promotes the normalized base name in both candidates and results', async () => {
+    const ctx = await connect(fetcher);
+    const rows = [
+      varRow({
+        observationVariableDbId: '78776',
+        observationVariableName: 'dry matter content percentage|month 10|boiled root|COMP:0000195',
+        observationVariablePUI: 'COMP:0000195',
+        trait: { traitName: null },
+      }),
+      varRow({
+        observationVariableDbId: '70741',
+        observationVariableName: 'dry matter content percentage|CO_334:0000092',
+        observationVariablePUI: 'CO_334:0000092',
+        trait: { traitName: 'dry matter content percentage' },
+      }),
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+    const { result, structured, text } = await call(ctx, {
+      text: 'dry matter content',
+      loadLimit: 1,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(ids(structured)).toEqual(['70741']);
+    expect(structured.ontologyCandidates).toMatchObject([
+      { observationVariableDbId: '70741', termId: 'CO_334:0000092' },
+      { observationVariableDbId: '78776', termId: 'COMP:0000195' },
+    ]);
+    expect(text).toContain('70741');
+    expect(text.indexOf('CO_334:0000092')).toBeLessThan(text.indexOf('COMP:0000195'));
+  });
 
   it('budgets the ranked rows: free-text matches lead results[], every row is staged', async () => {
     const ctx = await connect(fetcher);

@@ -76,7 +76,7 @@ export class BrapiClient {
         this.buildUrl(baseUrl, path, params),
         ctx,
         { method: 'GET', headers: this.buildHeaders(options.auth), signal },
-        options.timeoutMs,
+        options.timeoutMs ?? (options.useCallBudget ? this.serverConfig.callDeadlineMs : undefined),
         options.singleton === true,
       );
       return this.parseEnvelope<T>(response);
@@ -251,7 +251,8 @@ export class BrapiClient {
     const pollIntervalMs = this.serverConfig.searchPollIntervalMs;
     const attemptTimeoutMs = options.timeoutMs ?? this.serverConfig.requestTimeoutMs;
     const startedAt = Date.now();
-    const callAt = callDeadlineAt(ctx);
+    const { callDeadlineMs } = this.serverConfig;
+    const callAt = callDeadlineAt(ctx, callDeadlineMs);
     // Polling stops at the poll budget; a poll's own timeout is clipped only
     // to the deadlines (call, caller), which also end the request in flight.
     const stopAt = Math.min(callAt, startedAt + pollTimeoutMs);
@@ -262,7 +263,7 @@ export class BrapiClient {
       options.deadlineMs <= this.serverConfig.searchPollTimeoutMs;
     const expired = (cause?: unknown) =>
       callAt <= startedAt + pollTimeoutMs
-        ? callDeadlineExceeded(operation, { sent: polls > 0 }, cause)
+        ? callDeadlineExceeded(operation, callDeadlineMs, { sent: polls > 0 }, cause)
         : timeout(
             `Async search ${noun}/${searchResultsDbId} timed out after ${pollTimeoutMs}ms`,
             {
@@ -312,7 +313,7 @@ export class BrapiClient {
   }
 
   /**
-   * Run one request under the call deadline (`callDeadlineAt(ctx)`) and the
+   * Run one request under the call deadline and the
    * caller's tighter `deadlineMs`, whichever ends first, with the retry
    * ladder inside that budget. A timed-out attempt is retried only when the
    * remaining budget still fits a full attempt; a request the call deadline
@@ -326,8 +327,10 @@ export class BrapiClient {
     attempt: (a: RetryAttempt) => Promise<T>,
   ): Promise<T> {
     const startedAt = Date.now();
-    const callRemainingMs = callDeadlineAt(ctx) - startedAt;
-    if (callRemainingMs <= 0) throw callDeadlineExceeded(operation, { sent: false });
+    const { callDeadlineMs } = this.serverConfig;
+    const callRemainingMs = callDeadlineAt(ctx, callDeadlineMs) - startedAt;
+    if (callRemainingMs <= 0)
+      throw callDeadlineExceeded(operation, callDeadlineMs, { sent: false });
     const callBound = options.deadlineMs === undefined || callRemainingMs <= options.deadlineMs;
     const deadlineMs = callBound ? callRemainingMs : (options.deadlineMs as number);
     const attemptTimeoutMs = options.timeoutMs ?? this.serverConfig.requestTimeoutMs;
@@ -352,7 +355,12 @@ export class BrapiClient {
         const attempts = (err as McpError).data?.retryAttempts;
         throw callDeadlineExceeded(
           operation,
-          { sent: true, ...(typeof attempts === 'number' && { retryAttempts: attempts }) },
+          callDeadlineMs,
+          {
+            sent: true,
+            ...(options.useCallBudget && { primaryRead: true }),
+            ...(typeof attempts === 'number' && { retryAttempts: attempts }),
+          },
           err,
         );
       }

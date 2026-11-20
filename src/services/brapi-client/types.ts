@@ -56,7 +56,7 @@ export interface BrapiRequestOptions {
   /**
    * Wall-clock budget (ms) for this request across every attempt and backoff,
    * for a caller holding a tighter limit than the call deadline every request
-   * already shares (`CALL_DEADLINE_MS` from the tool call's start); the earlier
+   * already shares (from the tool call's start); the earlier
    * of the two applies. Expiry aborts the attempt in flight and rejects with
    * `Timeout`. `getSearchResults()` stops polling at it.
    */
@@ -99,6 +99,8 @@ export interface BrapiRequestOptions {
   singleton?: boolean;
   /** Override the config default per-attempt timeout. */
   timeoutMs?: number;
+  /** Let a primary GET use the upstream call budget when no explicit timeout is set. */
+  useCallBudget?: true;
   /**
    * Sink for dialect translation warnings. When `dialect` is supplied, any
    * adapter warnings (downcast, dropped) are appended here verbatim. Allows

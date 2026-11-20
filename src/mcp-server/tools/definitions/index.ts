@@ -19,6 +19,7 @@ import { brapiDataframeExport } from './brapi-dataframe-export.tool.js';
 import { brapiDataframeQuery } from './brapi-dataframe-query.tool.js';
 import { brapiDescribeFilters } from './brapi-describe-filters.tool.js';
 import { brapiExportGenotypeMatrix } from './brapi-export-genotype-matrix.tool.js';
+import { brapiFederatedFind } from './brapi-federated-find.tool.js';
 import { brapiFindGenotypeCalls } from './brapi-find-genotype-calls.tool.js';
 import { brapiFindGermplasm } from './brapi-find-germplasm.tool.js';
 import { brapiFindImages } from './brapi-find-images.tool.js';
@@ -47,6 +48,7 @@ export const readOnlyToolDefinitions = [
   brapiBuildPhenotypeMatrix,
   brapiServerInfo,
   brapiDescribeFilters,
+  brapiFederatedFind,
   brapiFindStudies,
   brapiGetStudy,
   brapiFindGermplasm,

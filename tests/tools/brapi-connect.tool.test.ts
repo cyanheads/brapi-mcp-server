@@ -38,6 +38,7 @@ const baseConfig: ServerConfig = {
   retryBaseDelayMs: 1,
   referenceCacheTtlSeconds: 3_600,
   requestTimeoutMs: 1_000,
+  callDeadlineMs: 50_000,
   companionTimeoutMs: 500,
   searchPollTimeoutMs: 5_000,
   searchPollIntervalMs: 1,
@@ -546,6 +547,37 @@ describe('brapi_connect against an auth-walled server (real socket)', () => {
       });
     },
   );
+
+  it('reports both discovery 404s and the versioned base URL on the wire', async () => {
+    const root = new URL(baseUrl).origin;
+    routes['/serverinfo'] = status(404);
+    routes['/calls'] = status(404);
+
+    const result = await runToolContract(
+      brapiConnect,
+      { alias: 'missing', baseUrl: root },
+      { context: { tenantId: 't1' } },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'capability_discovery_not_found',
+          recovery: { hint: expect.stringContaining(`${root}/brapi/v2`) },
+        },
+      },
+    });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'text',
+          text: expect.stringContaining(`${root}/brapi/v2`),
+        }),
+      ]),
+    );
+  });
 
   it('fails the same way when only the /calls fallback answers 401', async () => {
     routes['/serverinfo'] = ok({ serverName: 'Walled BrAPI' });
