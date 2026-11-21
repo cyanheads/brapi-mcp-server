@@ -96,7 +96,7 @@
   },
   "dependencies": {
     "@cyanheads/mcp-ts-core": "^0.13.22",
-    "@duckdb/node-api": "^2.0.0-r.1",
+    "@duckdb/node-api": "^2.0.1-r.1",
     "pino-pretty": "^13.2.0",
     "zod": "^4.6.7"
   },
