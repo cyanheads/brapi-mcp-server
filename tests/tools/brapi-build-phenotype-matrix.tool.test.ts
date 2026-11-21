@@ -143,6 +143,30 @@ describe('brapi_build_phenotype_matrix tool', () => {
     );
   });
 
+  it('labels the long season column with the seasonDbId, else the year, else null', async () => {
+    const ctx = await connect(fetcher);
+    const { staged } = await build(
+      ctx,
+      [
+        {
+          ...obsRow('g1', 'G1', 'v1', 'Height', '10'),
+          season: { seasonDbId: 'spring_2013', seasonName: 'spring', year: 2013 },
+        },
+        {
+          ...obsRow('g2', 'G2', 'v1', 'Height', '20'),
+          season: { seasonDbId: null, season: null, year: '2019' },
+        },
+        { ...obsRow('g3', 'G3', 'v1', 'Height', '30'), season: { seasonDbId: null, year: null } },
+      ],
+      { shape: 'long' },
+    );
+    expect(staged.map((row) => [row.germplasmDbId, row.season])).toEqual([
+      ['g1', 'spring_2013'],
+      ['g2', '2019'],
+      ['g3', null],
+    ]);
+  });
+
   it('maps collision-safe count columns and counts only the values used by the mean', async () => {
     const ctx = await connect(fetcher);
     const { result, staged } = await build(

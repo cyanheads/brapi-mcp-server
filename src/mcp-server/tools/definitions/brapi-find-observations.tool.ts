@@ -65,7 +65,11 @@ import {
   resolveFindRoute,
 } from '../shared/find-helpers.js';
 import { literal } from '../shared/markdown-literals.js';
-import { collectEmbeddedObservations, type RawObservationRow } from '../shared/observations.js';
+import {
+  collectEmbeddedObservations,
+  type RawObservationRow,
+  seasonLabel,
+} from '../shared/observations.js';
 
 const ObservationRowSchema = z
   .object({
@@ -139,7 +143,7 @@ const OutputSchema = z.object({
         .describe('Unit level (plot / plant / field) → count of observations at that level.'),
       season: z
         .record(z.string(), z.number())
-        .describe('Season identifier → count of observations in that season.'),
+        .describe('Season label → count of observations in that season.'),
     })
     .describe('Value frequency per field across every matched row fetched.'),
   dataframe: DataframeHandleSchema.optional().describe(
@@ -656,7 +660,7 @@ export async function findObservations(
     studyName: computeDistribution(fullRows, (r) => asString(r.studyName)),
     germplasmName: computeDistribution(fullRows, (r) => asString(r.germplasmName)),
     observationLevel: computeDistribution(fullRows, (r) => asString(r.observationLevel)),
-    season: computeDistribution(fullRows, (r) => normalizeSeason(r.season)),
+    season: computeDistribution(fullRows, seasonLabel),
   };
 
   checkFilterMatchRates(warnings, fullRows.length, [
@@ -735,31 +739,6 @@ export async function findObservations(
   return result;
 }
 
-function normalizeSeason(value: unknown): string | undefined {
-  const nonEmpty = (v: unknown): string | undefined =>
-    typeof v === 'string' && v.length > 0 ? v : undefined;
-
-  if (typeof value === 'string') return nonEmpty(value);
-  if (!value || typeof value !== 'object') return;
-
-  const record = value as {
-    seasonDbId?: unknown;
-    season?: unknown;
-    seasonName?: unknown;
-    year?: unknown;
-  };
-
-  const id = nonEmpty(record.seasonDbId);
-  if (id) return id;
-
-  const label = nonEmpty(record.season) ?? nonEmpty(record.seasonName);
-  const year =
-    nonEmpty(record.year) ?? (typeof record.year === 'number' ? String(record.year) : undefined);
-
-  if (label) return year ? `${label} ${year}` : label;
-  return year;
-}
-
 function scopeIds(value: unknown): string[] {
   const ids = Array.isArray(value) ? value : [value];
   return [
@@ -787,8 +766,7 @@ function matchesEmbeddedObservation(
     const requested = filters[key] ?? filters[field];
     if (requested === undefined || (Array.isArray(requested) && requested.length === 0)) continue;
     const values = Array.isArray(requested) ? requested : [requested];
-    const actual =
-      field === 'seasonDbId' ? (row.seasonDbId ?? normalizeSeason(row.season)) : row[field];
+    const actual = field === 'seasonDbId' ? seasonLabel(row) : row[field];
     if (actual === undefined || actual === null) return false;
     if (
       !values.some((value) =>
@@ -905,8 +883,8 @@ function renderObservationsRows(result: Pick<Output, 'results' | 'dataframe'>): 
       if (o.studyName) parts.push(literal`study=${o.studyName}`);
       if (o.studyDbId) parts.push(literal`studyDbId=${o.studyDbId}`);
       if (o.observationLevel) parts.push(literal`level=${o.observationLevel}`);
-      const seasonLabel = normalizeSeason(o.season);
-      if (seasonLabel) parts.push(literal`season=${seasonLabel}`);
+      const season = seasonLabel(o);
+      if (season) parts.push(literal`season=${season}`);
       if (o.observationTimeStamp) parts.push(literal`time=${o.observationTimeStamp}`);
       if (o.collector) parts.push(literal`collector=${o.collector}`);
       if (o.uploadedBy) parts.push(literal`uploadedBy=${o.uploadedBy}`);

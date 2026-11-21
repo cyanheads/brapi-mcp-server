@@ -733,3 +733,81 @@ describe('brapi_find_observations inline budget (#66)', () => {
     expect(text).toContain('Returning only the 8 row(s) the preflight request returned.');
   });
 });
+
+describe('brapi_find_observations season labels', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  async function call(ctx: Context, input: Record<string, unknown>) {
+    const definition = {
+      ...brapiFindObservations,
+      handler: (parsed, contractCtx) =>
+        brapiFindObservations.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFindObservations;
+    const result = await runToolContract(definition, input, { context: { tenantId: 't1' } });
+    const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+    return { structured: result.structuredContent as Record<string, unknown>, text };
+  }
+
+  it('labels the distribution and rendered rows by seasonDbId, including a flat row seasonDbId', async () => {
+    const ctx = await connect(fetcher);
+    const rows = [
+      obsRow({ season: { seasonDbId: 'spring_2013', seasonName: 'spring', year: 2013 } }),
+      obsRow({ observationDbId: 'obs-2', season: undefined, seasonDbId: 's1' }),
+      obsRow({ observationDbId: 'obs-3', season: { seasonDbId: null, year: null } }),
+    ];
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: rows }, { totalCount: rows.length })));
+
+    const { structured, text } = await call(ctx, { studies: ['s-1'], seasons: ['spring_2013'] });
+
+    expect(structured.distributions).toMatchObject({ season: { spring_2013: 1, s1: 1 } });
+    expect(text).toContain('season=spring_2013');
+    expect(text).toContain('season=s1');
+    expect((structured.warnings as string[]).join('\n')).not.toMatch(/seasons/);
+  });
+
+  it('matches the embedded seasons filter against SGN year-only seasons', async () => {
+    const ctx = await connect(fetcher, ['observations', 'observationunits'], 'Sweetpotatobase');
+    const child = (id: string, year: string) => ({
+      observationDbId: id,
+      observationVariableDbId: '77038',
+      value: '1',
+      season: { season: null, seasonDbId: null, year },
+    });
+    fetcher.mockResolvedValue(
+      jsonResponse(
+        envelope(
+          {
+            data: [
+              {
+                observationUnitDbId: 'u1',
+                studyDbId: '1436',
+                germplasmDbId: '43045',
+                season: null,
+                seasonDbId: null,
+                observations: [child('o2009', '2009'), child('o2010', '2010')],
+              },
+            ],
+          },
+          { totalCount: 1 },
+        ),
+      ),
+    );
+
+    const { structured, text } = await call(ctx, { studies: ['1436'], seasons: ['2009'] });
+
+    expect(structured).toMatchObject({
+      results: [{ observationDbId: 'o2009' }],
+      distributions: { season: { '2009': 1 } },
+    });
+    expect(text).toContain('season=2009');
+    expect((structured.warnings as string[]).join('\n')).not.toMatch(/seasons/);
+  });
+});

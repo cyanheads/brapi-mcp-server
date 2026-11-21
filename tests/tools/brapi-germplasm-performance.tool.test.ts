@@ -179,7 +179,9 @@ describe('brapi_germplasm_performance tool', () => {
     expect(v.sd).toBeCloseTo(7.071, 2); // sample sd of [10,20] = sqrt(50)
     expect(v.studyCount).toBe(1);
     expect(v.studyDbIds).toEqual(['study1']);
-    expect(v.seasons).toEqual(['spring 2013']);
+    // The seasonDbId, matching brapi_find_observations and the study's own seasons.
+    expect(v.seasons).toEqual(['spring_2013']);
+    expect(brapiGermplasmPerformance.format(result)[0]?.text).toContain('seasons=spring_2013');
   });
 
   it('warns when /studies ignores the germplasm filter (filtered total === baseline)', async () => {
@@ -521,6 +523,92 @@ describe('brapi_germplasm_performance observation pull', () => {
         cancellable,
       ),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+  });
+});
+
+describe('brapi_germplasm_performance season labels on SGN embedded observations', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices({ ...TEST_CONFIG, pageSize: 1000 });
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  /** A Sweetpotatobase unit (germplasm 43045) whose embedded observation carries SGN's year-only season. */
+  const sgnUnit = (studyDbId: string, year: string | null, value: string) => ({
+    observationUnitDbId: `u-${studyDbId}`,
+    studyDbId,
+    germplasmDbId: '43045',
+    germplasmName: 'Monaco',
+    observations: [
+      {
+        observationDbId: `o-${studyDbId}`,
+        observationUnitDbId: `u-${studyDbId}`,
+        observationVariableDbId: '77038',
+        observationVariableName: 'Total root weight per NET plot in kg|CO_331:0000237',
+        germplasmDbId: '43045',
+        studyDbId,
+        value,
+        season: { season: null, seasonDbId: null, year },
+      },
+    ],
+  });
+
+  async function run(units: Record<string, unknown>[]) {
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/serverinfo')) {
+        return jsonResponse(envelope({ serverName: 'Sweetpotatobase', calls: SERVER_CALLS }));
+      }
+      if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiGermplasmPerformance.errors });
+    await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
+    fetcher.mockReset();
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.includes('/germplasm/')) {
+        return jsonResponse(envelope({ germplasmDbId: '43045', germplasmName: 'Monaco' }));
+      }
+      if (path.endsWith('/observationunits')) {
+        return jsonResponse(envelope({ data: units }, { totalCount: units.length }));
+      }
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+    const definition = {
+      ...brapiGermplasmPerformance,
+      handler: (parsed, contractCtx) =>
+        brapiGermplasmPerformance.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiGermplasmPerformance;
+    const result = await runToolContract(
+      definition,
+      { germplasmDbId: '43045', variables: ['77038'] },
+      { context: { tenantId: 't1' } },
+    );
+    const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+    return { structured: result.structuredContent as Record<string, unknown>, text };
+  }
+
+  it('labels each observation by its string year on both surfaces', async () => {
+    const { structured, text } = await run([
+      sgnUnit('1428', '2009', '58.91'),
+      sgnUnit('1410', '2008', '52.2'),
+      sgnUnit('4357', '2021', '2.07'),
+    ]);
+    expect(structured).toMatchObject({
+      perVariable: [{ observationVariableDbId: '77038', n: 3, seasons: ['2008', '2009', '2021'] }],
+    });
+    expect(text).toContain('seasons=2008/2009/2021');
+  });
+
+  it('keeps seasons empty when no observation carries a season', async () => {
+    const { structured, text } = await run([sgnUnit('1410', null, '52.2')]);
+    expect(structured).toMatchObject({ perVariable: [{ n: 1, seasons: [] }] });
+    expect(text).not.toContain('seasons=');
   });
 });
 

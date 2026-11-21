@@ -51,6 +51,7 @@ import {
   isDialectAllDropped,
 } from '@/services/brapi-client/index.js';
 import { type BrapiDialect, prefersEmbeddedObservations } from '@/services/brapi-dialect/index.js';
+import { supportsMethod } from '@/services/capability-registry/supports-method.js';
 import type { CallDescriptor } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 import {
@@ -87,7 +88,7 @@ export interface NormObs {
   observationVariableDbId: string;
   observationVariableName: string;
   position?: ObservationPosition;
-  /** Human season label (`"spring 2013"` / seasonDbId), when the row carries one. */
+  /** Season label from `seasonLabel` — the seasonDbId, else name and year, the name, or the year. */
   season?: string;
   studyDbId: string;
   value: string;
@@ -218,8 +219,9 @@ export async function pullStudyObservations(
   // the observations path entirely and go straight to the observationunits
   // fallback rather than making an unscoped request.
   const obsFiltersDropped = adapted.dropped.length > 0 && Object.keys(adapted.filters).length === 0;
-  const supportsObservations = supportsGet(args.profile, 'observations') && !obsFiltersDropped;
-  const supportsObsUnits = supportsGet(args.profile, 'observationunits');
+  const supportsObservations =
+    supportsMethod(args.profile.observations, 'GET') && !obsFiltersDropped;
+  const supportsObsUnits = supportsMethod(args.profile.observationunits, 'GET');
   if (!supportsObservations && !obsFiltersDropped && !supportsObsUnits) return null;
 
   /** The first non-fatal error on the chain; thrown when no later path answers definitively. */
@@ -483,13 +485,6 @@ function httpStatusOf(err: unknown): number | undefined {
 
 function isTimeout(err: unknown): boolean {
   return err instanceof McpError && err.code === JsonRpcErrorCode.Timeout;
-}
-
-function supportsGet(profile: Record<string, CallDescriptor>, service: string): boolean {
-  const descriptor = profile[service];
-  if (!descriptor) return false;
-  if (!descriptor.methods || descriptor.methods.length === 0) return true;
-  return descriptor.methods.includes('GET');
 }
 
 /** A bounded embedded-unit scan; totals count raw units, never child observations. */
@@ -1086,23 +1081,25 @@ export function normalizeObsRow(row: RawObservationRow): NormObs | null {
 }
 
 /**
- * Derive a human season label from a BrAPI observation row. Servers carry
- * season either as a nested object (`{ seasonName, year, seasonDbId }`) or a
- * flat `seasonDbId` string. Returns undefined when neither is present.
+ * The one season label every observation surface uses — `brapi_find_observations`
+ * (distribution, rendered rows, embedded `seasons` filter), `NormObs.season` for
+ * `brapi_germplasm_performance` and `brapi_build_phenotype_matrix`.
+ *
+ * Precedence: the season object's `seasonDbId`, else the row's flat
+ * `seasonDbId` (so a label is always usable as a `seasons` filter value and
+ * equals a study's `seasons` entry); a flat string `season` is its own label;
+ * else the name (`seasonName`, or BrAPI v2.0's `season`) followed by the year
+ * (string or number, as SGN sends it), the name alone, or the year alone. A
+ * name equal to the year is not repeated. Empty strings count as absent.
  */
-export function seasonLabel(row: RawObservationRow): string | undefined {
-  const s: unknown = row.season;
-  if (s && typeof s === 'object') {
-    const so = s as Record<string, unknown>;
-    const name =
-      typeof so.seasonName === 'string' && so.seasonName.length > 0 ? so.seasonName : undefined;
-    const year = typeof so.year === 'number' ? so.year : undefined;
-    if (name && year !== undefined) return `${name} ${year}`;
-    if (name) return name;
-    if (typeof so.seasonDbId === 'string' && so.seasonDbId.length > 0) return so.seasonDbId;
-  } else if (typeof s === 'string' && s.length > 0) {
-    return s;
-  }
-  if (typeof row.seasonDbId === 'string' && row.seasonDbId.length > 0) return row.seasonDbId;
-  return;
+export function seasonLabel(row: { season?: unknown; seasonDbId?: unknown }): string | undefined {
+  const s = row.season;
+  const so = s && typeof s === 'object' ? (s as Record<string, unknown>) : undefined;
+  const id = observedText(so?.seasonDbId) ?? observedText(row.seasonDbId);
+  if (id) return id;
+  if (!so) return observedText(s) ?? undefined;
+  const name = observedText(so.seasonName) ?? observedText(so.season);
+  const year = typeof so.year === 'number' ? String(so.year) : observedText(so.year);
+  if (name && year && name !== year) return `${name} ${year}`;
+  return name ?? year ?? undefined;
 }

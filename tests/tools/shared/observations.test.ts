@@ -18,12 +18,14 @@ import type { ServerConfig } from '@/config/server-config.js';
 import { MAX_SPILLOVER_PAGES } from '@/mcp-server/tools/shared/find-helpers.js';
 import {
   type NormObs,
+  normalizeObsRow,
   type ObservationPullFilters,
   type PullObservationsForStudiesArgs,
   type PullStudyObservationsArgs,
   pullObservationsForStudies,
   pullStudyObservations,
   type StudyPull,
+  seasonLabel,
 } from '@/mcp-server/tools/shared/observations.js';
 import { BrapiClient, CALL_DEADLINE_MS } from '@/services/brapi-client/index.js';
 import {
@@ -911,5 +913,94 @@ describe('pullStudyObservations', () => {
       JsonRpcErrorCode.Timeout,
     ]);
     expect(requests.every((u) => u.searchParams.get('studyDbIds') === 'slow')).toBe(true);
+  });
+});
+
+describe('seasonLabel', () => {
+  it.each<[string, Parameters<typeof seasonLabel>[0], string]>([
+    [
+      'SGN embedded: null id and name, string year',
+      { season: { seasonDbId: null, season: null, year: '2019' } },
+      '2019',
+    ],
+    ['numeric year alone', { season: { year: 2019 } }, '2019'],
+    [
+      'SGN /observations: id, name, and year all equal',
+      { season: { seasonDbId: '2022', season: '2022', year: '2022' } },
+      '2022',
+    ],
+    [
+      'spec: seasonDbId wins over name and year',
+      { season: { seasonDbId: 'spring_2013', seasonName: 'spring', year: 2013 } },
+      'spring_2013',
+    ],
+    [
+      'v2.0 season name with numeric year',
+      { season: { season: 'Spring', year: 2018 } },
+      'Spring 2018',
+    ],
+    [
+      'seasonName with string year',
+      { season: { seasonName: 'Spring', year: '2018' } },
+      'Spring 2018',
+    ],
+    [
+      'seasonName wins over the v2.0 season name',
+      { season: { seasonName: 'Wet', season: 'Spring', year: 2018 } },
+      'Wet 2018',
+    ],
+    [
+      'a name equal to the year is not repeated',
+      { season: { season: '2022', year: '2022' } },
+      '2022',
+    ],
+    ['name alone', { season: { seasonName: 'Dry' } }, 'Dry'],
+    ['flat row seasonDbId with no season', { seasonDbId: 's1' }, 's1'],
+    [
+      'flat row seasonDbId beside a year-only season object',
+      { seasonDbId: 's1', season: { year: '2019' } },
+      's1',
+    ],
+    ['flat string season is its own label', { season: 'Spring 2018' }, 'Spring 2018'],
+    [
+      'flat row seasonDbId wins over a flat string season',
+      { seasonDbId: 's1', season: 'Spring 2018' },
+      's1',
+    ],
+    [
+      'empty strings fall through to the year',
+      { seasonDbId: '', season: { seasonDbId: '', season: '', seasonName: '', year: '2021' } },
+      '2021',
+    ],
+  ])('%s', (_label, row, expected) => {
+    expect(seasonLabel(row)).toBe(expected);
+  });
+
+  it.each<[string, Parameters<typeof seasonLabel>[0]]>([
+    ['no season fields', {}],
+    [
+      'an all-null season object',
+      { season: { seasonDbId: null, season: null, seasonName: null, year: null } },
+    ],
+    ['an all-empty season object', { season: { seasonDbId: '', season: '', year: '' } }],
+    ['null season and seasonDbId', { season: null, seasonDbId: null }],
+    ['an empty flat string season', { season: '' }],
+  ])('returns no label for %s', (_label, row) => {
+    expect(seasonLabel(row)).toBeUndefined();
+  });
+
+  it('normalizeObsRow carries the label, and omits the field when there is none', () => {
+    const base = {
+      germplasmDbId: 'g1',
+      observationVariableDbId: 'v1',
+      studyDbId: 's1',
+      value: '1',
+    };
+    expect(
+      normalizeObsRow({ ...base, season: { seasonDbId: null, season: null, year: '2019' } }),
+    ).toMatchObject({ season: '2019' });
+    expect(
+      normalizeObsRow({ ...base, season: { seasonDbId: null, year: null } }),
+    ).not.toHaveProperty('season');
   });
 });
