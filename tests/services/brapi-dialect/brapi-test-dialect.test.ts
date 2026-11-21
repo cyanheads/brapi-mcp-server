@@ -117,6 +117,30 @@ describe('brapiTestDialect', () => {
       expect(result.filters).toEqual({ locationDbId: 'location_01' });
       expect(result.warnings).toEqual([]);
     });
+
+    // GET /studies?observationVariableDbId=variable1 → study1 only; the plural is ignored.
+    it('translates observationVariableDbIds → observationVariableDbId as a verified mapping', () => {
+      const one = brapiTestDialect.adaptGetFilters('studies', {
+        observationVariableDbIds: ['variable1'],
+      });
+      expect(one).toEqual({
+        filters: { observationVariableDbId: 'variable1' },
+        dropped: [],
+        warnings: [],
+      });
+
+      const two = brapiTestDialect.adaptGetFilters('studies', {
+        observationVariableDbIds: ['variable1', 'variable2'],
+      });
+      expect(two).toMatchObject({
+        filters: { observationVariableDbId: 'variable1' },
+        requiresEscalation: true,
+      });
+      expect(two.warnings).toEqual([
+        expect.stringMatching(/'observationVariableDbIds' downcast to 'observationVariableDbId'/),
+      ]);
+      expect(two.warnings[0]).not.toMatch(/mapping inferred/);
+    });
   });
 
   describe('germplasm endpoint', () => {

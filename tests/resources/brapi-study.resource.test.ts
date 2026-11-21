@@ -10,6 +10,7 @@ import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { brapiStudyResource } from '@/mcp-server/resources/definitions/brapi-study.resource.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
+import { brapiGetStudy } from '@/mcp-server/tools/definitions/brapi-get-study.tool.js';
 import {
   BASE_URL,
   envelope,
@@ -118,6 +119,55 @@ describe('brapi://study/{studyDbId} resource', () => {
     expect(result.variableCount).toBeUndefined();
     expect(result.observationUnitCount).toBe(0);
     expect(result.warnings.join('\n')).toMatch(/variableCount omitted/);
+  });
+
+  it('resolves foreign keys through detail routes and warns on a miss, exactly as the tool does (#125)', async () => {
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/serverinfo')) {
+        return jsonResponse(
+          envelope({
+            serverName: 'Breedbase',
+            calls: [
+              'studies',
+              'programs',
+              'programs/{programDbId}',
+              'trials',
+              'trials/{trialDbId}',
+            ].map((service) => ({ service, methods: ['GET'], versions: ['2.1'] })),
+          }),
+        );
+      }
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+    const ctx = createMockContext({ tenantId: 't1', errors: brapiStudyResource.errors });
+    await brapiConnect.handler(brapiConnect.input.parse({ baseUrl: BASE_URL }), ctx);
+    fetcher.mockReset();
+    fetcher.mockImplementation(async (url: string) => {
+      const path = pathnameOf(url);
+      if (path.endsWith('/studies/s-1'))
+        return jsonResponse(envelope({ studyDbId: 's-1', programDbId: 'p1', trialDbId: 't1' }));
+      // The collection route ignores the ID filter and answers its first page.
+      if (path.endsWith('/programs'))
+        return jsonResponse(envelope({ data: [{ programDbId: '1288' }] }, { totalCount: 31 }));
+      if (path.endsWith('/programs/p1'))
+        return jsonResponse(envelope({ programDbId: 'p1', programName: 'NCSU' }));
+      if (path.endsWith('/trials/t1')) return jsonResponse({ metadata: {}, result: null });
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+
+    const fromResource = await brapiStudyResource.handler({ studyDbId: 's-1' }, ctx);
+    const fromTool = await brapiGetStudy.handler(
+      brapiGetStudy.input.parse({ studyDbId: 's-1' }),
+      ctx,
+    );
+
+    expect(fromResource).toMatchObject({
+      program: { programDbId: 'p1', programName: 'NCSU' },
+      warnings: ["trial 't1' not found: GET /trials/t1 returned no matching record."],
+    });
+    expect(fromResource).not.toHaveProperty('trial');
+    expect(fromResource).toEqual(fromTool);
   });
 
   it('throws NotFound when the study payload is empty', async () => {

@@ -40,6 +40,7 @@ import {
   type CapabilityLookupOptions,
   getCapabilityRegistry,
 } from '@/services/capability-registry/index.js';
+import { supportsMethod } from '@/services/capability-registry/supports-method.js';
 import type { CapabilityProfile } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 import { DEFAULT_ALIAS, getServerRegistry } from '@/services/server-registry/index.js';
@@ -570,17 +571,14 @@ export function resolveFindRoute(input: ResolveFindRouteInput): FindRoute {
             preflightMaxTotal: input.getFanoutPreflightMaxTotal,
           }),
         };
-        for (let index = input.warnings.length - 1; index >= 0; index--) {
-          if (input.warnings[index]?.includes('only the first value')) {
-            input.warnings.splice(index, 1);
-          }
-        }
+        dropDowncastWarnings(input.warnings);
       }
     }
     return route;
   }
 
   if (searchSupported && !searchDisabled) {
+    dropDowncastWarnings(input.warnings);
     if (escalate) {
       input.warnings.push(
         `Route escalated to POST /search/${searchNoun} because GET ${path} would have downcast multi-value filters under the active '${input.dialect.id}' dialect; POST /search preserves the original multi-value semantics.`,
@@ -622,6 +620,16 @@ export function resolveFindRoute(input: ResolveFindRouteInput): FindRoute {
 }
 
 /**
+ * Remove the dialect's "only the first value … was sent" downcast warnings once
+ * the chosen route carries every value: a GET union or a POST search body.
+ */
+function dropDowncastWarnings(warnings: string[]): void {
+  for (let index = warnings.length - 1; index >= 0; index--) {
+    if (warnings[index]?.includes('only the first value')) warnings.splice(index, 1);
+  }
+}
+
+/**
  * True when {@link resolveFindRoute} picks a route for `noun` on this server
  * instead of throwing: GET `/{noun}` is advertised, or POST `/search/{noun}`
  * is advertised and the active dialect does not mark it known-dead.
@@ -651,16 +659,6 @@ function findRouteSupport(
     searchSupported: supportsMethod(profile.supported[`search/${searchNoun}`], 'POST'),
     searchDisabled: Boolean(dialect.disabledSearchEndpoints?.has(searchNoun)),
   };
-}
-
-function supportsMethod(
-  descriptor: { methods?: readonly string[] } | undefined,
-  method: string,
-): boolean {
-  if (!descriptor) return false;
-  return (
-    !descriptor.methods || descriptor.methods.length === 0 || descriptor.methods.includes(method)
-  );
 }
 
 function pruneUndefined(record: Record<string, unknown>): Record<string, unknown> {
@@ -766,10 +764,11 @@ export interface ValidatedScopedCountInput {
  *   1. **Dropped filter** — if the dialect drops the scope filter entirely
  *      (the server doesn't honor it), the count would be the global total;
  *      skip the probe and warn.
- *   2. **Ignored filter** — run the scoped probe and an unfiltered baseline in
- *      parallel; if the totals match, the upstream silently ignored the filter
- *      (accepted it on the wire but returned the unfiltered set), so the
- *      "scoped" count is really the global total. Drop it and warn.
+ *   2. **Unconfirmed filter** — run the scoped probe and an unfiltered baseline
+ *      in parallel; if the totals match, the scoped count can't be told apart
+ *      from the global total: the upstream may have ignored the filter
+ *      (accepted it on the wire but returned the unfiltered set), or the
+ *      entity holds every record. Drop it and warn.
  *
  * Returns the trustworthy scoped total, or `undefined` (with a warning pushed
  * onto `warnings`) when neither guard can vouch for it. Both probes run at
@@ -833,11 +832,11 @@ export async function fetchValidatedScopedCount(
   if (typeof filtered !== 'number') return;
 
   // Guard 2: the scoped probe and the unfiltered baseline returned the same
-  // total — the upstream silently ignored the filter, so this is the global
-  // count wearing a per-entity label.
+  // total — an ignored filter and an entity holding every record look alike,
+  // so the count can't be vouched for as scoped.
   if (typeof baseline === 'number' && baseline > 0 && filtered === baseline) {
     warnings.push(
-      `${label} omitted: ${path} returned the same total (${baseline}) for both the scoped probe and an unfiltered baseline — the upstream silently ignored the ${scopeDescription}, so a scoped count can't be trusted.`,
+      `${label} omitted: ${path} returned the same total (${baseline}) for both the scoped probe and an unfiltered baseline, so the ${scopeDescription} can't be confirmed — the upstream may have ignored it, or every record matches it.`,
     );
     return;
   }
@@ -998,8 +997,6 @@ export interface LoadedRows<T> {
   /** Explicit first-page request size, when decoupled from the preview limit. */
   requestedPageSize?: number;
   rows: T[];
-  /** Upstream rows examined when this page holds a deduplicated union. */
-  rowsScanned?: number;
   /** Page stride reported by the upstream for the loaded first page. */
   servedPageSize?: number;
   /** Total rows advertised by the server (may be larger than `rows.length`). */
@@ -1177,7 +1174,6 @@ async function collectGetUnion<T>(
     rows,
     hasMore: false,
     pagesFetched: coverage.reduce((total, item) => total + item.pagesFetched, 0),
-    rowsScanned: coverage.reduce((total, item) => total + item.rowsScanned, 0),
     ...(partial
       ? { partialReason: 'GET combination collection stopped early (see warnings)' }
       : { totalCount: rows.length }),
@@ -1447,7 +1443,7 @@ async function fetchFindRoutePage<T>(
 }
 
 /** Probe a route using the same transport and a bounded companion request. */
-export async function probeFindRouteTotal(
+async function probeFindRouteTotal(
   client: BrapiClient,
   connection: RegisteredServer,
   route: FindRoute,
@@ -1470,6 +1466,33 @@ export async function probeFindRouteTotal(
     if (ctx.signal.aborted || !(error instanceof McpError)) throw error;
     return undefined;
   }
+}
+
+/**
+ * Whether a scope filter narrowed a find route, verified by count: the same
+ * route without the filter's wire `keys` must report a larger total than
+ * `totalCount`. False (unverified) when the filter never reached the wire, the
+ * route is a GET union with no single total to compare, or either total is
+ * unknown.
+ */
+export async function probeScopeNarrowed(
+  client: BrapiClient,
+  connection: RegisteredServer,
+  route: FindRoute,
+  keys: readonly string[],
+  totalCount: number | undefined,
+  ctx: Context,
+): Promise<boolean> {
+  if (totalCount === undefined || (route.kind === 'get' && route.fanout !== undefined)) {
+    return false;
+  }
+  const params = route.kind === 'get' ? { ...route.filters } : { ...route.searchBody };
+  if (!keys.some((key) => Object.hasOwn(params, key))) return false;
+  for (const key of keys) delete params[key];
+  const control: FindRoute =
+    route.kind === 'get' ? { ...route, filters: params } : { ...route, searchBody: params };
+  const baseline = await probeFindRouteTotal(client, connection, control, ctx);
+  return baseline !== undefined && totalCount < baseline;
 }
 
 export interface SpillInput<T> {
@@ -1534,6 +1557,12 @@ interface SpillWalk<T> {
   /** Rows kept after `rowMapper` and `rowFilter`. */
   fullRows: T[];
   pagesFetched: number;
+  /**
+   * No walk ran: the rows came from a collection the loader or caller already
+   * finished (a GET union, a multi-study union, embedded observations), so
+   * `rowsScanned` counts its distinct rows and there is no upstream total.
+   */
+  preloaded?: boolean;
   /** The row cap ended the walk — the bound a truncated dataframe reports as `maxRows`. */
   reachedRowCap: boolean;
   /** Upstream rows the walk examined, before `rowFilter`. */
@@ -1687,6 +1716,14 @@ export function toDataframeHandle(
 }
 
 export interface MaybeSpillInput<T> {
+  /**
+   * Optional annotation of the full kept set, applied once collection ends
+   * (after `rowMapper` and `rowFilter`) — for a value only the whole set can
+   * assign, such as a match rank. Must return one row per input row, in order.
+   * Its rows are what the dataframe stages, `fullRows` returns, and
+   * `inlineView` receives.
+   */
+  annotateRows?: (rows: T[]) => T[];
   bridge: CanvasBridge;
   client: BrapiClient;
   /** Collect the full matched set for a federated caller without staging a source table. */
@@ -1700,7 +1737,7 @@ export interface MaybeSpillInput<T> {
    * cut from them — e.g. rank free-text matches first, strip empty containers.
    * Must return one row per input row. The inline bounds measure the rows it
    * returns, so a projection that shrinks rows stages nothing when the
-   * projected set fits. The dataframe always holds the unprojected rows.
+   * projected set fits. The dataframe holds the rows before this projection.
    */
   inlineView?: (rows: T[]) => T[];
   loadLimit: number;
@@ -1753,14 +1790,21 @@ export interface MaybeSpillResult<T> {
   /** The bound that cut `results` short of `fullRows`; absent when every row fit. */
   inlineBound?: InlineBound;
   /**
+   * A collection finished before this call (a GET union, a multi-study union,
+   * embedded observations) stopped early: `rowsScanned` counts the distinct
+   * rows it collected, and its total is unknown. Absent for a walk's stop.
+   */
+  preloadedStop?: true;
+  /**
    * Leading rows of `fullRows` — through `inlineView` when supplied — within
    * loadLimit and the inline byte budget.
    */
   results: T[];
   /**
    * Upstream rows examined before `rowFilter` — the spill walk's rows, or the
-   * first page when no walk ran. Short of the upstream total (`scanComplete`
-   * false), the scan was bounded and unexamined rows may still match.
+   * first page when no walk ran (a preloaded union counts each distinct row
+   * once). Short of the upstream total (`scanComplete` false), the scan was
+   * bounded and unexamined rows may still match.
    */
   rowsScanned: number;
   /**
@@ -1822,13 +1866,16 @@ export async function maybeSpill<T extends Record<string, unknown>>(
     : {
         fullRows: applyRowTransforms(firstPage.rows, rowMapper, rowFilter),
         pagesFetched: firstPage.pagesFetched,
+        preloaded: true,
         reachedRowCap: false,
-        rowsScanned: firstPage.rowsScanned ?? firstPage.rows.length,
+        rowsScanned: firstPage.rows.length,
         scanComplete:
           preloadedStopReason === undefined &&
           (firstPage.totalCount === undefined || firstPage.rows.length >= firstPage.totalCount),
         ...(preloadedStopReason && { stopReason: preloadedStopReason }),
       };
+  if (input.annotateRows) walk.fullRows = input.annotateRows(walk.fullRows);
+  const preloadedStop = walk.preloaded && walk.stopReason !== undefined;
 
   if (input.collectOnly) {
     const warning = noteSpillStop(input.ctx, input.source, walk, firstPage.totalCount);
@@ -1839,6 +1886,7 @@ export async function maybeSpill<T extends Record<string, unknown>>(
       hasMore: !walk.scanComplete,
       rowsScanned: walk.rowsScanned,
       scanComplete: walk.scanComplete,
+      ...(preloadedStop && { preloadedStop }),
     };
   }
 
@@ -1876,17 +1924,24 @@ export async function maybeSpill<T extends Record<string, unknown>>(
   };
   if (inline.bound) result.inlineBound = inline.bound;
   if (handle) result.dataframe = handle;
+  if (preloadedStop) result.preloadedStop = true;
   return result;
 }
 
 /**
- * Log a spill walk that ended before the upstream total and return the
- * caller-facing warning for it; `undefined` when the walk ran to the end.
+ * Log a spill walk, or a preloaded collection, that ended before the upstream
+ * total and return the caller-facing warning for it; `undefined` when it ran to
+ * the end. A preloaded collection is worded by its distinct rows alone: its
+ * total is unknown because part of it stopped, not because the upstream
+ * withheld one.
  */
 export function noteSpillStop(
   ctx: Context,
   source: string,
-  spill: Pick<SpillResult<unknown>, 'dataframe' | 'fullRows' | 'rowsScanned' | 'stopReason'>,
+  spill: Pick<
+    SpillResult<unknown>,
+    'dataframe' | 'fullRows' | 'preloaded' | 'rowsScanned' | 'stopReason'
+  >,
   upstreamTotal: number | undefined,
 ): string | undefined {
   if (!spill.stopReason) return;
@@ -1896,16 +1951,17 @@ export function noteSpillStop(
     totalCount: upstreamTotal,
     stopReason: spill.stopReason,
   });
-  const scanned =
-    upstreamTotal === undefined
-      ? `${spill.rowsScanned} upstream row(s) (the upstream reported no total)`
-      : `${spill.rowsScanned} of ${upstreamTotal} upstream row(s)`;
   const staged = spill.dataframe
     ? 'The dataframe holds the rows fetched so far and is marked truncated'
     : spill.fullRows.length > 0
       ? 'results[] holds every row fetched'
       : 'No dataframe was staged: no fetched row matched';
-  return `Dataframe walk stopped after ${scanned}: ${spill.stopReason}. ${staged}; narrow the filters or retry the call.`;
+  const stopped = spill.preloaded
+    ? `Collection incomplete at ${spill.rowsScanned} distinct row(s)`
+    : upstreamTotal === undefined
+      ? `Dataframe walk stopped after ${spill.rowsScanned} upstream row(s) (the upstream reported no total)`
+      : `Dataframe walk stopped after ${spill.rowsScanned} of ${upstreamTotal} upstream row(s)`;
+  return `${stopped}: ${spill.stopReason}. ${staged}; narrow the filters or retry the call.`;
 }
 
 /**
@@ -2381,9 +2437,11 @@ export function fkMatchCheck(
  *
  * Column inference is intentionally narrow — exact match, then a trailing-`s`
  * strip (`locationDbIds → locationDbId`, `locationNames → locationName`).
- * Keys that don't resolve to a column produce a single grouped warning
- * ("could not verify these extraFilters keys: …") so the agent knows the
- * trace can't speak to whether they were honored.
+ * Keys that don't resolve to a column, or whose column holds no string value
+ * on any returned row (an array of IDs, an object, a number, null throughout),
+ * produce a single grouped warning ("could not verify these extraFilters
+ * keys: …") so the agent knows the trace can't speak to whether they were
+ * honored — `checkFilterMatchRates` skips an empty distribution silently.
  */
 export function buildExtraFilterChecks(
   extraFilters: Record<string, unknown> | undefined,
@@ -2399,14 +2457,15 @@ export function buildExtraFilterChecks(
     const requested = toRequestedValues(value);
     if (!requested) continue;
     const field = sample ? inferRowField(key, sample) : undefined;
-    if (!field) {
+    const distribution = field ? computeDistribution(rows, (r) => asString(r[field])) : undefined;
+    if (!distribution || Object.keys(distribution).length === 0) {
       unverified.push(key);
       continue;
     }
     checks.push({
       paramName: `extraFilters.${key}`,
       requestedValues: requested,
-      distribution: computeDistribution(rows, (r) => asString(r[field])),
+      distribution,
       caseInsensitive: true,
       requireEveryRowMatch: true,
     });

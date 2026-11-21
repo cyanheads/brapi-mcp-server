@@ -7,13 +7,20 @@
  * @module tests/tools/brapi-find-variables.tool.test
  */
 
+import { tmpdir } from 'node:os';
 import type { Context } from '@cyanheads/mcp-ts-core';
+import {
+  CanvasRegistry,
+  DataCanvas,
+  DEFAULT_CANVAS_REGISTRY_OPTIONS,
+  DuckdbProvider,
+} from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiFindVariables } from '@/mcp-server/tools/definitions/brapi-find-variables.tool.js';
-import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
+import { getCanvasBridge, initCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { initOntologyResolver } from '@/services/ontology-resolver/index.js';
 import {
   BASE_URL,
@@ -23,6 +30,7 @@ import {
   type MockFetcher,
   pathnameOf,
   resetTestServices,
+  TEST_CONFIG,
   withCallRemaining,
 } from './_tool-test-helpers.js';
 
@@ -752,5 +760,372 @@ describe('brapi_find_variables inline budget (#66)', () => {
     for (const key of ['truncated', 'shown', 'cap', 'dataframe']) {
       expect(structured).not.toHaveProperty(key);
     }
+  });
+});
+
+/** Run the tool through `runToolContract` against the connection registered on `ctx`. */
+async function callContract(ctx: Context, input: Record<string, unknown>) {
+  const definition = {
+    ...brapiFindVariables,
+    handler: (parsed, contractCtx) =>
+      brapiFindVariables.handler(parsed, { ...contractCtx, state: ctx.state }),
+  } satisfies typeof brapiFindVariables;
+  const result = await runToolContract(definition, input, { context: { tenantId: 't1' } });
+  const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+  return { result, structured: result.structuredContent as Record<string, unknown>, text };
+}
+
+describe('brapi_find_variables multi-study partial collection (#123)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+    initOntologyResolver();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  it('leaves the total off a truncated handle when a study fails, and words the stop by its distinct rows', async () => {
+    const ctx = await connect(fetcher);
+    // S1 serves v0–v7 and S2 serves v4–v11 (12 distinct); S3 answers 503.
+    fetcher.mockImplementation(async (url: string) => {
+      const study = new URL(url).searchParams.get('studyDbId');
+      if (study === 'S3') return jsonResponse({ error: 'down' }, 503);
+      const offset = study === 'S1' ? 0 : 4;
+      const data = Array.from({ length: 8 }, (_, i) => ({
+        observationVariableDbId: `v${offset + i}`,
+        observationVariableName: `Var ${offset + i}`,
+      }));
+      return jsonResponse(envelope({ data }, { totalCount: data.length }));
+    });
+
+    const { result, structured, text } = await callContract(ctx, {
+      studies: ['S1', 'S2', 'S3'],
+      loadLimit: 5,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({
+      hasMore: true,
+      totalCount: 12,
+      studyCoverage: [
+        { id: 'S1', status: 'complete' },
+        { id: 'S2', status: 'complete' },
+        { id: 'S3', status: 'failed' },
+      ],
+      dataframe: { rowCount: 12, truncated: true },
+    });
+    expect(structured.dataframe).not.toHaveProperty('totalCount');
+    expect(structured.warnings).toContain(
+      'Collection incomplete at 12 distinct row(s): multi-study coverage incomplete; see studyCoverage. The dataframe holds the rows fetched so far and is marked truncated; narrow the filters or retry the call.',
+    );
+    expect(text).toContain(
+      'Collection incomplete at 12 distinct row(s): multi-study coverage incomplete',
+    );
+    expect(text).not.toContain('- totalCount: 12');
+  });
+});
+
+describe('brapi_find_variables free-text match ranking (#127)', () => {
+  let fetcher: MockFetcher;
+  let nativeCanvas: DataCanvas | undefined;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+    initOntologyResolver();
+  });
+
+  afterEach(async () => {
+    try {
+      if (nativeCanvas) await nativeCanvas.shutdown(createMockContext());
+    } finally {
+      nativeCanvas = undefined;
+      vi.restoreAllMocks();
+      resetTestServices();
+    }
+  });
+
+  /** Swap the fake canvas for DuckDB so staged tables answer real SQL. */
+  function useDuckdb() {
+    const provider = new DuckdbProvider({
+      defaultRowLimit: 100,
+      exportRootPath: tmpdir(),
+      memoryLimitMb: 128,
+      schemaSniffRows: 100,
+    });
+    nativeCanvas = new DataCanvas(
+      provider,
+      new CanvasRegistry(provider, { ...DEFAULT_CANVAS_REGISTRY_OPTIONS, sweeperIntervalMs: 0 }),
+    );
+    return initCanvasBridge(nativeCanvas, TEST_CONFIG);
+  }
+
+  /**
+   * 60 variables `v00`–`v59`; every fourth (`v03`, `v07`, … `v59`) is an
+   * equal-length "dry matter content percentage" method variant, so the 15
+   * matches tie and keep upstream order.
+   */
+  const rows60 = Array.from({ length: 60 }, (_, i) => {
+    const id = `v${String(i).padStart(2, '0')}`;
+    return {
+      observationVariableDbId: id,
+      observationVariableName:
+        i % 4 === 3
+          ? `dry matter content percentage|method ${id}`
+          : `abiotic stress trait|month ${id}`,
+    };
+  });
+  const matchIds = rows60.filter((_, i) => i % 4 === 3).map((row) => row.observationVariableDbId);
+  const ids = (structured: Record<string, unknown>) =>
+    (structured.results as { observationVariableDbId: string }[]).map(
+      (row) => row.observationVariableDbId,
+    );
+
+  /** Serve `rows` as a paged /variables list, failing pages at or past `failFromPage`. */
+  function serve(rows: Record<string, unknown>[], failFromPage?: number) {
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      if (u.pathname !== '/brapi/v2/variables') throw new Error(`unmocked fetch: ${u.href}`);
+      const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
+      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10);
+      if (failFromPage !== undefined && page >= failFromPage && pageSize === 10) {
+        return jsonResponse({ error: 'upstream down' }, 500);
+      }
+      return jsonResponse(
+        envelope(
+          { data: rows.slice(page * pageSize, page * pageSize + pageSize) },
+          { totalCount: rows.length },
+        ),
+      );
+    });
+  }
+
+  it('promotes every match in rank order, counts them, and stages each rank', async () => {
+    const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
+    const bridge = useDuckdb();
+    serve(rows60);
+
+    const { result, structured, text } = await callContract(ctx, {
+      text: 'dry matter content',
+      loadLimit: 40,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.textMatchCount).toBe(15);
+    expect(ids(structured).slice(0, 15)).toEqual(matchIds);
+    const results = structured.results as Record<string, unknown>[];
+    expect(results.slice(0, 15).map((row) => row.textMatchRank)).toEqual(
+      Array.from({ length: 15 }, (_, i) => i + 1),
+    );
+    expect(results.slice(15).some((row) => 'textMatchRank' in row)).toBe(false);
+    expect(ids(structured).slice(15, 18)).toEqual(['v00', 'v01', 'v02']);
+    const candidates = structured.ontologyCandidates as { observationVariableDbId: string }[];
+    expect(candidates.map((c) => c.observationVariableDbId)).toEqual(matchIds.slice(0, 10));
+    expect(structured).toMatchObject({ hasMore: true, dataframe: { rowCount: 60 } });
+
+    const tableName = (structured.dataframe as { tableName: string }).tableName;
+    expect((structured.dataframe as { columns: string[] }).columns).toContain('textMatchRank');
+    const canvas = await bridge.getInstance(ctx);
+    const counted = await canvas.query(
+      `SELECT count(*) AS n FROM "${tableName}" WHERE textMatchRank IS NOT NULL`,
+    );
+    expect(Number(counted.rows[0]?.n)).toBe(15);
+    const ranked = await canvas.query(
+      `SELECT observationVariableDbId FROM "${tableName}" WHERE textMatchRank IS NOT NULL ORDER BY textMatchRank`,
+    );
+    expect(ranked.rows.map((row) => row.observationVariableDbId)).toEqual(matchIds);
+
+    expect(text).toContain('## Ontology candidates (top 10 of 15 text matches)');
+    expect(text).toContain('textMatchRank=1');
+    expect(text).toContain('textMatchRank=15');
+  });
+
+  it('ranks 70741 first and keeps ranks 1–10 equal to the candidate order (#118)', async () => {
+    const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
+    const variants = Array.from({ length: 12 }, (_, i) => ({
+      observationVariableDbId: String(78_000 + i),
+      observationVariableName: `dry matter content percentage|month ${i + 1}|boiled root|COMP:00001${String(i).padStart(2, '0')}`,
+      observationVariablePUI: `COMP:00001${String(i).padStart(2, '0')}`,
+      trait: { traitName: null },
+    }));
+    serve([
+      ...variants.slice(0, 6),
+      {
+        observationVariableDbId: '70741',
+        observationVariableName: 'dry matter content percentage|CO_334:0000092',
+        observationVariablePUI: 'CO_334:0000092',
+        trait: { traitName: 'dry matter content percentage' },
+      },
+      { observationVariableDbId: '1', observationVariableName: 'plant height' },
+      ...variants.slice(6),
+    ]);
+
+    const { structured } = await callContract(ctx, { text: 'dry matter content' });
+
+    const results = structured.results as Record<string, unknown>[];
+    const candidates = structured.ontologyCandidates as { observationVariableDbId: string }[];
+    expect(structured.textMatchCount).toBe(13);
+    expect(results[0]).toMatchObject({ observationVariableDbId: '70741', textMatchRank: 1 });
+    expect(candidates).toHaveLength(10);
+    expect(results.slice(0, 10).map((row) => row.observationVariableDbId)).toEqual(
+      candidates.map((c) => c.observationVariableDbId),
+    );
+    expect(results.at(-1)).toMatchObject({ observationVariableDbId: '1' });
+    expect(results.at(-1)).not.toHaveProperty('textMatchRank');
+  });
+
+  it('leaves rows, order and the staged table unchanged without text', async () => {
+    const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    serve(rows60);
+
+    const { structured, text } = await callContract(ctx, { loadLimit: 40 });
+
+    expect(structured).not.toHaveProperty('textMatchCount');
+    expect(ids(structured)).toEqual(rows60.slice(0, 40).map((row) => row.observationVariableDbId));
+    expect(register.mock.calls[0]?.[1].rows).toEqual(rows60);
+    expect(text).not.toContain('textMatchRank');
+    expect(text).not.toContain('text matches');
+  });
+
+  it('reports zero matches with no rank on any row', async () => {
+    const ctx = await connect(fetcher);
+    serve(rows60.slice(0, 8));
+
+    const { structured, text } = await callContract(ctx, { text: 'canopy temperature' });
+
+    expect(structured).toMatchObject({ textMatchCount: 0, ontologyCandidates: [] });
+    expect(ids(structured)).toEqual(rows60.slice(0, 8).map((row) => row.observationVariableDbId));
+    expect(
+      (structured.results as Record<string, unknown>[]).some((r) => 'textMatchRank' in r),
+    ).toBe(false);
+    expect(text).toContain('Free-text matches: 0 of the fetched rows.');
+  });
+
+  it('counts and ranks only fetched rows when the walk stops early', async () => {
+    const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    // The walk re-reads from page 0 in 10-row pages and fails at page 3: rows 30–59 stay unfetched.
+    serve(rows60, 3);
+
+    const { structured } = await callContract(ctx, { text: 'dry matter content', loadLimit: 20 });
+
+    expect(structured.textMatchCount).toBe(7);
+    expect(ids(structured).slice(0, 7)).toEqual(matchIds.slice(0, 7));
+    expect(structured).toMatchObject({
+      hasMore: true,
+      dataframe: { rowCount: 30, truncated: true },
+    });
+    const staged = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(staged.filter((row) => row.textMatchRank !== undefined)).toHaveLength(7);
+  });
+
+  it('keeps multi-study provenance beside the rank', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const study = new URL(url).searchParams.get('studyDbId');
+      const data = study === 'S1' ? [rows60[0], rows60[3]] : [rows60[3], rows60[7], rows60[8]];
+      return jsonResponse(envelope({ data }, { totalCount: data.length }));
+    });
+
+    const { structured, text } = await callContract(ctx, {
+      studies: ['S1', 'S2'],
+      text: 'dry matter content',
+    });
+
+    expect(structured.textMatchCount).toBe(2);
+    expect(structured.results).toEqual([
+      expect.objectContaining({
+        observationVariableDbId: 'v03',
+        studyDbIds: ['S1', 'S2'],
+        textMatchRank: 1,
+      }),
+      expect.objectContaining({
+        observationVariableDbId: 'v07',
+        studyDbIds: ['S2'],
+        textMatchRank: 2,
+      }),
+      expect.objectContaining({ observationVariableDbId: 'v00', studyDbIds: ['S1'] }),
+      expect.objectContaining({ observationVariableDbId: 'v08', studyDbIds: ['S2'] }),
+    ]);
+    expect(text).toContain('## Ontology candidates (top 2 of 2 text matches)');
+  });
+
+  it('counts every fetched match when loadLimit holds fewer of them', async () => {
+    const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    serve(rows60);
+
+    const { result, structured, text } = await callContract(ctx, {
+      text: 'dry matter content',
+      loadLimit: 10,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.textMatchCount).toBe(15);
+    const results = structured.results as Record<string, unknown>[];
+    expect(ids(structured)).toEqual(matchIds.slice(0, 10));
+    expect(results.map((row) => row.textMatchRank)).toEqual(
+      Array.from({ length: 10 }, (_, i) => i + 1),
+    );
+    const staged = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(staged.filter((row) => row.textMatchRank !== undefined)).toHaveLength(15);
+    expect(text).toContain('## Ontology candidates (top 10 of 15 text matches)');
+  });
+
+  it('ranks a matched row without observationVariableDbId through its PUI', async () => {
+    const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    // Matched only by its trait description, so it ranks after the 15 name
+    // matches and is staged without reaching results[].
+    const puiOnly = {
+      observationVariablePUI: 'CO_334:0000092',
+      observationVariableName: 'root dry weight',
+      trait: { traitDescription: 'Dry matter content of the storage root' },
+    };
+    serve([...rows60, puiOnly]);
+
+    const { result, structured } = await callContract(ctx, {
+      text: 'dry matter content',
+      loadLimit: 10,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.textMatchCount).toBe(16);
+    const staged = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(staged.find((row) => row.observationVariablePUI === 'CO_334:0000092')).toMatchObject({
+      textMatchRank: 16,
+    });
+    expect(staged.filter((row) => row.textMatchRank !== undefined)).toHaveLength(16);
+  });
+
+  it('gives a variable listed twice one rank per row, in row order', async () => {
+    const ctx = await connect(fetcher);
+    const listedTwice = {
+      observationVariableDbId: 'v-dup',
+      observationVariableName: 'dry matter content',
+    };
+    serve([
+      listedTwice,
+      { observationVariableDbId: 'v-other', observationVariableName: 'plant height' },
+      listedTwice,
+    ]);
+
+    const { result, structured } = await callContract(ctx, { text: 'dry matter content' });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.textMatchCount).toBe(2);
+    expect(
+      (structured.results as Record<string, unknown>[]).map((row) => [
+        row.observationVariableDbId,
+        row.textMatchRank,
+      ]),
+    ).toEqual([
+      ['v-dup', 1],
+      ['v-dup', 2],
+      ['v-other', undefined],
+    ]);
   });
 });

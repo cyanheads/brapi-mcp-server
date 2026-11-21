@@ -71,6 +71,13 @@ const STUDIES: FilterDescriptor[] = [
     example: 'germplasm-1',
   },
   {
+    name: 'observationVariableDbIds',
+    type: 'string[]',
+    description:
+      'Restrict to studies that recorded observations of specific variables by DbId — the `variables` input on brapi_find_studies.',
+    example: 'variable-1',
+  },
+  {
     name: 'trialDbIds',
     type: 'string[]',
     description: 'Restrict to studies inside specific trials.',

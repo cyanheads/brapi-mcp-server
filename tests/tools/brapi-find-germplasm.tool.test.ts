@@ -714,3 +714,64 @@ describe('brapi_find_germplasm free-text scan scope', () => {
     expect(text).toMatch(/- \*\*crops:\*\* Cassava\n\n\*\*Warnings:\*\*\n- Free-text 'UG1201'/);
   });
 });
+
+describe('brapi_find_germplasm partial GET union counts (#123)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  it('words a free-text union that stopped early by the distinct rows it collected', async () => {
+    const ctx = await connect(fetcher, 'CassavaBase');
+    // G1 and G2 belong to both S1 and S2; the S3 combination answers 503.
+    fetcher.mockImplementation(async (url: string) => {
+      if (new URL(url).searchParams.get('studyDbId') === 'S3') {
+        return jsonResponse({ error: 'unavailable' }, 503);
+      }
+      return jsonResponse(
+        envelope(
+          {
+            data: [
+              { germplasmDbId: 'G1', germplasmName: 'TME419' },
+              { germplasmDbId: 'G2', germplasmName: 'TMS30572' },
+            ],
+          },
+          { totalCount: 2 },
+        ),
+      );
+    });
+    const definition = {
+      ...brapiFindGermplasm,
+      handler: (parsed, contractCtx) =>
+        brapiFindGermplasm.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFindGermplasm;
+
+    const result = await runToolContract(
+      definition,
+      { studies: ['S1', 'S2', 'S3'], text: 'TME' },
+      { context: { tenantId: 't1' } },
+    );
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured).toMatchObject({
+      results: [{ germplasmDbId: 'G1' }],
+      hasMore: true,
+      totalCount: 2,
+    });
+    const warnings = structured.warnings as string[];
+    const sentence =
+      "Free-text 'TME' matched 1 of the 2 distinct row(s) collected before the collection stopped (see warnings); rows past them were not scanned.";
+    const scan = warnings.find((w) => w.startsWith("Free-text 'TME'"));
+    expect(scan?.slice(0, sentence.length)).toBe(sentence);
+    expect(warnings.join('\n')).not.toContain('the upstream reported no total');
+    expect(result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n')).toContain(
+      sentence,
+    );
+  });
+});

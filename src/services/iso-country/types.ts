@@ -1,6 +1,6 @@
 /**
  * @fileoverview Types for the static ISO 3166-1 country table used by
- * `resolveCountryName` to look up ISO country codes.
+ * `resolveCountryName` to look up ISO country codes and E.164 calling codes.
  *
  * @module services/iso-country/types
  */
@@ -17,6 +17,11 @@ export interface IsoCountry {
   alpha2: string;
   /** ISO 3166-1 alpha-3 code — three uppercase letters (e.g. `UGA`). */
   alpha3: string;
+  /**
+   * E.164 country calling code without the `+` (e.g. `256`); absent for the
+   * entries with no assignment. Not unique: NANP members share `1`.
+   */
+  callingCode?: string;
   /** ISO 3166-1 English short name (e.g. `Uganda`). */
   name: string;
   /** ISO 3166-1 three-digit code, including any leading zeros (e.g. `008`). */

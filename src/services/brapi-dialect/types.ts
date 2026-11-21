@@ -73,7 +73,13 @@ export interface BrapiDialect {
    * Omit on dialects with no known dead routes (the default `spec` dialect).
    */
   readonly disabledSearchEndpoints?: ReadonlySet<string>;
-  /** Whether the location country filter accepts ISO alpha-2 and numeric alongside alpha-3. */
+  /**
+   * `/locations` stores countries under ISO alpha-2, ISO numeric, and E.164
+   * calling codes beside alpha-3, and honors several `countryCodes` as a
+   * union, so resolved country names send all four forms. A numeric code can
+   * name more than one country; `brapi_find_locations` checks a row matched
+   * only through one against the row's `countryName`. Set on the SGN family.
+   */
   readonly expandLocationCountryCodes?: true;
   readonly id: string;
   /** Verified compatibility for locations with Points stored as latitude then longitude. */

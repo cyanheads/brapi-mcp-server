@@ -65,13 +65,19 @@ const VariableRowSchema = z
       .array(z.string().describe('Study ID.'))
       .nullish()
       .describe('Requested studies containing this union row.'),
+    textMatchRank: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe('Free-text rank among fetched rows, from 1; absent on unmatched rows.'),
     observationVariablePUI: z
       .string()
       .nullish()
-      .describe('Persistent unique identifier — typically an ontology term URI.'),
+      .describe('Persistent ID, typically an ontology term URI.'),
     ontologyDbId: z.string().nullish().describe('FK to the owning ontology.'),
     ontologyName: z.string().nullish().describe('Display name of the owning ontology.'),
-    commonCropName: z.string().nullish().describe('Common crop name this variable is scoped to.'),
+    commonCropName: z.string().nullish().describe('Common crop name.'),
     trait: z
       .object({
         traitDbId: z.string().nullish().describe('FK to the trait.'),
@@ -100,7 +106,7 @@ const VariableRowSchema = z
       })
       .passthrough()
       .nullish()
-      .describe('Scale used to record this variable (units / type / range).'),
+      .describe('Measurement scale (units, type, range).'),
     method: z
       .object({
         methodDbId: z.string().nullish().describe('FK to the method.'),
@@ -108,17 +114,14 @@ const VariableRowSchema = z
       })
       .passthrough()
       .nullish()
-      .describe('Measurement method or protocol used to collect this variable.'),
+      .describe('Measurement method or protocol.'),
   })
   .passthrough()
   .describe('One BrAPI observation variable record.');
 
 const CandidateSchema = z
   .object({
-    observationVariableDbId: z
-      .string()
-      .optional()
-      .describe('Server-side variable DbId of the source row, when present.'),
+    observationVariableDbId: z.string().optional().describe('Variable DbId of the source row.'),
     termId: z
       .string()
       .optional()
@@ -132,7 +135,7 @@ const CandidateSchema = z
     ontologyDbId: z.string().optional().describe('Owning ontology ID.'),
     source: z
       .enum(['puiMatch', 'nameMatch', 'synonymMatch', 'traitClassMatch'])
-      .describe('How the candidate was ranked — PUI exact / name / synonym / trait-class.'),
+      .describe('Which field the text matched.'),
   })
   .describe('One ranked ontology candidate from a free-text query.');
 
@@ -157,7 +160,15 @@ const OutputSchema = z.object({
   results: z
     .array(VariableRowSchema)
     .describe(
-      'Leading variables, capped by loadLimit and 24,000 bytes. Text candidates lead; nested objects with no non-empty field are omitted.',
+      'Leading variables, capped by loadLimit and 24,000 bytes. Text matches lead by textMatchRank; nested objects with no non-empty field are omitted.',
+    ),
+  textMatchCount: z
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .describe(
+      'Fetched rows the free text matched (a partial scan counts fetched rows only); absent without text.',
     ),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
@@ -175,13 +186,16 @@ const OutputSchema = z.object({
     .describe('Value frequency per field across every matched row fetched.'),
   ontologyCandidates: z
     .array(CandidateSchema)
-    .describe('Ranked free-text candidates; empty without text.'),
+    .describe('Top 10 text matches by textMatchRank; empty without text.'),
   dataframe: DataframeHandleSchema.optional().describe(
     'Matched rows, staged when results[] holds fewer.',
   ),
 });
 
 type Output = z.infer<typeof OutputSchema>;
+
+/** Free-text matches `ontologyCandidates` carries; every match is ranked on its row. */
+const CANDIDATE_LIMIT = 10;
 
 const SERVER_TO_USER: Record<string, string> = {
   // Plurals — BrAPI v2.1 spec.
@@ -207,7 +221,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindVariables = tool('brapi_find_variables', {
   description:
-    'Find observation variables (traits) by name, trait class, ontology term, or free-text query. Free-text queries are ranked against every fetched row by PUI, name, synonym, and trait text; a candidate carries the ontology PUI of its row as termId when the row has one. results[] holds the leading rows up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
+    'Find observation variables (traits) by name, trait class, ontology term, or free-text query. Free-text queries are ranked against every fetched row by PUI, name, synonym, and trait text; every match leads results[] with its textMatchRank, and a candidate carries the ontology PUI of its row as termId when the row has one. results[] holds the leading rows up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -341,7 +355,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     scales: z.array(NonBlankString).optional().describe('Filter by scaleDbIds.'),
     crop: NonBlankString.optional().describe('Filter by common crop name (single value).'),
     text: FreeTextInput.optional().describe(
-      'Free-text query. Ranks **every row the call fetched** (the whole dataframe walk, not just the first page) via the ontology resolver, then fills results[] — up to loadLimit and the 24,000-byte budget — with matches first and unmatched rows for context. Use exact filters (`variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`) to actually narrow the upstream pull. Differs from `brapi_find_germplasm.text`, which drops unmatched rows.',
+      'Free-text query. Ranks **every row the call fetched** (the whole dataframe walk, not just the first page) via the ontology resolver: each match carries textMatchRank in results[] and the dataframe, textMatchCount counts them, and results[] — up to loadLimit and the 24,000-byte budget — lists every match first in rank order, then unmatched rows for context. Use exact filters (`variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`) to actually narrow the upstream pull. Differs from `brapi_find_germplasm.text`, which drops unmatched rows.',
     ),
     loadLimit: LoadLimitInput,
     extraFilters: ExtraFiltersInput,
@@ -502,7 +516,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
           rows: [...union.values()],
           hasMore: false,
           pagesFetched: studyCoverage.reduce((sum, item) => sum + item.pagesFetched, 0),
-          totalCount: union.size,
+          ...(!incomplete && { totalCount: union.size }),
         }
       : await loadInitialFindPage<Record<string, unknown>>(
           client,
@@ -514,7 +528,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
         );
 
     const text = input.text;
-    let candidates: OntologyCandidate[] = [];
+    let matches: OntologyCandidate[] = [];
     const spill = await maybeSpill({
       firstPage,
       client,
@@ -534,14 +548,23 @@ export const brapiFindVariables = tool('brapi_find_variables', {
         : {}),
       ...(normalizeRow ? { normalizeRow } : {}),
       /**
+       * Free text ranks every fetched row before staging, so the dataframe
+       * carries textMatchRank beside the raw upstream shape.
+       */
+      ...(text
+        ? {
+            annotateRows: (rows: Record<string, unknown>[]) => {
+              matches = resolver.match(text, rows as VariableLike[], { limit: rows.length });
+              return rankRows(rows, matches);
+            },
+          }
+        : {}),
+      /**
        * results[] carries free-text matches first, with empty nested containers
        * stripped (CassavaBase emits `method: {}` on every variable); the inline
-       * bounds measure those rows. The dataframe keeps the raw upstream shape.
+       * bounds measure those rows.
        */
-      inlineView: (rows) => {
-        candidates = text ? resolver.match(text, rows as VariableLike[], { limit: 10 }) : [];
-        return promoteCandidates(rows, candidates).map(pruneEmptyNestedObjects);
-      },
+      inlineView: (rows) => (text ? promoteRanked(rows) : rows).map(pruneEmptyNestedObjects),
     });
     const { fullRows, dataframe, results, hasMore, rowsScanned } = spill;
 
@@ -613,8 +636,9 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       results: results as z.infer<typeof VariableRowSchema>[],
       hasMore,
       distributions,
-      ontologyCandidates: candidates,
+      ontologyCandidates: matches.slice(0, CANDIDATE_LIMIT),
     };
+    if (text) result.textMatchCount = matches.length;
     if (studyCoverage) result.studyCoverage = studyCoverage;
     if (dataframe) result.dataframe = dataframe;
     return result;
@@ -641,8 +665,12 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     }
     const moreRows = renderMoreRowsLine(result);
     if (moreRows) lines.push(moreRows, '');
-    if (result.ontologyCandidates.length > 0) {
-      lines.push('## Ontology candidates (ranked)');
+    if (result.textMatchCount !== undefined) {
+      lines.push(
+        result.textMatchCount > 0
+          ? `## Ontology candidates (top ${result.ontologyCandidates.length} of ${result.textMatchCount} text matches)`
+          : 'Free-text matches: 0 of the fetched rows.',
+      );
       for (const c of result.ontologyCandidates) {
         const parts: string[] = [];
         if (c.name) parts.push(literal`**${c.name}**`);
@@ -673,39 +701,51 @@ export const brapiFindVariables = tool('brapi_find_variables', {
 });
 
 /**
- * Reorder `rows` so those the ontology candidates name come first, each group
- * keeping upstream order. Matches by observationVariableDbId — always present —
- * and falls back to the PUI, which is sparse on real servers (CassavaBase
- * leaves it unset). Runs over the full matched set, not the first page: a
- * match routinely sits far past the inline window ("dry matter content" is row
- * ~700 of 750 in alphabetical order on CassavaBase).
+ * Copy each row the resolver matched with its 1-based `textMatchRank`, the
+ * position of its candidate in `matches`. A candidate maps back to its row by
+ * observationVariableDbId — always present — or, for a row without one, by
+ * PUI, which is sparse on real servers (CassavaBase leaves it unset); a key
+ * repeated across rows hands out its ranks in row order. Runs over the full
+ * fetched set, not the first page: a match routinely sits far past the inline
+ * window ("dry matter content" is row ~700 of 750 in alphabetical order on
+ * CassavaBase).
  */
-function promoteCandidates(
+function rankRows(
   rows: Record<string, unknown>[],
-  candidates: OntologyCandidate[],
+  matches: readonly OntologyCandidate[],
 ): Record<string, unknown>[] {
-  if (candidates.length === 0) return rows;
-  const dbRanks = new Map<string, number>();
-  const puiRanks = new Map<string, number>();
-  const matched: Record<string, unknown>[][] = [];
-  for (const [rank, candidate] of candidates.entries()) {
-    matched.push([]);
-    const id = candidate.observationVariableDbId;
-    const pui = candidate.termId;
-    if (id && !dbRanks.has(id)) dbRanks.set(id, rank);
-    else if (!id && pui && !puiRanks.has(pui)) puiRanks.set(pui, rank);
+  const byId = new Map<string, number[]>();
+  const byPui = new Map<string, number[]>();
+  for (const [index, match] of matches.entries()) {
+    const [ranks, key] = match.observationVariableDbId
+      ? [byId, match.observationVariableDbId]
+      : [byPui, match.termId];
+    if (!key) continue;
+    const queue = ranks.get(key);
+    if (queue) queue.push(index + 1);
+    else ranks.set(key, [index + 1]);
   }
-  const rest: Record<string, unknown>[] = [];
-  for (const row of rows) {
-    const dbId = row.observationVariableDbId;
+  return rows.map((row) => {
+    const id = row.observationVariableDbId;
     const pui = row.observationVariablePUI;
     const rank =
-      (typeof dbId === 'string' ? dbRanks.get(dbId) : undefined) ??
-      (typeof pui === 'string' ? puiRanks.get(pui) : undefined);
-    const bucket = rank === undefined ? rest : (matched[rank] ?? rest);
-    bucket.push(row);
-  }
-  return [...matched.flat(), ...rest];
+      typeof id === 'string' && id
+        ? byId.get(id)?.shift()
+        : typeof pui === 'string'
+          ? byPui.get(pui)?.shift()
+          : undefined;
+    return rank === undefined ? row : { ...row, textMatchRank: rank };
+  });
+}
+
+/** Ranked rows first in rank order, then unranked rows in upstream order. */
+function promoteRanked(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const rankOf = (row: Record<string, unknown>) =>
+    typeof row.textMatchRank === 'number' ? row.textMatchRank : undefined;
+  const ranked = rows
+    .filter((row) => rankOf(row) !== undefined)
+    .sort((a, b) => (rankOf(a) ?? 0) - (rankOf(b) ?? 0));
+  return [...ranked, ...rows.filter((row) => rankOf(row) === undefined)];
 }
 
 /**
@@ -745,6 +785,7 @@ function renderVariablesRows(result: Pick<Output, 'results' | 'dataframe'>): str
   } else {
     const RENDERED = new Set([
       'observationVariableName',
+      'textMatchRank',
       'studyDbIds',
       'observationVariableDbId',
       'observationVariablePUI',
@@ -759,6 +800,7 @@ function renderVariablesRows(result: Pick<Output, 'results' | 'dataframe'>): str
       const parts: string[] = [
         literal`**${v.observationVariableName ?? v.observationVariableDbId}**`,
       ];
+      if (v.textMatchRank !== undefined) parts.push(`textMatchRank=${v.textMatchRank}`);
       parts.push(literal`id=\`${v.observationVariableDbId}\``);
       if (v.studyDbIds) parts.push(literal`studies=${v.studyDbIds.join(', ')}`);
       if (v.observationVariablePUI) parts.push(literal`pui=${v.observationVariablePUI}`);

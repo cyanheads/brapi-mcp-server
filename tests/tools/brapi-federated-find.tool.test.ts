@@ -192,7 +192,7 @@ describe('brapi_federated_find', () => {
     ]);
   });
 
-  it('counts rows examined before deduplicating overlapping GET branches', async () => {
+  it('counts a row overlapping GET branches returned once in rowsScanned (#123)', async () => {
     const ctx = await connect('cassava');
     fetcher.mockImplementation(async () =>
       jsonResponse(envelope({ data: [{ germplasmDbId: 'shared' }] }, { totalCount: 1 })),
@@ -203,7 +203,7 @@ describe('brapi_federated_find', () => {
     });
     expect(result.structuredContent).toMatchObject({
       collectedCount: 1,
-      coverage: [{ alias: 'cassava', status: 'complete', matchedCount: 1, rowsScanned: 2 }],
+      coverage: [{ alias: 'cassava', status: 'complete', matchedCount: 1, rowsScanned: 1 }],
       results: [{ sources: [{ alias: 'cassava', dbId: 'shared' }] }],
     });
     expect(fetcher).toHaveBeenCalledTimes(2);
@@ -352,5 +352,159 @@ describe('brapi_federated_find', () => {
     expect(register.mock.calls[0]?.[1].rows).toMatchObject([
       { sources: [{ alias: 'east', dbId: '1', record: { studyName: name } }] },
     ]);
+  });
+});
+
+describe('brapi_federated_find studies variables (#130)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  /** Register spec-dialect aliases `east` and `west` and run the tool on that state. */
+  async function federate(input: Record<string, unknown>) {
+    fetcher.mockImplementation(async (url: string) =>
+      new URL(url).pathname.endsWith('/serverinfo')
+        ? jsonResponse(
+            envelope({
+              serverName: 'BrAPI Demo',
+              calls: [{ service: 'studies', methods: ['GET'], versions: ['2.1'] }],
+            }),
+          )
+        : jsonResponse(envelope({ data: [] }, { totalCount: 0 })),
+    );
+    const ctx = createMockContext({ tenantId: 'federation' });
+    for (const alias of ['east', 'west']) {
+      await brapiConnect.handler(
+        brapiConnect.input.parse({ alias, baseUrl: `https://${alias}.example.org/brapi/v2` }),
+        ctx,
+      );
+    }
+    fetcher.mockReset();
+    // `east` honors the variable filter; `west` answers every request with all three studies.
+    const rows = [{ studyDbId: 's1' }, { studyDbId: 's2' }, { studyDbId: 's3' }];
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const filtered =
+        u.hostname === 'east.example.org' && u.searchParams.has('observationVariableDbIds');
+      const data = filtered ? rows.slice(0, 1) : rows;
+      return jsonResponse(envelope({ data }, { totalCount: data.length }));
+    });
+    const definition = {
+      ...brapiFederatedFind,
+      handler: (parsed, contractCtx) =>
+        brapiFederatedFind.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFederatedFind;
+    return runToolContract(definition, input, { context: { tenantId: 'federation' } });
+  }
+
+  it('sends variables to every source and carries each count control into coverage', async () => {
+    const result = await federate({
+      aliases: ['east', 'west'],
+      query: { entity: 'studies', filters: { variables: ['v1'] } },
+    });
+
+    expect(result.isError).not.toBe(true);
+    const warning = "Could not verify whether 'variables' narrowed the study results.";
+    expect(result.structuredContent).toMatchObject({
+      collectedCount: 4,
+      complete: true,
+      coverage: [
+        { alias: 'east', status: 'complete', matchedCount: 1, warnings: [] },
+        { alias: 'west', status: 'complete', matchedCount: 3, warnings: [warning] },
+      ],
+    });
+    expect(result.content[0]).toMatchObject({ text: expect.stringContaining(warning) });
+    const sentVariables = fetcher.mock.calls
+      .map(([url]) => new URL(String(url)))
+      .filter((u) => u.searchParams.get('pageSize') !== '1')
+      .map((u) => [u.hostname, u.searchParams.getAll('observationVariableDbIds')]);
+    expect(sentVariables).toEqual(
+      expect.arrayContaining([
+        ['east.example.org', ['v1']],
+        ['west.example.org', ['v1']],
+      ]),
+    );
+  });
+
+  it('rejects the singular alias inside nested filters, which take no input aliases', async () => {
+    const result = await federate({
+      aliases: ['east'],
+      query: { entity: 'studies', filters: { observationVariableDbId: 'v1' } },
+    });
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: JsonRpcErrorCode.InvalidParams } },
+    });
+  });
+});
+
+describe('brapi_federated_find partial GET union coverage (#123)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  it('reports the distinct rows scanned for a source whose union stopped early', async () => {
+    fetcher.mockImplementation(async () =>
+      jsonResponse(
+        envelope({
+          serverName: 'CassavaBase',
+          calls: [{ service: 'studies', methods: ['GET'], versions: ['2.1'] }],
+        }),
+      ),
+    );
+    const ctx = createMockContext({ tenantId: 'federation' });
+    await brapiConnect.handler(
+      brapiConnect.input.parse({
+        alias: 'cassava',
+        baseUrl: 'https://cassava.example.org/brapi/v2',
+      }),
+      ctx,
+    );
+    fetcher.mockReset();
+    // S1 carries seasons 2022 and 2023; the 2024 combination answers 503.
+    fetcher.mockImplementation(async (url: string) => {
+      if (new URL(url).searchParams.get('seasonDbId') === '2024') {
+        return jsonResponse({ error: 'unavailable' }, 503);
+      }
+      return jsonResponse(
+        envelope({ data: [{ studyDbId: 'S1', seasons: ['2022', '2023'] }] }, { totalCount: 1 }),
+      );
+    });
+    const definition = {
+      ...brapiFederatedFind,
+      handler: (parsed, contractCtx) =>
+        brapiFederatedFind.handler(parsed, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiFederatedFind;
+
+    const result = await runToolContract(
+      definition,
+      {
+        aliases: ['cassava'],
+        query: { entity: 'studies', filters: { seasons: ['2022', '2023', '2024'] } },
+      },
+      { context: { tenantId: 'federation' } },
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      complete: false,
+      coverage: [{ alias: 'cassava', status: 'partial', matchedCount: 1, rowsScanned: 1 }],
+    });
+    expect(result.content[0]).toMatchObject({
+      text: expect.stringContaining('Collection incomplete at 1 distinct row(s)'),
+    });
   });
 });

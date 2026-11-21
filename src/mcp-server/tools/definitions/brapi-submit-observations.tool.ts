@@ -19,8 +19,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { type Context, inputRequired, tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getServerConfig, type ServerConfig } from '@/config/server-config.js';
+import { JsonRpcErrorCode, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
+import { getServerConfig } from '@/config/server-config.js';
 import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
 import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
 import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
@@ -29,7 +29,7 @@ import type { RegisteredServer } from '@/services/server-registry/types.js';
 import {
   AliasInput,
   buildRequestOptions,
-  companionRequestOptions,
+  fetchValidatedScopedCount,
   isUpstreamNotFound,
   NonBlankString,
   requireRegisteredConnection,
@@ -173,7 +173,7 @@ const ApplyBranchSchema = z
       .int()
       .nonnegative()
       .optional()
-      .describe('Total observations recorded against the study after the write (cheap probe).'),
+      .describe('Study observation total after the write; omitted with a warning if unscoped.'),
     latestObservationTimestamp: z
       .string()
       .optional()
@@ -519,7 +519,6 @@ export const brapiSubmitObservations = tool('brapi_submit_observations', {
       input.studyDbId,
       connection,
       dialect,
-      config,
       companionWarnings,
       client,
       ctx,
@@ -672,28 +671,37 @@ async function fetchStudyExistence(
   }
 }
 
+/**
+ * Post-write study total, omitted with a warning when the server can't scope
+ * `/observations` to the study or the probe fails, so the server-wide total is
+ * never reported as the study's. Caller cancellation propagates.
+ */
 async function fetchStudyObservationCount(
   studyDbId: string,
   connection: RegisteredServer,
   dialect: BrapiDialect,
-  config: ServerConfig,
   warnings: string[],
   client: BrapiClient,
   ctx: Context,
 ): Promise<number | undefined> {
   try {
-    const env = await client.get<unknown>(
-      connection.baseUrl,
-      '/observations',
+    return await fetchValidatedScopedCount({
+      client,
+      connection,
       ctx,
-      companionRequestOptions(connection, dialect, config, warnings, {
-        studyDbIds: [studyDbId],
-        pageSize: 1,
-      }),
+      dialect,
+      label: 'studyObservationCount',
+      path: '/observations',
+      scopeDescription: 'study filter',
+      scopeFilter: { studyDbIds: [studyDbId] },
+      service: 'observations',
+      warnings,
+    });
+  } catch (err) {
+    if (ctx.signal.aborted) throw requestCancelled('Study observation count cancelled by caller.');
+    warnings.push(
+      `studyObservationCount probe failed: ${err instanceof Error ? err.message : String(err)}`,
     );
-    const total = env.metadata?.pagination?.totalCount;
-    return typeof total === 'number' ? total : undefined;
-  } catch {
     return;
   }
 }

@@ -2,8 +2,10 @@
  * @fileoverview `brapi_find_locations` — find research stations / field sites
  * by country, abbreviation, type, or free-text. Supports a client-side bbox
  * filter (minLat/maxLat/minLon/maxLon) applied to every scanned row, since
- * BrAPI doesn't define a spec-level bounding-box filter. Standard
- * find_* pattern: distributions + dataframe spillover.
+ * BrAPI doesn't define a spec-level bounding-box filter. On SGN servers,
+ * country names also send ISO numeric and E.164 calling codes, and a row
+ * matched only through one is checked against its own `countryName` before
+ * the bbox. Standard find_* pattern: distributions + dataframe spillover.
  *
  * @module mcp-server/tools/definitions/brapi-find-locations.tool
  */
@@ -92,14 +94,14 @@ const OutputSchema = z.object({
   results: z
     .array(LocationRowSchema)
     .describe(
-      'Leading matched location rows, up to loadLimit and a 24,000-byte budget, whichever binds first. A bbox filter applies before the cut, across every page scanned.',
+      'Leading matched location rows, up to loadLimit and a 24,000-byte budget, whichever binds first. Bbox and country-name checks apply before the cut, across every page scanned.',
     ),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
     .object({
       countryCode: z
         .record(z.string(), z.number())
-        .describe('ISO country code → count of locations in that country.'),
+        .describe('Country code as stored upstream → count of locations.'),
       locationType: z
         .record(z.string(), z.number())
         .describe('Location type → count of locations of that type.'),
@@ -134,7 +136,7 @@ const SERVER_TO_USER: Record<string, string> = {
 
 export const brapiFindLocations = tool('brapi_find_locations', {
   description:
-    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Pass countryCodes directly or use English countryNames to resolve ISO codes. CassavaBase searches alpha-3, alpha-2, and numeric forms for resolved names. Optional bbox restricts rows to a latitude/longitude window. The BrAPI Community Test Server dialect reads GeoJSON Points in [lat, lon, alt] order; other dialects use [lon, lat, alt]. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
+    'Find research stations / field sites by country, abbreviation, type, location ID, or free-text. Pass countryCodes directly or use English countryNames to resolve ISO codes. On SGN-family servers (CassavaBase, Sweetpotatobase, other Breedbase deployments), resolved names also search alpha-2, ISO numeric, and E.164 calling codes, and a row matched only by a numeric code is dropped when its countryName names another country. Optional bbox restricts rows to a latitude/longitude window. The BrAPI Community Test Server dialect reads GeoJSON Points in [lat, lon, alt] order; other dialects use [lon, lat, alt]. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -266,13 +268,13 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       .array(NonBlankString)
       .optional()
       .describe(
-        'Country codes; alphabetic codes are uppercased, numeric upstream codes are preserved.',
+        'Country codes sent as given: alphabetic codes are uppercased, numeric codes keep their spelling, and rows they match are never re-checked against countryName.',
       ),
     countryNames: z
       .array(NonBlankString)
       .optional()
       .describe(
-        'English country names or aliases resolved to ISO alpha-3 codes (also alpha-2 and numeric on CassavaBase) and merged into countryCodes. Unresolved names warn when another effective country restriction remains; otherwise the call fails.',
+        "English country names or aliases resolved to ISO alpha-3 codes (on SGN-family servers also alpha-2, ISO numeric, and the E.164 calling code) and merged into countryCodes. A row matched only by one of those numeric codes is kept when its countryName names the requested country, dropped when it names another, and kept with a warning when it doesn't resolve. Unresolved names warn when another effective country restriction remains; otherwise the call fails.",
       ),
     locationTypes: z
       .array(NonBlankString)
@@ -329,13 +331,9 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       .int()
       .nonnegative()
       .describe(
-        'Total rows reported by the server, else the rows scanned; with an active bbox, the scanned rows inside it.',
+        'Total rows reported by the server, else the rows scanned; after a bbox or country-name check, the rows kept.',
       ),
-    returnedCount: z
-      .number()
-      .int()
-      .nonnegative()
-      .describe('Length of results[] after any bbox filtering.'),
+    returnedCount: z.number().int().nonnegative().describe('Length of results[].'),
     appliedFilters: z
       .record(z.string(), z.unknown())
       .describe('Filter map sent upstream (named filters plus extraFilters).'),
@@ -377,18 +375,27 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       );
     });
 
-    const combinedCountryCodes = resolveCountryCodes(
+    const expandCodes = dialect.expandLocationCountryCodes === true;
+    const resolvedCountries = resolveCountryCodes(
       input.countryCodes,
       input.countryNames,
-      dialect.expandLocationCountryCodes === true,
+      expandCodes,
       warnings,
     );
+    // Codes the caller spelled are their own; only codes expanded from names are re-checked.
+    const explicitCodes = new Set(
+      [input.countryCodes, input.extraFilters?.countryCodes, input.extraFilters?.countryCode]
+        .flat()
+        .filter((code) => typeof code === 'string' || typeof code === 'number')
+        .map((code) => String(code).toUpperCase()),
+    );
+    const countryCheck = numericCountryCheck(resolvedCountries.numericOwners, explicitCodes);
 
     const merged = mergeFilters(
       {
         locationDbIds: input.locations,
         locationNames: input.locationNames,
-        countryCodes: combinedCountryCodes,
+        countryCodes: resolvedCountries.codes,
         locationTypes: input.locationTypes,
         abbreviations: input.abbreviations,
       },
@@ -412,7 +419,11 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     if (input.countryNames?.length && !hasCountryRestriction) {
       throw ctx.fail(
         'unresolved_country_names',
-        `No effective country restriction remains for countryNames: ${input.countryNames.join(', ')}. Supply countryCodes or check the spelling.`,
+        `No effective country restriction remains for countryNames: ${input.countryNames.join(', ')}. ${
+          expandCodes
+            ? `Check the spelling, or supply ${EVERY_CODE_FORM}.`
+            : 'Supply countryCodes or check the spelling.'
+        }`,
       );
     }
 
@@ -448,6 +459,12 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     const bboxFilter = bbox
       ? (r: Record<string, unknown>) => insideBbox(r, bbox, coordinateAxisOrder)
       : undefined;
+    // The country check runs first, so a row it drops never counts against the bbox.
+    const rowFilter =
+      countryCheck || bboxFilter
+        ? (r: Record<string, unknown>) =>
+            (countryCheck?.keep(r) ?? true) && (bboxFilter?.(r) ?? true)
+        : undefined;
 
     const spillInput: Parameters<typeof maybeSpill<Record<string, unknown>>>[0] = {
       firstPage,
@@ -465,10 +482,10 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       warnings,
     };
     if (normalizeRow) spillInput.normalizeRow = normalizeRow;
-    if (bboxFilter) spillInput.rowFilter = bboxFilter;
+    if (rowFilter) spillInput.rowFilter = rowFilter;
     const spill = await maybeSpill(spillInput);
 
-    // fullRows is already post-bbox when a bbox filter was supplied — the
+    // fullRows is already post-check when a bbox or country check ran — the
     // dataframe and SQL surface see the same set, and results[] holds its
     // leading rows, not just the first upstream page's matches.
     const filteredFull = spill.fullRows;
@@ -477,17 +494,20 @@ export const brapiFindLocations = tool('brapi_find_locations', {
     // Counts describe the rows the scan examined; rows past an incomplete scan
     // were never checked against the bbox, so they are named apart.
     const { rowsScanned, scanComplete } = spill;
+    const countryReport = countryCheck?.report();
+    if (countryReport) warnings.push(...countryReport.warnings);
+    const bboxScanned = rowsScanned - (countryReport?.dropped ?? 0);
     const upstreamTotal = firstPage.totalCount;
     const scope = scanComplete
       ? ''
       : ` scanned; ${upstreamTotal === undefined ? 'the rest were' : `the other ${upstreamTotal - rowsScanned} of ${upstreamTotal} were`} not checked`;
-    if (bbox && rowsScanned > 0 && filteredFull.length === 0) {
+    if (bbox && bboxScanned > 0 && filteredFull.length === 0) {
       warnings.push(
-        `bbox excluded all ${rowsScanned} upstream location(s)${scope}. Check or broaden the latitude/longitude bounds.`,
+        `bbox excluded all ${bboxScanned} upstream location(s)${scope}. Check or broaden the latitude/longitude bounds.`,
       );
-    } else if (bbox && filteredFull.length < rowsScanned) {
+    } else if (bbox && filteredFull.length < bboxScanned) {
       warnings.push(
-        `bbox excluded ${rowsScanned - filteredFull.length} of ${rowsScanned} upstream location(s)${scope}.`,
+        `bbox excluded ${bboxScanned - filteredFull.length} of ${bboxScanned} upstream location(s)${scope}.`,
       );
     }
 
@@ -536,7 +556,8 @@ export const brapiFindLocations = tool('brapi_find_locations', {
       }
     }
 
-    const totalCount = bbox ? filteredFull.length : (firstPage.totalCount ?? spill.rowsScanned);
+    const totalCount =
+      bbox || countryCheck ? filteredFull.length : (firstPage.totalCount ?? spill.rowsScanned);
     const refinementHint = buildRefinementHint(spill, distributions, {
       availableFilters: [
         'locations',
@@ -658,45 +679,154 @@ function insideBbox(
 }
 
 /**
- * Resolve country names to the dialect's supported ISO codes and union them with
- * explicit codes, keeping numeric strings and their leading zeros intact.
+ * Recovery for a name that did not resolve on an expanding dialect: explicit
+ * countryCodes are sent as given, so alpha-3 alone misses sites stored under
+ * the other forms.
+ */
+const EVERY_CODE_FORM =
+  "the country's alpha-3, alpha-2, ISO numeric, and calling code as countryCodes (explicit codes are not expanded)";
+
+interface ResolvedCountryCodes {
+  /** Explicit codes (alphabetic ones uppercased), then each resolved name's codes, deduplicated. */
+  codes: string[] | undefined;
+  /** Each numeric code a resolved name expanded to → alpha-3 of every requested country sending it. */
+  numericOwners: Map<string, Set<string>>;
+}
+
+/**
+ * Resolve country names to the dialect's supported codes and union them with
+ * explicit codes, keeping numeric strings and their leading zeros intact. On an
+ * expanding dialect a name sends alpha-3, alpha-2, ISO numeric, and its E.164
+ * calling code, and the warning labels each numeric code by its system.
  */
 function resolveCountryCodes(
   countryCodes: string[] | undefined,
   countryNames: string[] | undefined,
   expandCodes: boolean,
   warnings: string[],
-): string[] | undefined {
-  const resolved: Array<{ input: string; codes: string[] }> = [];
+): ResolvedCountryCodes {
+  const resolved: Array<{ input: string; codes: string[]; labels: string[] }> = [];
   const unresolved: string[] = [];
+  const numericOwners = new Map<string, Set<string>>();
   for (const name of countryNames ?? []) {
     const country = resolveCountryName(name);
-    if (country) {
+    if (!country) {
+      unresolved.push(name);
+    } else if (!expandCodes) {
+      resolved.push({ input: name, codes: [country.alpha3], labels: [country.alpha3] });
+    } else {
+      const numeric = [
+        { code: country.numeric, system: 'ISO numeric' },
+        ...(country.callingCode ? [{ code: country.callingCode, system: 'calling code' }] : []),
+      ];
+      for (const { code } of numeric) {
+        const owners = numericOwners.get(code) ?? new Set<string>();
+        owners.add(country.alpha3);
+        numericOwners.set(code, owners);
+      }
       resolved.push({
         input: name,
-        codes: expandCodes ? [country.alpha3, country.alpha2, country.numeric] : [country.alpha3],
+        codes: [country.alpha3, country.alpha2, ...numeric.map((n) => n.code)],
+        labels: [country.alpha3, country.alpha2, ...numeric.map((n) => `${n.code} (${n.system})`)],
       });
-    } else unresolved.push(name);
+    }
   }
   if (resolved.length > 0) {
     warnings.push(
-      `Resolved country name(s) to ISO 3166-1${expandCodes ? ' codes' : ' alpha-3'}: ${resolved
-        .map((p) => `"${p.input}" → ${p.codes.join(', ')}`)
+      `Resolved country name(s) to ${expandCodes ? 'ISO 3166-1 and E.164 calling codes' : 'ISO 3166-1 alpha-3'}: ${resolved
+        .map((p) => `"${p.input}" → ${p.labels.join(', ')}`)
         .join('; ')}.`,
     );
   }
   if (unresolved.length > 0) {
+    const names = unresolved.map((n) => `"${n}"`).join(', ');
     warnings.push(
-      `Could not resolve country name(s) to an ISO 3166-1 alpha-3 code: ${unresolved
-        .map((n) => `"${n}"`)
-        .join(', ')}. Pass the alpha-3 code directly via countryCodes, or check the spelling.`,
+      expandCodes
+        ? `Could not resolve country name(s) to ISO 3166-1 codes: ${names}. Check the spelling, or pass ${EVERY_CODE_FORM}.`
+        : `Could not resolve country name(s) to an ISO 3166-1 alpha-3 code: ${names}. Pass the alpha-3 code directly via countryCodes, or check the spelling.`,
     );
   }
   const resolvedCodes = resolved.flatMap((p) => p.codes);
-  if (!countryCodes && resolvedCodes.length === 0) return;
-  return [
-    ...new Set([...(countryCodes ?? []).map((code) => code.toUpperCase()), ...resolvedCodes]),
-  ];
+  return {
+    codes:
+      !countryCodes && resolvedCodes.length === 0
+        ? undefined
+        : [
+            ...new Set([
+              ...(countryCodes ?? []).map((code) => code.toUpperCase()),
+              ...resolvedCodes,
+            ]),
+          ],
+    numericOwners,
+  };
+}
+
+interface NumericCountryCheck {
+  /** Row filter: false drops a row whose countryName names a country that did not send its code. */
+  keep(row: Record<string, unknown>): boolean;
+  /** Rows dropped so far, and one warning each for the dropped and the unverified rows. */
+  report(): { dropped: number; warnings: string[] };
+}
+
+/**
+ * Check rows matched only through a numeric code expanded from countryNames
+ * against the row's own `countryName`: on SGN data a numeric code names no
+ * single country (calling codes are shared, and many equal another country's
+ * ISO numeric code). Keeps a row whose countryName resolves to a country that
+ * sent the code, drops one naming another country, and keeps one whose
+ * countryName is empty or unrecognized. Codes the caller passed explicitly are
+ * never checked. Undefined when no expanded numeric code is left to check.
+ */
+function numericCountryCheck(
+  numericOwners: ReadonlyMap<string, ReadonlySet<string>>,
+  explicitCodes: ReadonlySet<string>,
+): NumericCountryCheck | undefined {
+  const checked = new Map([...numericOwners].filter(([code]) => !explicitCodes.has(code)));
+  if (checked.size === 0) return;
+  const dropped = new Map<string, Map<string, number>>();
+  const unverified = new Map<string, number>();
+  let droppedCount = 0;
+  return {
+    keep(row) {
+      const code = asString(row.countryCode);
+      const owners = code === undefined ? undefined : checked.get(code);
+      if (code === undefined || owners === undefined) return true;
+      const name = asString(row.countryName);
+      const country = name === undefined ? undefined : resolveCountryName(name);
+      if (!country) {
+        unverified.set(code, (unverified.get(code) ?? 0) + 1);
+        return true;
+      }
+      if (owners.has(country.alpha3)) return true;
+      const named = dropped.get(code) ?? new Map<string, number>();
+      named.set(country.name, (named.get(country.name) ?? 0) + 1);
+      dropped.set(code, named);
+      droppedCount++;
+      return false;
+    },
+    report() {
+      const warnings: string[] = [];
+      if (droppedCount > 0) {
+        const detail = [...dropped]
+          .map(
+            ([code, named]) =>
+              `${code} → ${[...named].map(([country, n]) => `${country} (${n})`).join(', ')}`,
+          )
+          .join('; ');
+        warnings.push(
+          `Dropped ${droppedCount} location(s) matched only by a numeric code expanded from countryNames whose countryName names another country: ${detail}.`,
+        );
+      }
+      if (unverified.size > 0) {
+        const total = [...unverified.values()].reduce((sum, n) => sum + n, 0);
+        const detail = [...unverified].map(([code, n]) => `${code} (${n})`).join(', ');
+        warnings.push(
+          `Kept ${total} location(s) matched only by a numeric code expanded from countryNames whose countryName is empty or unrecognized, so their country is unverified: ${detail}.`,
+        );
+      }
+      return { dropped: droppedCount, warnings };
+    },
+  };
 }
 
 /** Render the exact row section used by both formatting and preview sizing. */

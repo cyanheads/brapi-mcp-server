@@ -14,7 +14,11 @@ import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import { getReferenceDataCache } from '@/services/reference-data-cache/index.js';
+import { supportsMethod } from '@/services/capability-registry/supports-method.js';
+import {
+  getReferenceDataCache,
+  type ReferenceLookupOptions,
+} from '@/services/reference-data-cache/index.js';
 import {
   AliasInput,
   appendPassthroughLines,
@@ -123,13 +127,13 @@ const OutputSchema = z.object({
   alias: z.string().describe('Connection alias the call used.'),
   study: StudySchema.describe('Canonical study record as returned by `/studies/{id}`.'),
   program: ProgramSchema.optional().describe(
-    'Resolved program record (when the study or parent trial identifies a program and the FK lookup succeeded).',
+    'Program the study or parent trial names; omitted with a warning when not resolved.',
   ),
   trial: TrialSchema.optional().describe(
-    'Resolved trial record (when the study has a trialDbId and the FK lookup succeeded).',
+    'Trial the study names; omitted with a warning when not resolved.',
   ),
   location: LocationSchema.optional().describe(
-    'Resolved location record (when the study has a locationDbId and the FK lookup succeeded).',
+    'Location the study names; omitted with a warning when not resolved.',
   ),
   observationCount: z
     .number()
@@ -274,12 +278,6 @@ export const brapiGetStudy = tool('brapi_get_study', {
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
 
     const warnings: string[] = [];
-    const referenceLookup: {
-      auth?: typeof connection.resolvedAuth;
-      dialect: typeof dialect;
-      warnings: string[];
-    } = { dialect, warnings };
-    if (connection.resolvedAuth) referenceLookup.auth = connection.resolvedAuth;
 
     let studyEnv: Awaited<ReturnType<typeof client.get<Record<string, unknown>>>>;
     try {
@@ -316,10 +314,11 @@ export const brapiGetStudy = tool('brapi_get_study', {
     }
 
     const profile = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
-    const supportsObservations = profile.supported.observations?.methods?.includes('GET') ?? false;
-    const supportsObservationUnits =
-      profile.supported.observationunits?.methods?.includes('GET') ?? false;
-    const supportsVariables = profile.supported.variables?.methods?.includes('GET') ?? false;
+    const referenceLookup: ReferenceLookupOptions = { dialect, profile, warnings };
+    if (connection.resolvedAuth) referenceLookup.auth = connection.resolvedAuth;
+    const supportsObservations = supportsMethod(profile.supported.observations, 'GET');
+    const supportsObservationUnits = supportsMethod(profile.supported.observationunits, 'GET');
+    const supportsVariables = supportsMethod(profile.supported.variables, 'GET');
 
     const programDbId = asString(study.programDbId);
     const trialDbId = asString(study.trialDbId);

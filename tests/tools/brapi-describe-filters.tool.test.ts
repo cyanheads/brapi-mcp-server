@@ -27,6 +27,20 @@ describe('brapi_describe_filters tool', () => {
     expect(result.availableEndpoints.length).toBeGreaterThanOrEqual(7);
   });
 
+  it('lists observationVariableDbIds for studies on both surfaces', async () => {
+    const ctx = createMockContext();
+    const result = await brapiDescribeFilters.handler(
+      brapiDescribeFilters.input.parse({ endpoint: 'studies' }),
+      ctx,
+    );
+    expect(result.filters).toContainEqual(
+      expect.objectContaining({ name: 'observationVariableDbIds', type: 'string[]' }),
+    );
+    expect(result.filterCount).toBe(result.filters.length);
+    const text = (brapiDescribeFilters.format!(result)[0] as { text: string }).text;
+    expect(text).toMatch(/\| `observationVariableDbIds` \| `string\[\]` \| [^|]*variables[^|]* \|/);
+  });
+
   it('returns the germplasm catalog distinct from studies', async () => {
     const ctx = createMockContext();
     const result = await brapiDescribeFilters.handler(

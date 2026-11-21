@@ -54,6 +54,7 @@ const BMS_PLURAL_TO_SINGULAR: Record<
     studyNames: 'studyName',
     studyCodes: 'studyCode',
     studyPUIs: 'studyPUI',
+    observationVariableDbIds: 'observationVariableDbId',
     externalReferenceIds: 'externalReferenceId',
     externalReferenceSources: 'externalReferenceSource',
   },

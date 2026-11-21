@@ -37,6 +37,19 @@ describe('bmsDialect', () => {
     ).toEqual({ studyDbId: 's1', germplasmDbId: 'g1' });
   });
 
+  it('translates observationVariableDbIds on studies as an inferred mapping', () => {
+    const one = bmsDialect.adaptGetFilters('studies', { observationVariableDbIds: ['v1'] });
+    expect(one.filters).toEqual({ observationVariableDbId: 'v1' });
+    expect(one.warnings).toEqual([]);
+
+    const two = bmsDialect.adaptGetFilters('studies', { observationVariableDbIds: ['v1', 'v2'] });
+    expect(two).toMatchObject({
+      filters: { observationVariableDbId: 'v1' },
+      requiresEscalation: true,
+    });
+    expect(two.warnings[0]).toMatch(/mapping inferred/);
+  });
+
   it('signals requiresEscalation on multi-value downcast (#15 path)', () => {
     const result = bmsDialect.adaptGetFilters('studies', {
       programDbIds: ['p1', 'p2', 'p3'],

@@ -64,6 +64,27 @@ describe('resolveCountryName', () => {
     });
   });
 
+  it('carries the E.164 calling code, shared codes included', () => {
+    expect(resolveCountryName('Uganda')?.callingCode).toBe('256');
+    expect(resolveCountryName('Zambia')?.callingCode).toBe('260');
+    expect(resolveCountryName('DR Congo')?.callingCode).toBe('243');
+    expect(resolveCountryName('Mozambique')?.callingCode).toBe('258');
+    expect(resolveCountryName('Albania')?.callingCode).toBe('355');
+    expect(resolveCountryName('United States')?.callingCode).toBe('1');
+    expect(resolveCountryName('Jamaica')?.callingCode).toBe('1');
+    expect(resolveCountryName('Saint Pierre and Miquelon')?.callingCode).toBe('508');
+  });
+
+  it('assigns a calling code to every ISO entry except the seven with no E.164 assignment', () => {
+    const without = ISO_3166_1_COUNTRIES.filter((c) => c.callingCode === undefined).map(
+      (c) => c.alpha2,
+    );
+    expect(without.sort()).toEqual(['AQ', 'BV', 'GS', 'HM', 'PN', 'TF', 'UM']);
+    for (const c of ISO_3166_1_COUNTRIES) {
+      if (c.callingCode !== undefined) expect(c.callingCode).toMatch(/^[1-9]\d{0,2}$/);
+    }
+  });
+
   it('ships the full ISO 3166-1 table with unique, well-formed codes', () => {
     expect(ISO_3166_1_COUNTRIES.length).toBeGreaterThanOrEqual(249);
     const alpha3 = new Set<string>();

@@ -66,6 +66,9 @@ const SGN_PLURAL_TO_SINGULAR: Record<
     studyNames: 'studyName',
     studyCodes: 'studyCode',
     studyPUIs: 'studyPUI',
+    // Narrowed against Sweetpotatobase, which ignores both plurals.
+    germplasmDbIds: verified('germplasmDbId'),
+    observationVariableDbIds: verified('observationVariableDbId'),
     externalReferenceIds: 'externalReferenceId',
     externalReferenceSources: 'externalReferenceSource',
   },
@@ -186,16 +189,25 @@ const SGN_NOTES = [
   'Several advertised POST /search routes are treated as unavailable because SGN-family deployments often expose them in /calls while serving broken or hanging responses.',
 ] as const;
 
+/**
+ * SGN `/locations` stores countries as alpha-3, alpha-2, ISO numeric, or E.164
+ * calling codes (CassavaBase holds calling codes, Sweetpotatobase an ISO
+ * numeric) and honors a repeated plural `countryCodes` as a union, so every
+ * family member expands resolved country names to all four forms.
+ */
 function createSgnFamilyDialect(id: string, label: string): BrapiDialect {
-  return createSingularizingDialect({
-    id,
-    label,
-    pluralToSingular: SGN_PLURAL_TO_SINGULAR,
-    droppedFilters: DROPPED_FILTERS,
-    disabledSearchEndpoints: DISABLED_SEARCH_ENDPOINTS,
-    notes: SGN_NOTES,
-    normalizeRow: normalizeSgnRow,
-  });
+  return {
+    ...createSingularizingDialect({
+      id,
+      label,
+      pluralToSingular: SGN_PLURAL_TO_SINGULAR,
+      droppedFilters: DROPPED_FILTERS,
+      disabledSearchEndpoints: DISABLED_SEARCH_ENDPOINTS,
+      notes: SGN_NOTES,
+      normalizeRow: normalizeSgnRow,
+    }),
+    expandLocationCountryCodes: true,
+  };
 }
 
 /**
@@ -228,6 +240,19 @@ function normalizeSgnRow(endpoint: string, row: Record<string, unknown>): Record
       }
     }
   }
+  // Breedbase `/callsets` carries the call set's germplasm only in
+  // `additionalInfo` — the accession itself, or a tissue sample's source
+  // accession. BrAPI's CallSet has no germplasm field of its own.
+  if (endpoint === 'callsets' && row.germplasmDbId === undefined) {
+    const info = row.additionalInfo;
+    const germplasmDbId =
+      info && typeof info === 'object' && !Array.isArray(info)
+        ? (info as Record<string, unknown>).germplasmDbId
+        : undefined;
+    if (typeof germplasmDbId === 'string' && germplasmDbId.trim().length > 0) {
+      normalized.germplasmDbId = germplasmDbId;
+    }
+  }
   return normalized;
 }
 
@@ -245,9 +270,6 @@ function stripNulls(value: unknown): unknown {
   return out;
 }
 
-export const cassavabaseDialect: BrapiDialect = {
-  ...createSgnFamilyDialect('cassavabase', 'CassavaBase'),
-  expandLocationCountryCodes: true,
-};
+export const cassavabaseDialect = createSgnFamilyDialect('cassavabase', 'CassavaBase');
 
 export const breedbaseDialect = createSgnFamilyDialect('breedbase', 'Breedbase/SGN');

@@ -1,12 +1,20 @@
 /**
  * @fileoverview `brapi_export_genotype_matrix` — pull genotype calls for a
- * germplasm × variant set and pivot them into a matrix in the requested format.
+ * variant set and pivot them into a call set × variant matrix in the requested
+ * format.
+ *
+ * A call set is one sample's calls, so rows are call sets, not germplasm. Each
+ * row leads with `callSetDbId`, `callSetName`, and `germplasmDbId`; the
+ * germplasm is resolved after the pull by batch lookups (paged `/callsets` for
+ * the variant set, then `/search/samples` by sample ID) and stays null when a
+ * lookup is unavailable or fails, so the matrix joins to
+ * `brapi_build_phenotype_matrix` on `germplasmDbId`.
  *
  * Three output formats:
  *
- * - `matrix-json`: Wide germplasm × variant table registered as a canvas
- *   dataframe (`df_<uuid>`). One row per call-set (germplasm); one column per
- *   variant. Column names are sanitized for DuckDB (SQL-safe identifiers); a
+ * - `matrix-json`: Wide call set × variant table registered as a canvas
+ *   dataframe (`df_<uuid>`). One row per call set; one column per variant.
+ *   Column names are sanitized for DuckDB (SQL-safe identifiers); a
  *   `variantColumnLegend` maps sanitized name → original variant ID.
  *
  * - `vcf-lite`: Standard VCF-subset text (`#CHROM POS ID REF ALT <sample…>`),
@@ -23,12 +31,14 @@
  *
  * The genotype-call pull infrastructure is shared with `brapi_find_genotype_calls`
  * via `src/mcp-server/tools/shared/genotype-calls.ts`; column sanitization is
- * shared via `src/mcp-server/tools/shared/canvas-columns.ts`.
+ * shared via `src/mcp-server/tools/shared/canvas-columns.ts`. The matrix pivot,
+ * text encoders, `/variants` metadata pull, and call-set germplasm lookup live
+ * in `genotype-matrix.ts`, `genotype-text-formats.ts`, `variant-metadata.ts`,
+ * and `callset-germplasm.ts` beside them.
  *
  * @module mcp-server/tools/definitions/brapi-export-genotype-matrix.tool
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, requestCancelled } from '@cyanheads/mcp-ts-core/errors';
 import {
@@ -36,20 +46,15 @@ import {
   GENOTYPE_MATRIX_MAX_COLUMNS_CEILING,
   getServerConfig,
 } from '@/config/server-config.js';
-import { type BrapiClient, getBrapiClient } from '@/services/brapi-client/index.js';
-import { type BrapiDialect, resolveDialect } from '@/services/brapi-dialect/index.js';
+import { getBrapiClient } from '@/services/brapi-client/index.js';
+import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge, type RegisterDataframeInput } from '@/services/canvas-bridge/index.js';
 import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
-import type { RegisteredServer } from '@/services/server-registry/index.js';
-import { buildUniqueColumns } from '../shared/canvas-columns.js';
+import { resolveCallSetGermplasm } from '../shared/callset-germplasm.js';
 import {
   AliasInput,
-  asString,
-  type BrapiListResult,
-  buildRequestOptions,
   DataframeHandleSchema,
-  extractRows,
   NonBlankString,
   renderDataframeHandle,
   requireRegisteredConnection,
@@ -58,26 +63,18 @@ import {
 } from '../shared/find-helpers.js';
 import {
   buildCallsSearchBody,
-  type CallFormatting,
   collectCalls,
   NO_MATCHING_CALLS_NOTICE,
-  renderGenotypeString,
-  type WireCallRow,
 } from '../shared/genotype-calls.js';
+import {
+  buildMatrix,
+  IDENTITY_COLUMNS,
+  keepRequestedVariants,
+  pullEndNotice,
+} from '../shared/genotype-matrix.js';
+import { buildMapText, buildPedText, buildVcfText } from '../shared/genotype-text-formats.js';
 import { fenced, literal } from '../shared/markdown-literals.js';
-
-/** Per-variant coordinate metadata used to populate VCF/PLINK position columns. */
-interface VariantMeta {
-  alt?: string;
-  altByIndex?: (string | undefined)[];
-  chrom?: string;
-  pos?: string;
-  ref?: string;
-}
-
-/** Max variant records scanned when pulling coordinate metadata for vcf/plink. */
-const MAX_VARIANT_METADATA_ROWS = 50_000;
-const VARIANT_METADATA_PAGE_SIZE = 1_000;
+import { collectVariantMetadata, type VariantMeta } from '../shared/variant-metadata.js';
 
 /** Lines of format text shown inline in content[] before the preview notice fires. */
 const FORMAT_PREVIEW_LINES = 25;
@@ -91,16 +88,12 @@ const OutputSchema = z.object({
   format: z
     .enum(['plink', 'vcf-lite', 'matrix-json'])
     .describe('The output format that was produced.'),
-  rowCount: z
-    .number()
-    .int()
-    .nonnegative()
-    .describe('Number of call-set (germplasm) rows in the matrix.'),
+  rowCount: z.number().int().nonnegative().describe('Number of call-set rows in the matrix.'),
   columnCount: z
     .number()
     .int()
     .nonnegative()
-    .describe('Number of variant columns in the matrix (excluding the germplasm ID column).'),
+    .describe('Number of variant columns in the matrix (excluding the identity columns).'),
   variantColumnLegend: z
     .record(z.string(), z.string())
     .describe('SQL-safe dataframe column name → original variantDbId.'),
@@ -113,7 +106,7 @@ const OutputSchema = z.object({
     })
     .describe('Genotype-encoding hints echoed by the server.'),
   dataframe: DataframeHandleSchema.describe(
-    'The wide germplasm × variant matrix with raw genotype values, staged for every format. brapi_dataframe_export writes it to a file where that tool is listed.',
+    'The wide call set × variant matrix with raw genotype values, staged for every format. brapi_dataframe_export writes it to a file where that tool is listed.',
   ),
   vcf: z
     .string()
@@ -149,7 +142,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
   description:
-    'Pull genotype calls for a germplasm × variant set and pivot them into a matrix. `matrix-json` registers a wide canvas dataframe; `vcf-lite` adds VCF-subset text in `vcf`; `plink` adds .ped/.map text in `ped`/`map`. Text formats pull /variants metadata and convert zero-based BrAPI start to one-based positions; missing/invalid positions use `.`/`0`. Read the dataframe with brapi_dataframe_describe and brapi_dataframe_query (SQL). `variantColumnLegend` maps SQL-safe columns to original variant IDs.',
+    "Pull genotype calls for a variant set and pivot them into a call set × variant matrix. Each row is one call set (one sample's calls), led by callSetDbId, callSetName, and germplasmDbId — the germplasm resolved through the call set's sample, null when unresolved. Join to brapi_build_phenotype_matrix on germplasmDbId; a germplasm with several call sets joins once per call set. `variantDbIds` restricts the pull to chosen variants, such as a region's from brapi_find_variants. `matrix-json` registers a wide canvas dataframe; `vcf-lite` adds VCF-subset text in `vcf`; `plink` adds .ped/.map text in `ped`/`map`. Text formats pull /variants metadata and convert zero-based BrAPI start to one-based positions; missing/invalid positions use `.`/`0`. Read the dataframe with brapi_dataframe_describe and brapi_dataframe_query (SQL). `variantColumnLegend` maps SQL-safe columns to original variant IDs.",
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -263,6 +256,12 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     variantSetDbId: NonBlankString.describe(
       'Variant set to pull calls for. Required. List variant sets with brapi_raw_get({ path: "/variantsets" }) — add params.studyDbId to narrow to one study or genotyping project — and read variantSetDbId from the rows.',
     ),
+    variantDbIds: z
+      .array(NonBlankString)
+      .optional()
+      .describe(
+        'Restrict the matrix to these variants — e.g. the variantDbIds brapi_find_variants returns for a region. Calls the server returns for other variants are left out. Export a large variant set in batches of at most maxColumns variants.',
+      ),
     format: z
       .enum(['plink', 'vcf-lite', 'matrix-json'])
       .describe(
@@ -284,11 +283,12 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       .max(GENOTYPE_MATRIX_MAX_COLUMNS_CEILING)
       .optional()
       .describe(
-        'Lower the distinct-variant column cap for this call. Omit to use the deployment ceiling. Cannot raise it: a value above the deployment ceiling is clamped down to it. When the variant set resolves more distinct variants than the effective cap, the matrix is capped at that many variant columns, `truncated` is set, and the effective cap is reported in `warnings`. Independent of `maxCalls`, which bounds the row (call) pull.',
+        'Lower the distinct-variant column cap for this call. Omit to use the deployment ceiling. Cannot raise it: a value above the deployment ceiling is clamped down to it. When the variant set resolves more distinct variants than the effective cap, the matrix keeps that many variant columns (listed in `variantColumnLegend`), `truncated` is set, and the effective cap is reported in `warnings`; pass the other variants as `variantDbIds` to export them. Independent of `maxCalls`, which bounds the row (call) pull.',
       ),
   }),
   inputAliases: {
     germplasmDbId: 'germplasmDbIds',
+    variantDbId: 'variantDbIds',
   },
   output: OutputSchema,
   enrichment: {
@@ -310,6 +310,8 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       ctx,
       capabilityLookup,
     );
+    // Read before the pull so the germplasm lookup after it never refetches.
+    const { supported } = await capabilities.profile(connection.baseUrl, ctx, capabilityLookup);
 
     const dialect = await resolveDialect(connection, ctx, capabilityLookup);
     if (dialect.disabledSearchEndpoints?.has('calls')) {
@@ -339,8 +341,8 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
 
     // Same deployment-ceiling-wins shape as `maxCalls`, on the orthogonal axis:
     // `maxCalls` bounds the rows pulled, `maxColumns` bounds the distinct-variant
-    // columns those rows pivot into. Nothing constrains the germplasm-to-variant
-    // ratio, so a schema-legal skew (one germplasm × `maxCalls` variants) would
+    // columns those rows pivot into. Nothing constrains the call-set-to-variant
+    // ratio, so a schema-legal skew (one call set × `maxCalls` variants) would
     // otherwise drive `columnCount` — and the variantColumnLegend, the wide
     // dataframe, and the vcf/ped/map text with it — to the full call budget.
     const requestedMaxColumns = input.maxColumns ?? config.genotypeMatrixMaxColumns;
@@ -355,6 +357,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       variantSetDbId: input.variantSetDbId,
     };
     if (input.germplasmDbIds !== undefined) searchOpts.germplasmDbIds = input.germplasmDbIds;
+    if (input.variantDbIds !== undefined) searchOpts.variantDbIds = input.variantDbIds;
     const searchBody = buildCallsSearchBody(searchOpts);
 
     if (!searchBody.variantSetDbIds) {
@@ -372,35 +375,61 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       maxCalls,
       warnings,
     });
+    const callRows = keepRequestedVariants(collected.rows, input.variantDbIds, warnings);
 
     // Build the pivot matrix plus the structured data the text encoders need.
     // The column cap is applied *inside* the pivot loop (net-new variants past
     // `maxColumns` are skipped as rows stream in), so the over-wide legend and
     // matrix are never materialized then trimmed — a true resource bound, not
     // post-hoc waste.
-    const matrix = buildMatrix(collected.rows, collected.callFormatting, maxColumns);
+    const matrix = buildMatrix(callRows, collected.callFormatting, maxColumns);
     if (matrix.columnsTruncated) {
       warnings.push(
-        `The variant set resolved more than ${maxColumns} distinct variants; the matrix was capped at ${maxColumns} variant columns and the remaining variants were dropped. Every germplasm is still present — one whose calls all fall in the dropped variants appears as an all-null row. Narrow germplasmDbIds or the variant set and re-pull to capture the rest.`,
+        `The variant set resolved more than ${maxColumns} distinct variants; the matrix keeps ${maxColumns} variant columns, listed in variantColumnLegend, and dropped the rest. Every call set is still present — one whose calls all fall in the dropped variants appears as an all-null row. To export the rest, pass variants missing from variantColumnLegend as variantDbIds (brapi_find_variants lists a variant set's or a region's variants), at most ${maxColumns} per call.`,
       );
     }
+    if (collected.truncated || collected.stopReason !== undefined) {
+      warnings.push(pullEndNotice(matrix, callRows.at(-1)));
+    }
+
+    // Germplasm resolution and the text formats' /variants pull are independent
+    // companions: run them together, each degrading to its own warnings, and
+    // append those in a fixed order.
+    const textFormat = input.format === 'vcf-lite' || input.format === 'plink';
+    const metadataWarnings: string[] = [];
+    const [germplasm, variantMeta] = await Promise.all([
+      resolveCallSetGermplasm({
+        client,
+        connection,
+        ctx,
+        dialect,
+        callSets: matrix.matrixRows,
+        supported,
+        variantSetDbId: input.variantSetDbId,
+      }),
+      textFormat && matrix.columnCount > 0
+        ? collectVariantMetadata({
+            client,
+            connection,
+            dialect,
+            variantSetDbId: input.variantSetDbId,
+            neededIds: new Set(matrix.variantIdOrder),
+            ctx,
+            warnings: metadataWarnings,
+          })
+        : new Map<string, VariantMeta>(),
+    ]);
+    for (const row of matrix.matrixRows) {
+      if (typeof row.callSetDbId === 'string') {
+        row.germplasmDbId = germplasm.germplasmByCallSet.get(row.callSetDbId) ?? null;
+      }
+    }
+    warnings.push(...germplasm.warnings, ...metadataWarnings);
 
     let vcf: string | undefined;
     let ped: string | undefined;
     let map: string | undefined;
-    if (input.format === 'vcf-lite' || input.format === 'plink') {
-      const variantMeta =
-        matrix.columnCount === 0
-          ? new Map<string, VariantMeta>()
-          : await collectVariantMetadata({
-              client,
-              connection,
-              dialect,
-              variantSetDbId: input.variantSetDbId,
-              neededIds: new Set(matrix.variantIdOrder),
-              ctx,
-              warnings,
-            });
+    if (textFormat) {
       if (matrix.hasAmbiguousValues) {
         warnings.push(
           'Bare numeric genotype values can represent dosage or a single allele index. Text export marks those calls missing. Query the staged matrix with brapi_dataframe_query to retrieve the original values.',
@@ -424,7 +453,11 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       rows: matrix.matrixRows,
     };
     if (matrix.matrixRows.length === 0) {
-      registerInput.emptySchema = [{ name: 'germplasmDbId', type: 'VARCHAR', nullable: true }];
+      registerInput.emptySchema = IDENTITY_COLUMNS.map((name) => ({
+        name,
+        type: 'VARCHAR' as const,
+        nullable: true,
+      }));
     }
     // A column cap leaves the dataframe incomplete too — flag it so a reader who
     // inspects the handle without reading `warnings` doesn't take the matrix as
@@ -468,7 +501,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     const lines: string[] = [];
 
     lines.push(
-      literal`# Genotype matrix — ${result.format} — ${result.rowCount} germplasm × ${result.columnCount} variants — \`${result.alias}\``,
+      literal`# Genotype matrix — ${result.format} — ${result.rowCount} call sets × ${result.columnCount} variants — \`${result.alias}\``,
     );
     if (result.truncated) lines.push('> **Truncated.** See `warnings` for why.');
     lines.push('');
@@ -540,17 +573,18 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
  * rest can actually be read.
  *
  * The text is not rendered complete on purpose: `maxCalls` bounds
- * `rowCount × columnCount`, but nothing constrains the germplasm-to-variant
- * ratio, so a schema-legal skew (one germplasm × `maxCalls` variants) drives a
+ * `rowCount × columnCount`, but nothing constrains the call-set-to-variant
+ * ratio, so a schema-legal skew (one call set × `maxCalls` variants) drives a
  * single `vcf` or `map` string to ~16MB at the 500,000 ceiling — and
  * `content[]` would carry it a second time on top of `structuredContent`.
  *
  * The notice names the dataframe rather than only `structuredContent`, which
  * content-only clients cannot read. It is registered for every format, so it
  * always exists by the time this runs. The coordinate caveat is not hedging:
- * the dataframe holds `{germplasmDbId, <variant columns>: genotype}` and none
- * of the CHROM/POS/REF/ALT metadata pulled separately from `/variants`, so
- * presenting it as a complete substitute for the text would be false.
+ * the dataframe holds `{callSetDbId, callSetName, germplasmDbId, <variant
+ * columns>: genotype}` and none of the CHROM/POS/REF/ALT metadata pulled
+ * separately from `/variants`, so presenting it as a complete substitute for
+ * the text would be false.
  */
 function renderTextPreview(opts: {
   /** Section heading, e.g. `PLINK .map`. */
@@ -566,412 +600,9 @@ function renderTextPreview(opts: {
   const out = [`## ${opts.label}`, fenced(preview.join('\n'))];
   if (allLines.length > FORMAT_PREVIEW_LINES) {
     out.push(
-      `… ${allLines.length - FORMAT_PREVIEW_LINES} more line(s) not shown. Complete text: \`structuredContent.${opts.field}\`. Every germplasm × variant genotype is also in dataframe \`${opts.tableName}\` — query it with brapi_dataframe_query; it carries genotypes only, not the CHROM/POS/REF/ALT coordinates shown above.`,
+      `… ${allLines.length - FORMAT_PREVIEW_LINES} more line(s) not shown. Complete text: \`structuredContent.${opts.field}\`. Every call set × variant genotype is also in dataframe \`${opts.tableName}\` — query it with brapi_dataframe_query; it carries genotypes only, not the CHROM/POS/REF/ALT coordinates shown above.`,
     );
   }
   out.push('');
   return out;
-}
-
-// ---------------------------------------------------------------------------
-// Matrix pivot
-// ---------------------------------------------------------------------------
-
-interface GenotypeCell {
-  ambiguous: boolean;
-  text: string;
-}
-
-interface MatrixBuildResult {
-  /** Number of distinct variant columns (≤ the `maxColumns` cap). */
-  columnCount: number;
-  /** True when distinct variants exceeded `maxColumns` and net-new ones were dropped. */
-  columnsTruncated: boolean;
-  /** sample → variantDbId → raw rendered genotype and encoding information. */
-  genotypeAt: Map<string, Map<string, GenotypeCell>>;
-  hasAmbiguousValues: boolean;
-  /** Wide rows registered as the canvas dataframe (one per sample). */
-  matrixRows: Record<string, unknown>[];
-  /** Row key → display label (callSetName when present). */
-  sampleLabels: Map<string, string>;
-  /** Sample (call-set) row keys in encounter order. */
-  sampleOrder: string[];
-  /** Map of sanitized column name → original variantDbId. */
-  variantColumnLegend: Record<string, string>;
-  /** Distinct variantDbIds in encounter order. */
-  variantIdOrder: string[];
-}
-
-/**
- * Pivot the flat call rows into a wide germplasm × variant matrix and capture
- * the ordered structures the VCF/PLINK encoders consume.
- *
- * Row identity: `callSetDbId` (preferred) or `callSetName`, else `'unknown'`.
- * Variant identity: `variantDbId` (preferred) or `variantName`.
- *
- * `maxColumns` bounds the distinct-variant column count only — never the
- * germplasm rows. Every germplasm seen in any row is registered as a matrix
- * row; the cap drops variant *columns*, not rows. The cap is enforced as rows
- * stream in: once `maxColumns` distinct variants have been seen, a row
- * introducing a *net-new* variant contributes no column and no stored genotype,
- * but its germplasm is still registered first. A germplasm whose calls all
- * reference beyond-cap variants therefore renders as an honest all-null row —
- * present, empty in the kept columns — never a vanished row. This stays a
- * resource bound: the over-wide legend and per-column genotype cells are never
- * built, not built-then-trimmed.
- */
-function buildMatrix(
-  rows: WireCallRow[],
-  callFormatting: CallFormatting,
-  maxColumns: number,
-): MatrixBuildResult {
-  const variantSeen = new Set<string>();
-  const variantIdOrder: string[] = [];
-  const sampleLabels = new Map<string, string>();
-  const genotypeAt = new Map<string, Map<string, GenotypeCell>>();
-  let columnsTruncated = false;
-
-  for (const row of rows) {
-    const vid = row.variantDbId ?? row.variantName ?? 'unknown_variant';
-    // Register the germplasm (sample) on its first appearance, BEFORE the
-    // variant-cap check below. Gating registration on a kept variant would drop
-    // the entire row of any germplasm whose calls all reference beyond-cap
-    // variants — silent row loss under germplasm-major, disjoint coverage (the
-    // common Breedbase /search/calls shape). It must still appear, empty in the
-    // kept columns.
-    const sampleKey = row.callSetDbId ?? row.callSetName ?? 'unknown';
-    if (!sampleLabels.has(sampleKey)) {
-      sampleLabels.set(sampleKey, row.callSetName ?? sampleKey);
-    }
-    if (!variantSeen.has(vid)) {
-      if (variantIdOrder.length >= maxColumns) {
-        columnsTruncated = true;
-        continue;
-      }
-      variantSeen.add(vid);
-      variantIdOrder.push(vid);
-    }
-    const text = renderGenotypeString(row, callFormatting);
-    const ambiguous =
-      typeof row.genotype?.values === 'string' &&
-      text !== callFormatting.unknownString &&
-      isBareNumeric(text);
-    let byVariant = genotypeAt.get(sampleKey);
-    if (!byVariant) {
-      byVariant = new Map();
-      genotypeAt.set(sampleKey, byVariant);
-    }
-    byVariant.set(vid, { text, ambiguous });
-  }
-
-  const { columns: sanitizedCols, toOriginal: variantColumnLegend } =
-    buildUniqueColumns(variantIdOrder);
-
-  let hasAmbiguousValues = false;
-  const sampleOrder = [...sampleLabels.keys()];
-  const matrixRows: Record<string, unknown>[] = sampleOrder.map((sampleKey) => {
-    const row: Record<string, unknown> = { germplasmDbId: sampleKey };
-    const byVariant = genotypeAt.get(sampleKey);
-    variantIdOrder.forEach((vid, i) => {
-      const col = sanitizedCols[i] ?? `v_${i}`;
-      const cell = byVariant?.get(vid);
-      if (cell?.ambiguous) hasAmbiguousValues = true;
-      row[col] = cell?.text ?? null;
-    });
-    return row;
-  });
-
-  return {
-    matrixRows,
-    variantColumnLegend,
-    columnCount: variantIdOrder.length,
-    columnsTruncated,
-    variantIdOrder,
-    sampleOrder,
-    sampleLabels,
-    genotypeAt,
-    hasAmbiguousValues,
-  };
-}
-
-function isBareNumeric(text: string): boolean {
-  const token = text.trim();
-  return (
-    token !== '' &&
-    !['0x', '0o', '0b'].includes(token.slice(0, 2).toLowerCase()) &&
-    Number.isFinite(Number(token))
-  );
-}
-
-// ---------------------------------------------------------------------------
-// VCF-lite / PLINK text encoders
-// ---------------------------------------------------------------------------
-
-/** Tab-join a row of cells. */
-function tsv(cells: readonly (string | number)[]): string {
-  return cells.map(String).join('\t');
-}
-
-function buildVcfText(
-  matrix: MatrixBuildResult,
-  variantMeta: Map<string, VariantMeta>,
-  callFormatting: CallFormatting,
-): string {
-  const missing = callFormatting.unknownString ?? '.';
-  const header = [
-    '#CHROM',
-    'POS',
-    'ID',
-    'REF',
-    'ALT',
-    ...matrix.sampleOrder.map((s) => matrix.sampleLabels.get(s) ?? s),
-  ];
-  const lines = [tsv(header)];
-  for (const vid of matrix.variantIdOrder) {
-    const m = variantMeta.get(vid) ?? {};
-    const genotypes = matrix.sampleOrder.map((s) => {
-      const cell = matrix.genotypeAt.get(s)?.get(vid);
-      return cell?.ambiguous ? '.' : (cell?.text ?? missing);
-    });
-    lines.push(tsv([m.chrom ?? '.', m.pos ?? '.', vid, m.ref ?? '.', m.alt ?? '.', ...genotypes]));
-  }
-  return lines.join('\n');
-}
-
-function buildMapText(matrix: MatrixBuildResult, variantMeta: Map<string, VariantMeta>): string {
-  // chromosome, variant-id, genetic-distance (0 placeholder), base-pair position
-  return matrix.variantIdOrder
-    .map((vid) => {
-      const m = variantMeta.get(vid) ?? {};
-      return tsv([m.chrom ?? '0', vid, '0', m.pos ?? '0']);
-    })
-    .join('\n');
-}
-
-function buildPedText(
-  matrix: MatrixBuildResult,
-  variantMeta: Map<string, VariantMeta>,
-  callFormatting: CallFormatting,
-  warnings: string[],
-): string {
-  const unknown = callFormatting.unknownString ?? '.';
-  const separators = [callFormatting.sepPhased, callFormatting.sepUnphased, '/', '|', ','].filter(
-    (sep): sep is string => Boolean(sep),
-  );
-  const literalMarkers = new Set<string>();
-  const unmappedMarkers = new Set<string>();
-  for (const calls of matrix.genotypeAt.values()) {
-    for (const [variant, cell] of calls) {
-      if (cell.ambiguous) continue;
-      const pair = splitAlleles(cell.text, unknown, separators);
-      if (!pair) continue;
-      for (const allele of pair) {
-        if (typeof allele === 'string') literalMarkers.add(variant);
-        else if (!pedAlleleLabel(variantMeta.get(variant), allele)) unmappedMarkers.add(variant);
-      }
-    }
-  }
-  if ([...unmappedMarkers].some((variant) => !literalMarkers.has(variant))) {
-    warnings.push(
-      'PLINK uses positive numeric labels (allele index + 1) for markers whose allele metadata cannot resolve all indices.',
-    );
-  }
-  if ([...unmappedMarkers].some((variant) => literalMarkers.has(variant))) {
-    warnings.push(
-      'PLINK marks indexed calls missing where marker metadata cannot relate them to literal allele labels. The original calls are in the staged matrix.',
-    );
-  }
-
-  return matrix.sampleOrder
-    .map((sample) => {
-      const row = ['0', matrix.sampleLabels.get(sample) ?? sample, '0', '0', '0', '0'];
-      const calls = matrix.genotypeAt.get(sample);
-      for (const variant of matrix.variantIdOrder) {
-        const cell = calls?.get(variant);
-        const pair =
-          cell && !cell.ambiguous ? splitAlleles(cell.text, unknown, separators) : undefined;
-        const unmapped = unmappedMarkers.has(variant);
-        if (
-          !pair ||
-          (unmapped &&
-            literalMarkers.has(variant) &&
-            pair.some((allele) => typeof allele === 'number'))
-        ) {
-          row.push('0', '0');
-          continue;
-        }
-        const meta = variantMeta.get(variant);
-        for (const allele of pair) {
-          if (typeof allele === 'string') row.push(allele);
-          else row.push(unmapped ? String(allele + 1) : (pedAlleleLabel(meta, allele) ?? '0'));
-        }
-      }
-      return row.join('\t');
-    })
-    .join('\n');
-}
-
-function pedAlleleLabel(meta: VariantMeta | undefined, index: number): string | undefined {
-  return index === 0 ? indexedAlleleLabel(meta?.ref) : meta?.altByIndex?.[index - 1];
-}
-
-/**
- * Decode the first two tokens for PED. A single known allele is duplicated;
- * a missing token makes the whole pair missing.
- */
-function splitAlleles(
-  gt: string,
-  unknown: string,
-  separators: string[],
-): [string | number, string | number] | undefined {
-  if (gt.trim() === unknown) return;
-  const nextSeparator = (start: number) => {
-    let position = gt.length;
-    let width = 0;
-    for (const sep of separators) {
-      const found = gt.indexOf(sep, start);
-      if (found !== -1 && found < position) {
-        position = found;
-        width = sep.length;
-      }
-    }
-    return { position, width };
-  };
-  const first = nextSeparator(0);
-  const a = gt.slice(0, first.position).trim();
-  const start = first.position + first.width;
-  const b = first.width ? gt.slice(start, nextSeparator(start).position).trim() : a;
-  if (!a || !b || a === unknown || b === unknown || a === '.' || b === '.') return;
-  const asAllele = (token: string): string | number => {
-    const index = Number(token);
-    return Number.isSafeInteger(index) &&
-      index >= 0 &&
-      index < Number.MAX_SAFE_INTEGER &&
-      String(index) === token
-      ? index
-      : token;
-  };
-  return [asAllele(a), asAllele(b)];
-}
-
-function indexedAlleleLabel(value: unknown): string | undefined {
-  if (typeof value !== 'string') return;
-  const label = value.trim();
-  if (label && label !== '0' && label !== '.') {
-    return label;
-  }
-  return;
-}
-
-// ---------------------------------------------------------------------------
-// Variant coordinate metadata pull (vcf-lite / plink only)
-// ---------------------------------------------------------------------------
-
-interface CollectVariantMetadataArgs {
-  client: BrapiClient;
-  connection: RegisteredServer;
-  ctx: Context;
-  dialect: BrapiDialect;
-  neededIds: Set<string>;
-  variantSetDbId: string;
-  warnings: string[];
-}
-
-/**
- * Page `/variants?variantSetDbId=…` and build a `variantDbId → VariantMeta` map
- * (CHROM/POS/REF/ALT) for the variants in the matrix. Best-effort: a dropped
- * filter, missing endpoint, or fetch error degrades to placeholders plus a
- * warning rather than failing the export. Stops early once every needed variant
- * is covered.
- */
-async function collectVariantMetadata(
-  args: CollectVariantMetadataArgs,
-): Promise<Map<string, VariantMeta>> {
-  const { client, connection, dialect, variantSetDbId, neededIds, ctx, warnings } = args;
-  const meta = new Map<string, VariantMeta>();
-  try {
-    const adapted = dialect.adaptGetFilters('variants', { variantSetDbIds: [variantSetDbId] });
-    if (adapted.dropped.length > 0 && Object.keys(adapted.filters).length === 0) {
-      warnings.push(
-        `Variant metadata pull skipped: dialect '${dialect.id}' dropped the variantSetDbId filter on /variants. CHROM/POS/REF/ALT use placeholders.`,
-      );
-      return meta;
-    }
-
-    let page = 0;
-    let totalPages = 1;
-    let scanned = 0;
-    while (page < totalPages && scanned < MAX_VARIANT_METADATA_ROWS && !ctx.signal.aborted) {
-      const opts = buildRequestOptions(connection, {
-        ...(adapted.filters as Record<
-          string,
-          string | number | boolean | readonly (string | number)[] | undefined
-        >),
-        pageSize: VARIANT_METADATA_PAGE_SIZE,
-        page,
-      });
-      const envelope = await client.get<
-        BrapiListResult<Record<string, unknown>> | Record<string, unknown>[]
-      >(connection.baseUrl, '/variants', ctx, opts);
-      const rows = extractRows<Record<string, unknown>>(envelope.result);
-      for (const r of rows) {
-        scanned++;
-        const vid = asString(r.variantDbId);
-        if (!vid || !neededIds.has(vid)) continue;
-        meta.set(vid, extractVariantMeta(r));
-      }
-      totalPages = envelope.metadata?.pagination?.totalPages ?? page + 1;
-      page++;
-      if (meta.size === neededIds.size) break;
-      if (rows.length < VARIANT_METADATA_PAGE_SIZE) break;
-    }
-  } catch {
-    if (ctx.signal.aborted)
-      throw requestCancelled('Genotype matrix export cancelled by the caller.');
-    warnings.push(
-      'Variant metadata could not be fully retrieved. Coordinates and allele labels use fallbacks where metadata is missing.',
-    );
-  }
-  return meta;
-}
-
-function extractVariantMeta(r: Record<string, unknown>): VariantMeta {
-  const meta: VariantMeta = {};
-  const chrom = asString(r.referenceName);
-  if (chrom) meta.chrom = chrom;
-  const position = exportPosition(r.start);
-  if (position !== undefined) meta.pos = String(position);
-  const ref = asString(r.referenceBases);
-  if (ref) meta.ref = ref;
-  const altRaw = r.alternateBases;
-  if (Array.isArray(altRaw)) {
-    const alts = altRaw.filter((a): a is string => typeof a === 'string' && a.length > 0);
-    if (alts.length > 0) meta.alt = alts.join(',');
-    meta.altByIndex = altRaw.map(indexedAlleleLabel);
-  } else {
-    const alt = asString(altRaw);
-    if (alt) {
-      meta.alt = alt;
-      meta.altByIndex = alt.split(',').map(indexedAlleleLabel);
-    }
-  }
-  return meta;
-}
-
-/** BrAPI Variant.start is zero-based; VCF POS and PLINK base-pair positions are one-based. */
-function exportPosition(start: unknown): number | undefined {
-  let value = start;
-  if (typeof start === 'string') {
-    const text = start.trim();
-    if (!text || ['0x', '0o', '0b'].includes(text.slice(0, 2).toLowerCase())) return;
-    value = Number(text);
-  }
-  if (
-    typeof value !== 'number' ||
-    !Number.isSafeInteger(value) ||
-    value < 0 ||
-    value >= Number.MAX_SAFE_INTEGER
-  )
-    return;
-  return value + 1;
 }

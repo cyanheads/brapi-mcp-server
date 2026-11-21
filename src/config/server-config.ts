@@ -108,7 +108,7 @@ export const ServerConfigSchema = z.object({
     .int()
     .positive()
     .default(3_600)
-    .describe('TTL for ReferenceDataCache entries (programs, trials, locations, crops).'),
+    .describe('TTL for ReferenceDataCache entries (programs, trials, locations).'),
 
   requestTimeoutMs: z.coerce
     .number()
@@ -168,7 +168,7 @@ export const ServerConfigSchema = z.object({
     .max(GENOTYPE_MATRIX_MAX_COLUMNS_CEILING)
     .default(10_000)
     .describe(
-      'Hard ceiling on the number of distinct variant columns brapi_export_genotype_matrix pivots into a single germplasm × variant matrix. Bounds the wide canvas dataframe, the variantColumnLegend, and any VCF/PLINK serialization — all of which scale with column count independently of the row (call) pull cap. A schema-legal skew (one germplasm × many variants) can otherwise drive the column count to the full genotypeCallsMaxPull budget and emit a multi-megabyte legend. brapi_export_genotype_matrix accepts a maxColumns override but clamps it to this value, so the ceiling holds regardless of caller input. Default 10,000 (legend ≈ 250 KB) — an order of magnitude below genotypeCallsMaxPull; maximum 500,000. Raise it only when a wide panel genuinely needs more variant columns inline.',
+      'Hard ceiling on the number of distinct variant columns brapi_export_genotype_matrix pivots into a single call set × variant matrix. Bounds the wide canvas dataframe, the variantColumnLegend, and any VCF/PLINK serialization — all of which scale with column count independently of the row (call) pull cap. A schema-legal skew (one call set × many variants) can otherwise drive the column count to the full genotypeCallsMaxPull budget and emit a multi-megabyte legend. brapi_export_genotype_matrix accepts a maxColumns override but clamps it to this value, so the ceiling holds regardless of caller input. Default 10,000 (legend ≈ 250 KB) — an order of magnitude below genotypeCallsMaxPull; maximum 500,000. Raise it only when a wide panel genuinely needs more variant columns inline.',
     ),
 
   canvasDropEnabled: z

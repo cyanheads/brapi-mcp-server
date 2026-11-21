@@ -8,7 +8,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, timeout } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetServerConfig } from '@/config/server-config.js';
@@ -24,6 +24,7 @@ import {
   type MockFetcher,
   pathnameOf,
   resetTestServices,
+  TEST_CONFIG,
 } from './_tool-test-helpers.js';
 
 /** Build a minimal call row. */
@@ -69,7 +70,7 @@ function renderExport(
     dataframe: {
       tableName: overrides.dataframeTableName ?? 'df_AAAAA_BBBBB',
       rowCount: 1,
-      columns: ['germplasmDbId', ...Object.keys(legend)],
+      columns: ['callSetDbId', 'callSetName', 'germplasmDbId', ...Object.keys(legend)],
       createdAt: '2026-06-01T00:00:00.000Z',
       expiresAt: '2999-01-01T00:00:00.000Z',
     },
@@ -83,15 +84,21 @@ function renderExport(
   return parts[0]!.text;
 }
 
+/** An advertised call: a bare service name is advertised for POST. */
+type AdvertisedCall = string | { methods: string[]; service: string };
+
 /** Register a default connection with /search/calls advertised. */
-async function connect(fetcher: MockFetcher, calls = ['search/calls']) {
+async function connect(fetcher: MockFetcher, calls: AdvertisedCall[] = ['search/calls']) {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
           serverName: 'Test',
-          calls: calls.map((service) => ({ service, methods: ['POST'], versions: ['2.1'] })),
+          calls: calls.map((entry) => ({
+            ...(typeof entry === 'string' ? { service: entry, methods: ['POST'] } : entry),
+            versions: ['2.1'],
+          })),
         }),
       );
     }
@@ -150,7 +157,14 @@ describe('brapi_export_genotype_matrix tool', () => {
       const { result, structured, text } = await run(ctx, format);
       expect(result.isError).toBeFalsy();
       expect(register.mock.calls[0]?.[1].rows).toEqual([
-        { germplasmDbId: 'cs-1', v0: '0', v1: '0.5', v2: '0/1' },
+        {
+          callSetDbId: 'cs-1',
+          callSetName: 'TME419',
+          germplasmDbId: null,
+          v0: '0',
+          v1: '0.5',
+          v2: '0/1',
+        },
       ]);
       expect(structured.warnings).toEqual(
         expect.arrayContaining([expect.stringContaining('dosage')]),
@@ -181,7 +195,7 @@ describe('brapi_export_genotype_matrix tool', () => {
         rowCount: 0,
         columnCount: 0,
         variantColumnLegend: {},
-        dataframe: { columns: ['germplasmDbId'], rowCount: 0 },
+        dataframe: { columns: ['callSetDbId', 'callSetName', 'germplasmDbId'], rowCount: 0 },
         notice: expect.stringContaining('No calls matched'),
       });
       const tableName = (structured.dataframe as { tableName: string }).tableName;
@@ -330,7 +344,7 @@ describe('brapi_export_genotype_matrix tool', () => {
     expect(structured.ped).toBe('0\tTME419\t0\t0\t0\t0\t1\t2\t0\t0');
     expect(text).toContain(structured.ped);
     expect(register.mock.calls[0]?.[1].rows).toEqual([
-      { germplasmDbId: 'cs-1', v0: '0::1', v1: '0::NA' },
+      { callSetDbId: 'cs-1', callSetName: 'TME419', germplasmDbId: null, v0: '0::1', v1: '0::NA' },
     ]);
   });
 
@@ -949,10 +963,10 @@ describe('brapi_export_genotype_matrix tool', () => {
     ).not.toThrow();
   });
 
-  it('clamps columnCount to the deployment ceiling on a skewed one-germplasm pull', async () => {
+  it('clamps columnCount to the deployment ceiling on a skewed one-call-set pull', async () => {
     vi.stubEnv('BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS', '2');
     const ctx = await connect(fetcher);
-    // The schema-legal skew #46 bounds: one germplasm × five distinct variants.
+    // The schema-legal skew #46 bounds: one call set × five distinct variants.
     const rows = Array.from({ length: 5 }, (_, i) =>
       call({ callSetDbId: 'cs-1', variantDbId: `v-${i + 1}` }),
     );
@@ -982,14 +996,14 @@ describe('brapi_export_genotype_matrix tool', () => {
     expect(JSON.stringify(brapiExportGenotypeMatrix.format(result))).toContain(
       'column ceiling (2)',
     );
-    // The single germplasm row survives; only beyond-cap variant columns drop.
+    // The single call-set row survives; only beyond-cap variant columns drop.
     expect(result.rowCount).toBe(1);
     expect(result.dataframe.columns).toContain('germplasmDbId');
   });
 
-  it('preserves every germplasm row when a germplasm covers only beyond-cap variants (#46)', async () => {
+  it('preserves every call-set row when a call set covers only beyond-cap variants (#46)', async () => {
     const ctx = await connect(fetcher);
-    // Germplasm-major order with disjoint variant coverage — the common
+    // Call-set-major order with disjoint variant coverage — the common
     // Breedbase /search/calls shape. cs-1 fills the 2-column cap (v-1, v-2);
     // cs-2's calls reference ONLY v-3/v-4, both net-new after the cap filled.
     // cs-2 must still appear — as an all-null row — not vanish from the matrix.
@@ -1010,7 +1024,7 @@ describe('brapi_export_genotype_matrix tool', () => {
       ctx,
     );
 
-    // Both germplasm survive — the point of the fix. Pre-fix, cs-2 (whose calls
+    // Both call sets survive — the point of the fix. Pre-fix, cs-2 (whose calls
     // all hit the beyond-cap `continue`) was never registered, so rowCount was 1
     // and its entire row silently disappeared.
     expect(result.rowCount).toBe(2);
@@ -1090,6 +1104,8 @@ describe('brapi_export_genotype_matrix tool', () => {
     // Named the retrieval path a content-only client can actually take...
     expect(text).toContain('df_QWERT_12345');
     expect(text).toContain('brapi_dataframe_query');
+    expect(text).toContain('Every call set × variant genotype');
+    expect(text).toContain('# Genotype matrix — vcf-lite — 1 call sets × 1 variants');
     // ...without overclaiming it as a complete substitute for the text.
     expect(text).toContain('genotypes only');
     expect(text).toContain('CHROM/POS/REF/ALT');
@@ -1144,5 +1160,1050 @@ describe('brapi_export_genotype_matrix variant-set discovery', () => {
     const description = brapiExportGenotypeMatrix.input.shape.variantSetDbId.description ?? '';
     expect(description).toContain('brapi_raw_get({ path: "/variantsets" })');
     expect(description).toContain('params.studyDbId');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared fixtures for call-set identity (#128), variantDbIds (#129), and the
+// pull / metadata disclosures.
+// ---------------------------------------------------------------------------
+
+/** Three of the BrAPI test server's `variantset1` call sets, as GET /callsets returns them. */
+const CALL_SETS = [
+  { callSetDbId: 'callset01', callSetName: 'P2', sampleDbId: 'sample3' },
+  { callSetDbId: 'callset02', callSetName: 'F1-1', sampleDbId: 'sample2' },
+  { callSetDbId: 'callset03', callSetName: 'F1-2', sampleDbId: 'sample1' },
+];
+
+const SAMPLE_GERMPLASM: Record<string, string> = {
+  sample1: 'germplasm1',
+  sample2: 'germplasm2',
+  sample3: 'germplasm3',
+};
+
+/** `count` call sets `cs<i>`, each naming its own sample `s<i>`. */
+function sampleBackedCallSets(count: number) {
+  return Array.from({ length: count }, (_, i) => ({
+    callSetDbId: `cs${i}`,
+    callSetName: `line-${i}`,
+    sampleDbId: `s${i}`,
+  }));
+}
+
+/** A genotyping server: calls search, call-set listing, and sample search. */
+const GENOTYPING_CALLS: AdvertisedCall[] = [
+  'search/calls',
+  { service: 'callsets', methods: ['GET'] },
+  'search/samples',
+];
+
+/** Call-set-major call rows: every call set called at every variant, in order. */
+function callsFor(
+  callSets: readonly { callSetDbId?: string; callSetName?: string }[],
+  variants: readonly string[] = ['variant01', 'variant02'],
+): Record<string, unknown>[] {
+  return callSets.flatMap((cs) =>
+    variants.map((variantDbId) => ({
+      ...(cs.callSetDbId !== undefined && { callSetDbId: cs.callSetDbId }),
+      ...(cs.callSetName !== undefined && { callSetName: cs.callSetName }),
+      variantDbId,
+      variantSetDbId: 'vset-1',
+      genotype: { values: ['0', '1'] },
+    })),
+  );
+}
+
+interface GenotypingUpstream {
+  /** Rows GET /callsets pages through (default `CALL_SETS`). */
+  callSets?: Record<string, unknown>[];
+  /** Call rows POST /search/calls returns (one page unless `callsPage` overrides). */
+  calls?: Record<string, unknown>[];
+  /** Replace the GET /callsets handler. */
+  callsets?: (url: URL) => Response | Promise<Response>;
+  /** Replace the POST /search/calls handler. */
+  callsPage?: (body: Record<string, unknown>) => Response | Promise<Response>;
+  /** Replace the POST /search/samples handler. */
+  samples?: (body: Record<string, unknown>) => Response | Promise<Response>;
+  /** Replace the GET /variants handler. */
+  variants?: (url: URL) => Response | Promise<Response>;
+}
+
+/** Page a row list the way the BrAPI test server pages GET /callsets. */
+function pagedResponse(rows: readonly unknown[], url: URL): Response {
+  const pageSize = Number(url.searchParams.get('pageSize'));
+  const page = Number(url.searchParams.get('page'));
+  return jsonResponse({
+    metadata: {
+      pagination: {
+        currentPage: page,
+        pageSize,
+        totalCount: rows.length,
+        totalPages: Math.ceil(rows.length / pageSize),
+      },
+    },
+    result: { data: rows.slice(page * pageSize, (page + 1) * pageSize) },
+  });
+}
+
+/** A scripted genotyping upstream; any other path fails the test. */
+function genotypingUpstream(up: GenotypingUpstream) {
+  return async (url: string, _timeoutMs: number, _ctx: unknown, init?: { body?: unknown }) => {
+    const u = new URL(String(url));
+    const body = () => JSON.parse(String(init?.body)) as Record<string, unknown>;
+    if (u.pathname.endsWith('/search/calls')) {
+      return up.callsPage ? up.callsPage(body()) : jsonResponse(envelope({ data: up.calls ?? [] }));
+    }
+    if (u.pathname.endsWith('/callsets')) {
+      return up.callsets ? up.callsets(u) : pagedResponse(up.callSets ?? CALL_SETS, u);
+    }
+    if (u.pathname.endsWith('/search/samples')) {
+      if (up.samples) return up.samples(body());
+      const ids = body().sampleDbIds as string[];
+      return jsonResponse(
+        envelope({
+          data: ids
+            .filter((id) => SAMPLE_GERMPLASM[id] !== undefined)
+            .map((sampleDbId) => ({ sampleDbId, germplasmDbId: SAMPLE_GERMPLASM[sampleDbId] })),
+        }),
+      );
+    }
+    if (u.pathname.endsWith('/variants')) {
+      return up.variants ? up.variants(u) : jsonResponse(envelope({ data: [] }));
+    }
+    throw new Error(`unmocked fetch: ${u.href}`);
+  };
+}
+
+/** A POST /search/samples answer naming germplasm `g-<sampleDbId>` for every requested sample. */
+function germplasmPerSample(body: Record<string, unknown>): Response {
+  return jsonResponse(
+    envelope({
+      data: (body.sampleDbIds as string[]).map((sampleDbId) => ({
+        sampleDbId,
+        germplasmDbId: `g-${sampleDbId}`,
+      })),
+    }),
+  );
+}
+
+/** The fetcher calls whose path ends with `suffix`. */
+function requestsTo(fetcher: MockFetcher, suffix: string) {
+  return fetcher.mock.calls.filter(([url]) => pathnameOf(url).endsWith(suffix));
+}
+
+/** JSON body of the first POST /search/calls request. */
+function callsSearchBody(fetcher: MockFetcher): Record<string, unknown> {
+  const [request] = requestsTo(fetcher, '/search/calls');
+  return JSON.parse(String(request?.[3]?.body)) as Record<string, unknown>;
+}
+
+/** Run the export through the real tool contract against the connection on `ctx`. */
+async function runExport(ctx: Context, input: Record<string, unknown>) {
+  const definition = {
+    ...brapiExportGenotypeMatrix,
+    handler: (parsed, contractCtx) =>
+      brapiExportGenotypeMatrix.handler(parsed, { ...contractCtx, state: ctx.state }),
+  } satisfies typeof brapiExportGenotypeMatrix;
+  const result = await runToolContract(
+    definition,
+    { variantSetDbId: 'vset-1', ...input },
+    { context: { tenantId: 't1' } },
+  );
+  const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n');
+  return { result, structured: result.structuredContent as Record<string, unknown>, text };
+}
+
+function warningsOf(structured: Record<string, unknown>): string[] {
+  return structured.warnings as string[];
+}
+
+const IDENTITY_COLUMNS = ['callSetDbId', 'callSetName', 'germplasmDbId'];
+
+describe('brapi_export_genotype_matrix call-set rows and germplasm (#128)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetTestServices();
+    vi.unstubAllEnvs();
+  });
+
+  it('leads every row with callSetDbId, callSetName, and the germplasm resolved through its sample', async () => {
+    vi.stubEnv('BRAPI_COMPANION_TIMEOUT_MS', '750');
+    resetServerConfig();
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(genotypingUpstream({ calls: callsFor(CALL_SETS) }));
+
+    const { result, structured, text } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(register.mock.calls[0]?.[1].rows).toEqual([
+      {
+        callSetDbId: 'callset01',
+        callSetName: 'P2',
+        germplasmDbId: 'germplasm3',
+        variant01: '0/1',
+        variant02: '0/1',
+      },
+      {
+        callSetDbId: 'callset02',
+        callSetName: 'F1-1',
+        germplasmDbId: 'germplasm2',
+        variant01: '0/1',
+        variant02: '0/1',
+      },
+      {
+        callSetDbId: 'callset03',
+        callSetName: 'F1-2',
+        germplasmDbId: 'germplasm1',
+        variant01: '0/1',
+        variant02: '0/1',
+      },
+    ]);
+    expect((structured.dataframe as { columns: string[] }).columns).toEqual([
+      ...IDENTITY_COLUMNS,
+      'variant01',
+      'variant02',
+    ]);
+    expect(structured).toMatchObject({ rowCount: 3, columnCount: 2, warnings: [] });
+    expect(text).toContain('3 call sets × 2 variants');
+
+    // Batch lookups only: one call-set page for the variant set (singular GET
+    // filter — the plural is ignored upstream), one sample search for the
+    // distinct samples. Each on the companion timeout.
+    const callsets = requestsTo(fetcher, '/callsets');
+    expect(callsets).toHaveLength(1);
+    const callsetsUrl = new URL(String(callsets[0]?.[0]));
+    expect(callsetsUrl.searchParams.get('variantSetDbId')).toBe('vset-1');
+    expect(callsetsUrl.searchParams.has('variantSetDbIds')).toBe(false);
+    const samples = requestsTo(fetcher, '/search/samples');
+    expect(samples).toHaveLength(1);
+    expect(JSON.parse(String(samples[0]?.[3]?.body))).toMatchObject({
+      sampleDbIds: ['sample3', 'sample2', 'sample1'],
+    });
+    for (const [, timeoutMs] of [...callsets, ...samples]) {
+      expect(timeoutMs).toBe(750);
+    }
+  });
+
+  it('pages /callsets and splits the sample search until every call set resolves', async () => {
+    // Test page size is 10: twelve call sets need two call-set pages and two
+    // sample searches.
+    const callSets = sampleBackedCallSets(12);
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor(callSets, ['v1']),
+        callSets,
+        samples: germplasmPerSample,
+      }),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(warningsOf(structured)).toEqual([]);
+    const rows = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(rows.map((r) => r.germplasmDbId)).toEqual(callSets.map((cs) => `g-${cs.sampleDbId}`));
+    const pages = requestsTo(fetcher, '/callsets').map(([url]) =>
+      new URL(String(url)).searchParams.get('page'),
+    );
+    expect(pages).toEqual(['0', '1']);
+    const sampleBatches = requestsTo(fetcher, '/search/samples').map(
+      ([, , , init]) => (JSON.parse(String(init?.body)).sampleDbIds as string[]).length,
+    );
+    expect(sampleBatches).toEqual([10, 2]);
+  });
+
+  it('stops a /callsets walk whose upstream ignores page, keeping what resolved', async () => {
+    const callSets = sampleBackedCallSets(12);
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor(callSets, ['v1']),
+        // Every page serves the first ten rows and claims more exist.
+        callsets: () =>
+          jsonResponse({
+            metadata: { pagination: { totalCount: 12, totalPages: 2, pageSize: 10 } },
+            result: { data: callSets.slice(0, 10) },
+          }),
+        samples: germplasmPerSample,
+      }),
+    );
+
+    const { result, structured, text } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(requestsTo(fetcher, '/callsets')).toHaveLength(2);
+    const rows = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(rows.slice(0, 10).map((r) => r.germplasmDbId)).toEqual(
+      callSets.slice(0, 10).map((cs) => `g-${cs.sampleDbId}`),
+    );
+    expect(rows.slice(10).map((r) => [r.callSetDbId, r.germplasmDbId])).toEqual([
+      ['cs10', null],
+      ['cs11', null],
+    ]);
+    const germplasmWarnings = warningsOf(structured).filter((w) => w.includes('germplasmDbId'));
+    expect(germplasmWarnings).toHaveLength(1);
+    expect(germplasmWarnings[0]).toContain('germplasmDbId is null for 2 of 12 call sets');
+    expect(germplasmWarnings[0]).toContain('/callsets');
+    expect(text).toContain('germplasmDbId is null for 2 of 12 call sets');
+  });
+
+  it('ends the /callsets walk once every pulled call set is listed', async () => {
+    // The variant set lists 25 call sets over three pages; the pull holds the first five.
+    const callSets = sampleBackedCallSets(25);
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor(callSets.slice(0, 5), ['v1']),
+        callSets,
+        samples: germplasmPerSample,
+      }),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(requestsTo(fetcher, '/callsets')).toHaveLength(1);
+    const rows = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(rows.map((r) => r.germplasmDbId)).toEqual(['g-s0', 'g-s1', 'g-s2', 'g-s3', 'g-s4']);
+    expect(warningsOf(structured)).toEqual([]);
+  });
+
+  it('stops a /callsets walk at its 50,000-row cap', async () => {
+    // A frozen clock keeps the companion timeout from ending the walk first.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor(CALL_SETS),
+        // Full pages of other call sets: the three pulled never appear.
+        callsets: (url) => {
+          const page = Number(url.searchParams.get('page'));
+          return jsonResponse({
+            metadata: { pagination: { currentPage: page, totalPages: 60 } },
+            result: {
+              data: Array.from({ length: 1_000 }, (_, i) => ({
+                callSetDbId: `other-${page}-${i}`,
+                sampleDbId: `other-sample-${page}-${i}`,
+              })),
+            },
+          });
+        },
+      }),
+    );
+
+    const { result, structured, text } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(requestsTo(fetcher, '/callsets')).toHaveLength(50);
+    expect(requestsTo(fetcher, '/search/samples')).toHaveLength(0);
+    const capped =
+      'germplasmDbId is null for 3 of 3 call sets: the GET /callsets scan stopped at its 50,000-row cap.';
+    expect(warningsOf(structured).filter((w) => w.includes('germplasmDbId'))).toEqual([
+      expect.stringContaining(capped),
+    ]);
+    expect(text).toContain(capped);
+  });
+
+  it('polls an asynchronous sample search on the companion timeout', async () => {
+    // A frozen clock keeps each request's timeout at the full companion budget.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.stubEnv('BRAPI_COMPANION_TIMEOUT_MS', '750');
+    resetServerConfig();
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    const upstream = genotypingUpstream({
+      calls: callsFor(CALL_SETS),
+      samples: () =>
+        jsonResponse({ metadata: {}, result: { searchResultsDbId: 'samples-job' } }, 202),
+    });
+    fetcher.mockImplementation(
+      async (url: string, timeoutMs: number, fetchCtx: unknown, init?: { body?: unknown }) =>
+        pathnameOf(url).endsWith('/search/samples/samples-job')
+          ? jsonResponse(
+              envelope({
+                data: Object.entries(SAMPLE_GERMPLASM).map(([sampleDbId, germplasmDbId]) => ({
+                  sampleDbId,
+                  germplasmDbId,
+                })),
+              }),
+            )
+          : upstream(url, timeoutMs, fetchCtx, init),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    const rows = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(rows.map((r) => [r.callSetDbId, r.germplasmDbId])).toEqual([
+      ['callset01', 'germplasm3'],
+      ['callset02', 'germplasm2'],
+      ['callset03', 'germplasm1'],
+    ]);
+    expect(warningsOf(structured)).toEqual([]);
+    const polls = requestsTo(fetcher, '/search/samples/samples-job');
+    expect(polls).toHaveLength(1);
+    const pollUrl = new URL(String(polls[0]?.[0]));
+    expect([pollUrl.searchParams.get('page'), pollUrl.searchParams.get('pageSize')]).toEqual([
+      '0',
+      '10',
+    ]);
+    expect(polls[0]?.[1]).toBe(750);
+  });
+
+  it('ends a /callsets walk at one companion timeout, not the call deadline', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.stubEnv('BRAPI_COMPANION_TIMEOUT_MS', '500');
+    resetServerConfig();
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor(CALL_SETS),
+        // Ignores variantSetDbId: endless pages of other call sets, each
+        // answering inside the companion timeout but taking 40% of it.
+        callsets: (url) => {
+          vi.setSystemTime(Date.now() + 200);
+          const page = url.searchParams.get('page');
+          return jsonResponse({
+            metadata: { pagination: { totalCount: 100_000, totalPages: 10_000, pageSize: 10 } },
+            result: {
+              data: Array.from({ length: 10 }, (_, i) => ({
+                callSetDbId: `other-${page}-${i}`,
+                sampleDbId: `other-sample-${page}-${i}`,
+              })),
+            },
+          });
+        },
+      }),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.rowCount).toBe(3);
+    // Pages start at 0, 200, and 400 ms of the 500 ms budget; a fourth would start past it.
+    expect(requestsTo(fetcher, '/callsets')).toHaveLength(3);
+    const germplasmWarnings = warningsOf(structured).filter((w) => w.includes('germplasmDbId'));
+    expect(germplasmWarnings).toEqual([
+      expect.stringContaining('germplasmDbId is null for 3 of 3 call sets'),
+    ]);
+    expect(germplasmWarnings[0]).toContain('GET /callsets');
+  });
+
+  it('ends the sample search at one companion timeout, keeping the batches it resolved', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.stubEnv('BRAPI_COMPANION_TIMEOUT_MS', '500');
+    resetServerConfig();
+    // Test page size is 10: forty call sets need four sample batches.
+    const callSets = sampleBackedCallSets(40);
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor(callSets, ['v1']),
+        callSets,
+        samples: (body) => {
+          vi.setSystemTime(Date.now() + 200);
+          return germplasmPerSample(body);
+        },
+      }),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    // Batches start at 0, 200, and 400 ms of the 500 ms budget; the fourth would start past it.
+    expect(requestsTo(fetcher, '/search/samples')).toHaveLength(3);
+    const rows = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(rows.map((r) => r.germplasmDbId)).toEqual([
+      ...callSets.slice(0, 30).map((cs) => `g-${cs.sampleDbId}`),
+      ...Array(10).fill(null),
+    ]);
+    const germplasmWarnings = warningsOf(structured).filter((w) => w.includes('germplasmDbId'));
+    expect(germplasmWarnings).toEqual([
+      expect.stringContaining('germplasmDbId is null for 10 of 40 call sets'),
+    ]);
+    expect(germplasmWarnings[0]).toContain('POST /search/samples');
+  });
+
+  const failing = () => {
+    throw new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Upstream failed.', {
+      status: 500,
+      errorSource: 'FetchHttpError',
+    });
+  };
+  const stalled = () => {
+    throw timeout(`Fetch timed out after ${TEST_CONFIG.companionTimeoutMs}ms`, {
+      errorSource: 'FetchTimeout',
+    });
+  };
+
+  it.each([
+    {
+      name: 'GET /callsets is not advertised',
+      advertised: ['search/calls', 'search/samples'] as AdvertisedCall[],
+      upstream: {},
+      lookups: [0, 0],
+      reason: 'GET /callsets',
+    },
+    {
+      name: 'GET /callsets fails',
+      advertised: GENOTYPING_CALLS,
+      upstream: { callsets: failing },
+      lookups: [1, 0],
+      reason: 'GET /callsets',
+    },
+    {
+      name: 'GET /callsets times out',
+      advertised: GENOTYPING_CALLS,
+      upstream: { callsets: stalled },
+      lookups: [1, 0],
+      reason: 'GET /callsets',
+    },
+    {
+      name: 'POST /search/samples is not advertised',
+      advertised: ['search/calls', { service: 'callsets', methods: ['GET'] }] as AdvertisedCall[],
+      upstream: {},
+      lookups: [1, 0],
+      reason: 'POST /search/samples',
+    },
+    {
+      name: 'POST /search/samples fails',
+      advertised: GENOTYPING_CALLS,
+      upstream: { samples: failing },
+      lookups: [1, 1],
+      reason: 'POST /search/samples',
+    },
+    {
+      name: 'GET /callsets answers HTTP 401',
+      advertised: GENOTYPING_CALLS,
+      upstream: {
+        callsets: () => {
+          throw new McpError(JsonRpcErrorCode.Unauthorized, 'Fetch failed. Status: 401', {
+            status: 401,
+          });
+        },
+      },
+      lookups: [1, 0],
+      reason: 'GET /callsets',
+    },
+    {
+      name: 'GET /callsets answers HTTP 200 with result: null (SGN)',
+      advertised: GENOTYPING_CALLS,
+      upstream: { callsets: () => jsonResponse({ metadata: {}, result: null }) },
+      lookups: [1, 0],
+      reason: 'not listed by GET /callsets',
+    },
+    {
+      name: 'POST /search/samples answers HTTP 403',
+      advertised: GENOTYPING_CALLS,
+      upstream: {
+        samples: () => {
+          throw new McpError(JsonRpcErrorCode.Forbidden, 'Fetch failed. Status: 403', {
+            status: 403,
+          });
+        },
+      },
+      lookups: [1, 1],
+      reason: 'POST /search/samples',
+    },
+    {
+      name: 'POST /search/samples times out',
+      advertised: GENOTYPING_CALLS,
+      upstream: { samples: stalled },
+      lookups: [1, 1],
+      reason: 'POST /search/samples',
+    },
+    {
+      name: 'POST /search/samples answers HTTP 200 with result: null (SGN)',
+      advertised: GENOTYPING_CALLS,
+      upstream: { samples: () => jsonResponse({ metadata: {}, result: null }) },
+      lookups: [1, 1],
+      reason: 'POST /search/samples returned no germplasmDbId for 3',
+    },
+  ])('keeps the export with null germplasm and one warning when $name', async (scenario) => {
+    const { advertised, upstream, lookups, reason } = scenario;
+    // Retries are on for the deployment; a companion lookup still makes one attempt.
+    resetTestServices();
+    fetcher = initTestServices({ ...TEST_CONFIG, retryMaxAttempts: 3 });
+    const ctx = await connect(fetcher, advertised);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(genotypingUpstream({ calls: callsFor(CALL_SETS), ...upstream }));
+
+    const { result, structured, text } = await runExport(ctx, { format: 'vcf-lite' });
+
+    expect(result.isError).toBeFalsy();
+    const rows = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(rows.map((r) => [r.callSetDbId, r.germplasmDbId])).toEqual([
+      ['callset01', null],
+      ['callset02', null],
+      ['callset03', null],
+    ]);
+    const germplasmWarnings = warningsOf(structured).filter((w) => w.includes('germplasmDbId'));
+    expect(germplasmWarnings).toHaveLength(1);
+    expect(germplasmWarnings[0]).toContain('germplasmDbId is null for 3 of 3 call sets');
+    expect(germplasmWarnings[0]).toContain(reason);
+    expect(germplasmWarnings[0]).toContain('cannot be joined');
+    expect(text).toContain('germplasmDbId is null for 3 of 3 call sets');
+    expect([
+      requestsTo(fetcher, '/callsets').length,
+      requestsTo(fetcher, '/search/samples').length,
+    ]).toEqual(lookups);
+    // Text sample labels stay callSetName.
+    expect((structured.vcf as string).split('\n')[0]).toBe(
+      '#CHROM\tPOS\tID\tREF\tALT\tP2\tF1-1\tF1-2',
+    );
+  });
+
+  it('makes no lookup for an empty pull and stages the identity columns', async () => {
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    fetcher.mockImplementation(genotypingUpstream({ calls: [] }));
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(structured.dataframe).toMatchObject({ columns: IDENTITY_COLUMNS, rowCount: 0 });
+    expect(warningsOf(structured)).toEqual([]);
+  });
+
+  it('leaves callSetDbId null when a call row has none; a name never fills an ID column', async () => {
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor([{ callSetName: 'NoId' }, {}, CALL_SETS[0]!], ['v1']),
+      }),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(register.mock.calls[0]?.[1].rows).toEqual([
+      { callSetDbId: null, callSetName: 'NoId', germplasmDbId: null, v1: '0/1' },
+      { callSetDbId: null, callSetName: null, germplasmDbId: null, v1: '0/1' },
+      { callSetDbId: 'callset01', callSetName: 'P2', germplasmDbId: 'germplasm3', v1: '0/1' },
+    ]);
+    expect(warningsOf(structured).filter((w) => w.includes('germplasmDbId'))).toEqual([
+      expect.stringContaining('germplasmDbId is null for 2 of 3 call sets'),
+    ]);
+  });
+
+  it('resolves Breedbase call sets from additionalInfo.germplasmDbId without a sample search', async () => {
+    vi.stubEnv('BRAPI_DEFAULT_DIALECT', 'breedbase');
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    // An accession-genotyped call set (stock = germplasm) and a tissue-sample
+    // one whose germplasm is its source accession.
+    const callSets = [
+      {
+        callSetDbId: '41',
+        callSetName: 'TMEB419',
+        sampleDbId: '41',
+        additionalInfo: { germplasmDbId: '41' },
+        studyDbId: null,
+      },
+      {
+        callSetDbId: '902',
+        callSetName: 'TMEB419_plant_1',
+        sampleDbId: '902',
+        additionalInfo: { germplasmDbId: '41' },
+        studyDbId: null,
+      },
+    ];
+    fetcher.mockImplementation(
+      genotypingUpstream({ calls: callsFor(callSets, ['S1_100']), callSets }),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    const rows = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(rows.map((r) => [r.callSetDbId, r.germplasmDbId])).toEqual([
+      ['41', '41'],
+      ['902', '41'],
+    ]);
+    expect(warningsOf(structured).filter((w) => w.includes('germplasmDbId'))).toEqual([]);
+    expect(requestsTo(fetcher, '/search/samples')).toHaveLength(0);
+    expect(
+      new URL(String(requestsTo(fetcher, '/callsets')[0]?.[0])).searchParams.get('variantSetDbId'),
+    ).toBe('vset-1');
+  });
+
+  it('leaves Breedbase sample-only call sets null without a sample search the dialect marks dead', async () => {
+    vi.stubEnv('BRAPI_DEFAULT_DIALECT', 'breedbase');
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    const callSets = [{ callSetDbId: '41', callSetName: 'TMEB419', sampleDbId: '41' }];
+    fetcher.mockImplementation(
+      genotypingUpstream({ calls: callsFor(callSets, ['S1_100']), callSets }),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    const rows = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(rows.map((r) => [r.callSetDbId, r.germplasmDbId])).toEqual([['41', null]]);
+    expect(warningsOf(structured).filter((w) => w.includes('germplasmDbId'))).toEqual([
+      expect.stringContaining(
+        "germplasmDbId is null for 1 of 1 call sets: the 'breedbase' dialect marks POST /search/samples as unavailable",
+      ),
+    ]);
+    expect(requestsTo(fetcher, '/search/samples')).toHaveLength(0);
+  });
+
+  it('keeps identity column names out of the variant columns', async () => {
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor([CALL_SETS[0]!], ['germplasmDbId', 'CallSetDbId', 'callSetName']),
+      }),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.variantColumnLegend).toEqual({
+      germplasmDbId_2: 'germplasmDbId',
+      CallSetDbId_2: 'CallSetDbId',
+      callSetName_2: 'callSetName',
+    });
+    expect(register.mock.calls[0]?.[1].rows).toEqual([
+      {
+        callSetDbId: 'callset01',
+        callSetName: 'P2',
+        germplasmDbId: 'germplasm3',
+        germplasmDbId_2: '0/1',
+        CallSetDbId_2: '0/1',
+        callSetName_2: '0/1',
+      },
+    ]);
+  });
+
+  it('sends no lookup once the call deadline is spent, and keeps the export', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        callsPage: () => {
+          // The pull itself used up the call's deadline for upstream requests.
+          vi.setSystemTime(Date.now() + TEST_CONFIG.callDeadlineMs + 1_000);
+          return jsonResponse(envelope({ data: callsFor(CALL_SETS) }));
+        },
+      }),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.rowCount).toBe(3);
+    expect(requestsTo(fetcher, '/callsets')).toHaveLength(0);
+    expect(warningsOf(structured).filter((w) => w.includes('germplasmDbId'))).toEqual([
+      expect.stringContaining('germplasmDbId is null for 3 of 3 call sets'),
+    ]);
+  });
+
+  it('propagates caller cancellation during the call-set lookup before staging', async () => {
+    const ctx = await connect(fetcher, GENOTYPING_CALLS);
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    const controller = new AbortController();
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor(CALL_SETS),
+        callsets: () => {
+          controller.abort();
+          throw controller.signal.reason;
+        },
+      }),
+    );
+
+    await expect(
+      brapiExportGenotypeMatrix.handler(
+        brapiExportGenotypeMatrix.input.parse({ variantSetDbId: 'vset-1', format: 'matrix-json' }),
+        { ...ctx, signal: controller.signal },
+      ),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it.each(['vcf-lite', 'plink'] as const)(
+    '%s labels a sample by callSetDbId when the calls carry no callSetName',
+    async (format) => {
+      const ctx = await connect(fetcher);
+      fetcher.mockImplementation(
+        genotypingUpstream({
+          calls: callsFor([{ callSetDbId: 'cs-9' }], ['v1']),
+        }),
+      );
+
+      const { result, structured, text } = await runExport(ctx, { format });
+
+      expect(result.isError).toBeFalsy();
+      if (format === 'vcf-lite') {
+        expect((structured.vcf as string).split('\n')[0]).toBe('#CHROM\tPOS\tID\tREF\tALT\tcs-9');
+      } else {
+        expect(structured.ped).toBe('0\tcs-9\t0\t0\t0\t0\t1\t2');
+      }
+      expect(text).toContain('cs-9');
+    },
+  );
+});
+
+describe('brapi_export_genotype_matrix variantDbIds (#129)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    resetTestServices();
+    vi.unstubAllEnvs();
+  });
+
+  /** Calls for the requested variants only, as a server that honors the filter answers. */
+  function honoring(callSets = CALL_SETS) {
+    return genotypingUpstream({
+      callsPage: (body) =>
+        jsonResponse(envelope({ data: callsFor(callSets, body.variantDbIds as string[]) })),
+    });
+  }
+
+  it.each([
+    { input: { variantDbIds: ['variant03', 'variant04'] }, expected: ['variant03', 'variant04'] },
+    { input: { variantDbId: 'variant03' }, expected: ['variant03'] },
+  ])('forwards $input to the calls search and pivots only them', async ({ input, expected }) => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(honoring());
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json', ...input });
+
+    expect(result.isError).toBeFalsy();
+    expect(callsSearchBody(fetcher)).toMatchObject({
+      variantSetDbIds: ['vset-1'],
+      variantDbIds: expected,
+    });
+    expect((structured.dataframe as { columns: string[] }).columns).toEqual([
+      ...IDENTITY_COLUMNS,
+      ...expected,
+    ]);
+    expect(warningsOf(structured).some((w) => w.includes('did not apply'))).toBe(false);
+  });
+
+  it('leaves out calls outside variantDbIds and says the server did not apply the filter', async () => {
+    const ctx = await connect(fetcher);
+    // The server ignores the filter and returns every variant.
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor(CALL_SETS, ['variant01', 'variant02', 'variant03', 'variant04']),
+      }),
+    );
+
+    const { result, structured, text } = await runExport(ctx, {
+      format: 'matrix-json',
+      variantDbIds: ['variant02'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({ rowCount: 3, columnCount: 1 });
+    expect((structured.dataframe as { columns: string[] }).columns).toEqual([
+      ...IDENTITY_COLUMNS,
+      'variant02',
+    ]);
+    const filterWarnings = warningsOf(structured).filter((w) => w.includes('did not apply'));
+    expect(filterWarnings).toHaveLength(1);
+    expect(filterWarnings[0]).toContain('9 returned calls');
+    expect(filterWarnings[0]).toContain('variantDbIds');
+    expect(text).toContain(filterWarnings[0]);
+  });
+
+  it('leaves the calls search body unchanged when variantDbIds is omitted', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(genotypingUpstream({ calls: callsFor(CALL_SETS) }));
+
+    const { result } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(callsSearchBody(fetcher)).toEqual({
+      variantSetDbIds: ['vset-1'],
+      pageSize: 10_000,
+      page: 0,
+    });
+  });
+
+  it('rejects a blank variantDbIds entry at parse and accepts a real one', () => {
+    const base = { variantSetDbId: 'vset-1', format: 'matrix-json' };
+    expect(() =>
+      brapiExportGenotypeMatrix.input.parse({ ...base, variantDbIds: ['ok', '  '] }),
+    ).toThrow();
+    expect(brapiExportGenotypeMatrix.input.parse({ ...base, variantDbIds: ['ok'] })).toMatchObject({
+      variantDbIds: ['ok'],
+    });
+  });
+
+  it('points a column cap at variantColumnLegend and variantDbIds, keeping every call set (#46)', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor(CALL_SETS, ['variant01', 'variant02', 'variant03', 'variant04']),
+      }),
+    );
+
+    const { result, structured, text } = await runExport(ctx, {
+      format: 'matrix-json',
+      maxColumns: 2,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({
+      rowCount: 3,
+      columnCount: 2,
+      truncated: true,
+      dataframe: { truncated: true },
+    });
+    expect((structured.dataframe as { maxRows?: number }).maxRows).toBeUndefined();
+    const [capWarning, ...others] = warningsOf(structured).filter((w) =>
+      w.includes('distinct variants'),
+    );
+    expect(others).toEqual([]);
+    expect(capWarning).toContain('more than 2 distinct variants');
+    expect(capWarning).toContain('variantColumnLegend');
+    expect(capWarning).toContain('Every call set is still present');
+    expect(capWarning).toContain('variantDbIds');
+    expect(capWarning).toContain('brapi_find_variants');
+    expect(capWarning).not.toContain('germplasm');
+    expect(text).toContain('variantColumnLegend');
+  });
+
+  it.each([
+    {
+      maxCalls: 10,
+      cut: 'The pull ended at call set `callset03` (F1-2), which carries 2 of the 4 kept variants; its other cells are null',
+    },
+    { maxCalls: 8, cut: undefined },
+  ])('names where a $maxCalls-call cap ended the pull', async ({ maxCalls, cut }) => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor(CALL_SETS, ['variant01', 'variant02', 'variant03', 'variant04']),
+      }),
+    );
+
+    const { result, structured, text } = await runExport(ctx, { format: 'matrix-json', maxCalls });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({ truncated: true, columnCount: 4 });
+    const warnings = warningsOf(structured);
+    // The shared pull-limit warning stays generic.
+    expect(warnings).toContain(
+      `Truncated at the pull limit (${maxCalls} calls): the calls collected up to it are kept. Narrow the filters and re-pull to reach the rest.`,
+    );
+    const pointer = warnings.find((w) => w.includes('variantDbIds'));
+    expect(pointer).toContain('brapi_find_variants');
+    expect(pointer).not.toContain('germplasm');
+    if (cut) {
+      expect(pointer).toContain(cut);
+      // content[] escapes the backticks around the call-set ID.
+      expect(text).toContain('callset03');
+      expect(text).toContain('which carries 2 of the 4 kept variants');
+    } else {
+      expect(pointer).not.toContain('ended at');
+      expect(text).toContain('export the variants in batches with variantDbIds');
+    }
+  });
+
+  it('points a deadline-stopped pull to variantDbIds', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        callsPage: () => {
+          vi.setSystemTime(Date.now() + TEST_CONFIG.callDeadlineMs + 1_000);
+          return jsonResponse({
+            metadata: { pagination: { totalPages: 2 } },
+            result: { data: callsFor(CALL_SETS, ['variant01', 'variant02']).slice(0, 5) },
+          });
+        },
+      }),
+    );
+
+    const { result, structured } = await runExport(ctx, { format: 'matrix-json' });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.truncated).toBe(true);
+    const warnings = warningsOf(structured);
+    expect(warnings.some((w) => w.startsWith('Genotype-call pull stopped after 5 call(s)'))).toBe(
+      true,
+    );
+    const pointer = warnings.find((w) => w.includes('variantDbIds'));
+    expect(pointer).toContain(
+      'The pull ended at call set `callset03` (F1-2), which carries 1 of the 2 kept variants',
+    );
+    expect(pointer).toContain('brapi_find_variants');
+  });
+});
+
+describe('brapi_export_genotype_matrix variant metadata scan cap', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    { name: 'stops at its 50,000-row cap', totalPages: 60, scanned: 50, warns: true },
+    { name: 'ends at the last page', totalPages: 3, scanned: 3, warns: false },
+  ])('discloses uncovered variants when the scan $name', async ({ totalPages, scanned, warns }) => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(
+      genotypingUpstream({
+        calls: callsFor([CALL_SETS[0]!], ['need-a', 'need-b']),
+        // Full pages of other variants: the matrix's two never appear.
+        variants: (url) => {
+          const page = Number(url.searchParams.get('page'));
+          return jsonResponse({
+            metadata: { pagination: { currentPage: page, totalPages } },
+            result: {
+              data: Array.from({ length: 1_000 }, (_, i) => ({
+                variantDbId: `other-${page}-${i}`,
+              })),
+            },
+          });
+        },
+      }),
+    );
+
+    const { result, structured, text } = await runExport(ctx, { format: 'vcf-lite' });
+
+    expect(result.isError).toBeFalsy();
+    expect(requestsTo(fetcher, '/variants')).toHaveLength(scanned);
+    const capWarning = warningsOf(structured).find((w) => w.includes('50,000'));
+    if (warns) {
+      expect(capWarning).toContain('2 of the 2 matrix variants');
+      expect(text).toContain('2 of the 2 matrix variants');
+    } else {
+      expect(capWarning).toBeUndefined();
+    }
+    expect((structured.vcf as string).split('\n').slice(1)).toEqual([
+      '.\t.\tneed-a\t.\t.\t0/1',
+      '.\t.\tneed-b\t.\t.\t0/1',
+    ]);
   });
 });

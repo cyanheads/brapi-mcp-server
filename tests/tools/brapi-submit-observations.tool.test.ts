@@ -6,9 +6,10 @@
  * @module tests/tools/brapi-submit-observations.tool.test
  */
 
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, timeout } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, expectInputRequired } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { getServerConfig } from '@/config/server-config.js';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
 import { brapiSubmitObservations } from '@/mcp-server/tools/definitions/brapi-submit-observations.tool.js';
 import {
@@ -19,11 +20,14 @@ import {
   type MockFetcher,
   pathnameOf,
   resetTestServices,
+  stalledResponse,
 } from './_tool-test-helpers.js';
 
 interface ConnectOptions {
   ctxOptions?: Parameters<typeof createMockContext>[0];
   methods?: ('GET' | 'POST' | 'PUT')[];
+  /** `serverInfo.serverName`, which selects the dialect. Defaults to the `spec` passthrough. */
+  serverName?: string;
   units?: boolean;
 }
 
@@ -34,7 +38,7 @@ async function connect(fetcher: MockFetcher, options: ConnectOptions = {}) {
     if (path.endsWith('/serverinfo')) {
       return jsonResponse(
         envelope({
-          serverName: 'Test',
+          serverName: options.serverName ?? 'Test',
           calls: [
             { service: 'observations', methods, versions: ['2.1'] },
             { service: 'studies', methods: ['GET'], versions: ['2.1'] },
@@ -79,8 +83,14 @@ function setupReadCalls(
       (init?.method ?? 'GET') === 'GET' &&
       u.searchParams.get('pageSize') === '1'
     ) {
+      // The study-scoped count answers the study's total; the unfiltered
+      // baseline answers a larger server-wide one.
+      const scoped = u.searchParams.has('studyDbIds') || u.searchParams.has('studyDbId');
       return jsonResponse(
-        envelope({ data: [] }, { totalCount: options.studyObservationCount ?? 99 }),
+        envelope(
+          { data: [] },
+          { totalCount: scoped ? (options.studyObservationCount ?? 99) : 100_000 },
+        ),
       );
     }
     if (path.endsWith('/observations') && (init?.method ?? 'GET') === 'GET') {
@@ -581,5 +591,301 @@ describe('brapi_submit_observations tool', () => {
     expect(previewText).toContain('Preview');
     expect(previewText).toContain('study-1');
     expect(previewText).toContain('valid: 1');
+  });
+});
+
+describe('brapi_submit_observations study variable review (#122)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  const STUDY_VARIABLES = ['var-1', 'var-2'];
+  const SERVER_VARIABLES = ['var-1', 'var-2', 'var-other'];
+
+  /**
+   * GET /variables narrows to the study's variables only for the v2.1 GET key
+   * `studyDbId`; any other query (the plural included) gets the server-wide
+   * list, as SGN servers answer. Records every requested URL in `calls`.
+   */
+  function serveStudyScopedVariables(calls: URL[]) {
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      calls.push(u);
+      if (u.pathname.endsWith('/studies/study-1'))
+        return jsonResponse(envelope({ studyDbId: 'study-1' }));
+      if (u.pathname.endsWith('/variables')) {
+        const ids =
+          u.searchParams.get('studyDbId') === 'study-1' ? STUDY_VARIABLES : SERVER_VARIABLES;
+        const data = ids.map((observationVariableDbId) => ({ observationVariableDbId }));
+        return jsonResponse(envelope({ data }, { totalCount: data.length }));
+      }
+      return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+    });
+  }
+
+  function previewInput(variableIds: string[]) {
+    return brapiSubmitObservations.input.parse({
+      studyDbId: 'study-1',
+      observations: variableIds.map((observationVariableDbId) => ({
+        observationUnitDbId: 'ou-1',
+        observationVariableDbId,
+        value: '1',
+      })),
+    });
+  }
+
+  it("flags a variable outside the study and counts only the study's variables", async () => {
+    const ctx = await connect(fetcher, { serverName: 'Breedbase' });
+    serveStudyScopedVariables([]);
+
+    const output = await brapiSubmitObservations.handler(previewInput(['var-1', 'var-other']), ctx);
+
+    expect(output.result).toMatchObject({ mode: 'preview', flagged: 1, knownVariableCount: 2 });
+    expect(output.result.perRowWarnings).toEqual([
+      expect.objectContaining({
+        rowIndex: 1,
+        observationVariableDbId: 'var-other',
+        warning: expect.stringContaining("'var-other' is not exposed by study 'study-1'"),
+      }),
+    ]);
+    const text = renderText(output);
+    expect(text).toContain('knownVariableCount: 2');
+    expect(text).toContain('is not exposed by study');
+  });
+
+  it.each([
+    ['spec', 'Test', 'studyDbIds'],
+    ['cassavabase', 'Cassavabase', 'studyDbId'],
+    ['breedbase', 'Breedbase', 'studyDbId'],
+    ['bms', 'BMS', 'studyDbId'],
+    ['brapi-test', 'BrAPI Community Test Server', 'studyDbId'],
+  ])(
+    'scopes /variables by studyDbId under the %s dialect; /observationunits keeps the dialect key',
+    async (_dialect, serverName, unitKey) => {
+      const ctx = await connect(fetcher, { serverName, units: true });
+      const calls: URL[] = [];
+      serveStudyScopedVariables(calls);
+
+      await brapiSubmitObservations.handler(previewInput(['var-1']), ctx);
+
+      const variables = calls.filter((u) => u.pathname.endsWith('/variables'));
+      expect(variables).toHaveLength(1);
+      expect(variables[0]!.searchParams.getAll('studyDbId')).toEqual(['study-1']);
+      expect(variables[0]!.searchParams.has('studyDbIds')).toBe(false);
+      const units = calls.filter((u) => u.pathname.endsWith('/observationunits'));
+      expect(units).toHaveLength(1);
+      expect(units[0]!.searchParams.getAll(unitKey)).toEqual(['study-1']);
+    },
+  );
+
+  it('keeps preview and confirmation usable when the /variables read outlasts the companion timeout', async () => {
+    const ctx = await connect(fetcher, { serverName: 'Breedbase' });
+    const variableTimeouts: number[] = [];
+    fetcher.mockImplementation(async (url: string, timeoutMs: number) => {
+      if (pathnameOf(url).endsWith('/variables')) {
+        variableTimeouts.push(timeoutMs);
+        // What the fetch layer raises when the upstream outlasts the attempt timeout.
+        throw timeout(`Fetch timed out after ${timeoutMs}ms`, { errorSource: 'FetchTimeout' });
+      }
+      return jsonResponse(envelope({ studyDbId: 'study-1' }));
+    });
+    const input = previewInput(['var-other']);
+
+    const preview = await brapiSubmitObservations.handler(input, ctx);
+    expect(preview.result).toMatchObject({
+      mode: 'preview',
+      flagged: 0,
+      knownVariableCount: 0,
+      warnings: expect.arrayContaining([
+        'The /variables check could not retrieve the study page. Membership is unverified.',
+      ]),
+    });
+    const asked = await expectInputRequired(() =>
+      brapiSubmitObservations.handler({ ...input, mode: 'apply' }, ctx),
+    );
+    expect(JSON.stringify(asked.inputRequests)).toContain('0 flagged');
+    // One attempt per read on the companion budget: no retry stretches the preview.
+    const { companionTimeoutMs } = getServerConfig();
+    expect(variableTimeouts).toEqual([companionTimeoutMs, companionTimeoutMs]);
+    expect(writeMethods(fetcher)).toEqual([]);
+  });
+});
+
+describe('brapi_submit_observations apply studyObservationCount', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  const FORCED_POST = {
+    studyDbId: 'study-1',
+    mode: 'apply',
+    force: true,
+    observations: [{ observationUnitDbId: 'ou-1', observationVariableDbId: 'var-1', value: '1' }],
+  };
+
+  /**
+   * Serves the study, its variables, and the POST echo; every GET /observations
+   * count goes to `count`, which sees the request URL.
+   */
+  function serveApply(
+    count: (u: URL, timeoutMs: number, signal?: AbortSignal) => Promise<Response>,
+  ) {
+    fetcher.mockImplementation(
+      async (url: string, timeoutMs: number, _c: unknown, init?: RequestInit) => {
+        const u = new URL(String(url));
+        const method = init?.method ?? 'GET';
+        if (u.pathname.endsWith('/studies/study-1'))
+          return jsonResponse(envelope({ studyDbId: 'study-1' }));
+        if (u.pathname.endsWith('/variables'))
+          return jsonResponse(
+            envelope({ data: [{ observationVariableDbId: 'var-1' }] }, { totalCount: 1 }),
+          );
+        if (u.pathname.endsWith('/observations') && method === 'POST')
+          return jsonResponse(envelope({ data: [{ observationDbId: 'new-1' }] }));
+        if (u.pathname.endsWith('/observations') && method === 'GET')
+          return count(u, timeoutMs, init?.signal ?? undefined);
+        throw new Error(`Unexpected path: ${u.pathname} (${method})`);
+      },
+    );
+  }
+
+  const countRequests = () =>
+    fetcher.mock.calls
+      .map((c) => new URL(String(c[0])))
+      .filter(
+        (u) => u.pathname.endsWith('/observations') && u.searchParams.get('pageSize') === '1',
+      );
+
+  it('omits the count with a warning when the dialect drops the study filter, without probing', async () => {
+    const ctx = await connect(fetcher, { serverName: 'BrAPI Community Test Server' });
+    // The test server ignores the study scope on /observations: every count is the server-wide total.
+    serveApply(async () => jsonResponse(envelope({ data: [] }, { totalCount: 4 })));
+
+    const output = await brapiSubmitObservations.handler(
+      brapiSubmitObservations.input.parse(FORCED_POST),
+      ctx,
+    );
+
+    expect(output.result.mode).toBe('apply');
+    if (output.result.mode !== 'apply') return;
+    expect(output.result.studyObservationCount).toBeUndefined();
+    expect(output.result.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /^studyObservationCount omitted: the 'brapi-test' dialect drops the study filter for \/observations/,
+        ),
+      ]),
+    );
+    expect(countRequests()).toEqual([]);
+    const text = renderText(output);
+    expect(text).toContain('- studyObservationCount: —');
+    expect(text).toMatch(/studyObservationCount omitted: the 'brapi-test' dialect/);
+  });
+
+  it('omits the count with a warning when the scoped total equals the unfiltered baseline', async () => {
+    const ctx = await connect(fetcher);
+    serveApply(async () => jsonResponse(envelope({ data: [] }, { totalCount: 4 })));
+
+    const output = await brapiSubmitObservations.handler(
+      brapiSubmitObservations.input.parse(FORCED_POST),
+      ctx,
+    );
+
+    if (output.result.mode !== 'apply') throw new Error('expected apply');
+    expect(output.result.studyObservationCount).toBeUndefined();
+    expect(output.result.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /^studyObservationCount omitted: \/observations returned the same total \(4\)/,
+        ),
+      ]),
+    );
+    // Equal totals also arise when the study holds every observation on the
+    // server, so the warning must not assert the filter was ignored.
+    const guard = output.result.warnings?.find((w) => w.includes('returned the same total'));
+    expect(guard).toContain("so the study filter can't be confirmed");
+    expect(guard).not.toContain('silently ignored');
+    const scoped = countRequests().filter((u) => u.searchParams.has('studyDbIds'));
+    expect(scoped.map((u) => u.searchParams.getAll('studyDbIds'))).toEqual([['study-1']]);
+  });
+
+  it('omits the count with a warning when the count probe fails, keeping the write result', async () => {
+    const ctx = await connect(fetcher);
+    serveApply(async (u, timeoutMs) => {
+      if (u.searchParams.has('studyDbIds'))
+        throw timeout(`Fetch timed out after ${timeoutMs}ms`, { errorSource: 'FetchTimeout' });
+      return jsonResponse(envelope({ data: [] }, { totalCount: 100 }));
+    });
+
+    const output = await brapiSubmitObservations.handler(
+      brapiSubmitObservations.input.parse(FORCED_POST),
+      ctx,
+    );
+
+    if (output.result.mode !== 'apply') throw new Error('expected apply');
+    expect(output.result.posted).toEqual([{ observationDbId: 'new-1' }]);
+    expect(output.result.studyObservationCount).toBeUndefined();
+    expect(output.result.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^studyObservationCount probe failed: .*timed out/),
+      ]),
+    );
+  });
+
+  it.each([
+    ['times out', (ms: number) => timeout(`Fetch timed out after ${ms}ms`)],
+    [
+      'answers HTTP 503',
+      () =>
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Fetch failed. Status: 503', {
+          status: 503,
+        }),
+    ],
+  ])('keeps the scoped count when only the unfiltered baseline %s', async (_label, failure) => {
+    const ctx = await connect(fetcher);
+    serveApply(async (u, timeoutMs) => {
+      if (u.searchParams.has('studyDbIds'))
+        return jsonResponse(envelope({ data: [] }, { totalCount: 7 }));
+      throw failure(timeoutMs);
+    });
+
+    const output = await brapiSubmitObservations.handler(
+      brapiSubmitObservations.input.parse(FORCED_POST),
+      ctx,
+    );
+
+    if (output.result.mode !== 'apply') throw new Error('expected apply');
+    expect(output.result.studyObservationCount).toBe(7);
+    expect(
+      (output.result.warnings ?? []).filter((w) => w.startsWith('studyObservationCount')),
+    ).toEqual([]);
+    expect(countRequests()).toHaveLength(2);
+  });
+
+  it('propagates caller cancellation during the count probe', async () => {
+    const controller = new AbortController();
+    const ctx = await connect(fetcher, {
+      ctxOptions: { tenantId: 't1', signal: controller.signal },
+    });
+    serveApply((_u, timeoutMs, signal) => {
+      queueMicrotask(() => controller.abort());
+      return stalledResponse(timeoutMs, signal);
+    });
+
+    await expect(
+      brapiSubmitObservations.handler(brapiSubmitObservations.input.parse(FORCED_POST), ctx),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
   });
 });

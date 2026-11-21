@@ -52,6 +52,7 @@ const PLURAL_TO_SINGULAR: Record<string, Readonly<Record<string, DialectFilterMa
     locationNames: 'locationName',
     seasonDbIds: 'seasonDbId',
     germplasmDbIds: verified('germplasmDbId'),
+    observationVariableDbIds: verified('observationVariableDbId'),
     studyCodes: 'studyCode',
     studyPUIs: 'studyPUI',
     externalReferenceIds: 'externalReferenceId',

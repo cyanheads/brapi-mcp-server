@@ -3,16 +3,18 @@
  * the ISO English short name, and common informal English aliases. Sourced
  * from Debian iso-codes (data/iso_3166-1.json); aliases hand-curated for the names agents and
  * users actually type ("USA", "South Korea", "Ivory Coast") that differ from
- * the ISO short form. Consumed by `resolveCountryName` to resolve free-form
- * country names for BrAPI `/locations` filters.
+ * the ISO short form. Each entry gains its E.164 calling code from
+ * `e164-calling-codes.ts`, joined on alpha-2. Consumed by `resolveCountryName`
+ * to resolve free-form country names for BrAPI `/locations` filters.
  *
  * @module services/iso-country/iso-3166-data
  */
 
+import { E164_CALLING_CODES } from './e164-calling-codes.js';
 import type { IsoCountry } from './types.js';
 
-/** Every ISO 3166-1 officially-assigned country, sorted by alpha-3 code. */
-export const ISO_3166_1_COUNTRIES: readonly IsoCountry[] = [
+/** ISO 3166-1 assignments, sorted by alpha-3 code. */
+const ISO_ASSIGNMENTS: readonly Omit<IsoCountry, 'callingCode'>[] = [
   { alpha3: 'ABW', alpha2: 'AW', numeric: '533', name: 'Aruba', aliases: [] },
   { alpha3: 'AFG', alpha2: 'AF', numeric: '004', name: 'Afghanistan', aliases: [] },
   { alpha3: 'AGO', alpha2: 'AO', numeric: '024', name: 'Angola', aliases: [] },
@@ -443,3 +445,9 @@ export const ISO_3166_1_COUNTRIES: readonly IsoCountry[] = [
   { alpha3: 'ZMB', alpha2: 'ZM', numeric: '894', name: 'Zambia', aliases: [] },
   { alpha3: 'ZWE', alpha2: 'ZW', numeric: '716', name: 'Zimbabwe', aliases: [] },
 ];
+
+/** Every ISO 3166-1 officially-assigned country, sorted by alpha-3 code, with its calling code when assigned. */
+export const ISO_3166_1_COUNTRIES: readonly IsoCountry[] = ISO_ASSIGNMENTS.map((country) => {
+  const callingCode = E164_CALLING_CODES[country.alpha2];
+  return callingCode === undefined ? country : { ...country, callingCode };
+});

@@ -21,26 +21,20 @@ import {
   resetTestServices,
 } from './_tool-test-helpers.js';
 
-async function connect(fetcher: MockFetcher, serverName?: string) {
+/** The germplasm routes and companions brapi_get_germplasm reads, each advertised for GET. */
+const GERMPLASM_CALLS: object[] = [
+  { service: 'germplasm', methods: ['GET'], versions: ['2.1'] },
+  { service: 'germplasm/{germplasmDbId}/pedigree', methods: ['GET'], versions: ['2.1'] },
+  { service: 'germplasm/{germplasmDbId}/attributes', methods: ['GET'], versions: ['2.1'] },
+  { service: 'germplasm/{germplasmDbId}/progeny', methods: ['GET'], versions: ['2.1'] },
+  { service: 'studies', methods: ['GET'], versions: ['2.1'] },
+];
+
+async function connect(fetcher: MockFetcher, serverName?: string, calls = GERMPLASM_CALLS) {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
-      return jsonResponse(
-        envelope({
-          ...(serverName ? { serverName } : {}),
-          calls: [
-            { service: 'germplasm', methods: ['GET'], versions: ['2.1'] },
-            { service: 'germplasm/{germplasmDbId}/pedigree', methods: ['GET'], versions: ['2.1'] },
-            {
-              service: 'germplasm/{germplasmDbId}/attributes',
-              methods: ['GET'],
-              versions: ['2.1'],
-            },
-            { service: 'germplasm/{germplasmDbId}/progeny', methods: ['GET'], versions: ['2.1'] },
-            { service: 'studies', methods: ['GET'], versions: ['2.1'] },
-          ],
-        }),
-      );
+      return jsonResponse(envelope({ ...(serverName ? { serverName } : {}), calls }));
     }
     if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
     return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
@@ -124,6 +118,33 @@ describe('brapi_get_germplasm tool', () => {
     expect(result.warnings).toEqual([]);
   });
 
+  it('reports studyCount when /studies is listed without methods', async () => {
+    // A call listed without methods serves every method.
+    const ctx = await connect(fetcher, undefined, [
+      { service: 'germplasm', methods: ['GET'], versions: ['2.1'] },
+      { service: 'studies', versions: ['2.1'] },
+    ]);
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      if (u.pathname.endsWith('/germplasm/g1')) {
+        return jsonResponse(envelope({ germplasmDbId: 'g1' }));
+      }
+      if (u.pathname.endsWith('/studies')) {
+        const isFiltered = u.searchParams.has('germplasmDbIds');
+        return jsonResponse(envelope({ data: [] }, { totalCount: isFiltered ? 7 : 42 }));
+      }
+      throw new Error(`Unexpected path: ${u.pathname}`);
+    });
+
+    const result = await brapiGetGermplasm.handler(
+      brapiGetGermplasm.input.parse({ germplasmDbId: 'g1' }),
+      ctx,
+    );
+
+    expect(result.studyCount).toBe(7);
+    expect(result.warnings).toEqual([]);
+  });
+
   // The BrAPI Community Test Server's /studies?germplasmDbIds= is silently
   // ignored — the singular germplasmDbId works. The brapi-test dialect
   // translates plural → singular before the studyCount probe goes out.
@@ -168,6 +189,47 @@ describe('brapi_get_germplasm tool', () => {
     expect(filteredCalls).toHaveLength(1);
     expect(pluralCalls).toHaveLength(0);
     expect(result.studyCount).toBe(1);
+  });
+
+  // Sweetpotatobase GET /studies honors only the singular: germplasmDbId=118251 → 2,
+  // while germplasmDbIds=118251 or no filter → 2,056.
+  it('reports studyCount on an SGN server through the singular germplasmDbId', async () => {
+    const ctx = await connect(fetcher, 'Sweetpotatobase');
+
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const path = u.pathname;
+      if (path.endsWith('/germplasm/118251')) {
+        return jsonResponse(envelope({ germplasmDbId: '118251', germplasmName: 'Beauregard' }));
+      }
+      if (path.endsWith('/germplasm/118251/pedigree'))
+        return jsonResponse(envelope({ parents: [] }));
+      if (path.endsWith('/germplasm/118251/attributes'))
+        return jsonResponse(envelope({ data: [] }));
+      if (path.endsWith('/studies')) {
+        const honored = u.searchParams.get('germplasmDbId') === '118251';
+        return jsonResponse(envelope({ data: [] }, { totalCount: honored ? 2 : 2_056 }));
+      }
+      if (path.endsWith('/germplasm/118251/progeny')) {
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      }
+      throw new Error(`Unexpected path: ${path}`);
+    });
+
+    const result = await brapiGetGermplasm.handler(
+      brapiGetGermplasm.input.parse({ germplasmDbId: '118251' }),
+      ctx,
+    );
+
+    const studiesCalls = fetcher.mock.calls
+      .map((c) => new URL(String(c[0])))
+      .filter((u) => u.pathname.endsWith('/studies'));
+    expect(studiesCalls.filter((u) => u.searchParams.has('germplasmDbIds'))).toHaveLength(0);
+    expect(studiesCalls.filter((u) => u.searchParams.has('germplasmDbId'))).toHaveLength(1);
+    expect(result.studyCount).toBe(2);
+    expect(result.warnings).toEqual([]);
+    const text = (brapiGetGermplasm.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('- studyCount: 2');
   });
 
   it('drops studyCount when the upstream silently ignores the germplasm filter', async () => {

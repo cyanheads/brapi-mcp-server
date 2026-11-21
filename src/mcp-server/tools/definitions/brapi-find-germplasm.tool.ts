@@ -39,7 +39,7 @@ import {
   maybeSpill,
   mergeFilters,
   NonBlankString,
-  probeFindRouteTotal,
+  probeScopeNarrowed,
   renderAdvisoryTrailer,
   renderAppliedFiltersTrailer,
   renderDataframeHandle,
@@ -495,26 +495,17 @@ export async function findGermplasm(
   const scopes = await Promise.all(
     scopedFilters.map(async ([name, key, singular, values]) => {
       if (!values?.length) return;
-      const control = { ...route };
-      const params = control.kind === 'get' ? { ...control.filters } : { ...control.searchBody };
-      const hasScope = Object.hasOwn(params, key) || Object.hasOwn(params, singular);
-      const isUnion = control.kind === 'get' && control.fanout !== undefined;
-      let baseline: number | undefined;
-      if (hasScope && !isUnion && firstPage.totalCount !== undefined) {
-        delete params[key];
-        delete params[singular];
-        if (control.kind === 'get') control.filters = params;
-        else control.searchBody = params;
-        baseline = await probeFindRouteTotal(client, connection, control, ctx);
-      }
-      if (
-        baseline !== undefined &&
-        firstPage.totalCount !== undefined &&
-        firstPage.totalCount < baseline
-      ) {
-        return;
-      }
-      return `Could not verify whether '${name}' narrowed the germplasm results.`;
+      const narrowed = await probeScopeNarrowed(
+        client,
+        connection,
+        route,
+        [key, singular],
+        firstPage.totalCount,
+        ctx,
+      );
+      return narrowed
+        ? undefined
+        : `Could not verify whether '${name}' narrowed the germplasm results.`;
     }),
   );
   for (const warning of scopes) if (warning) warnings.push(warning);
@@ -580,6 +571,7 @@ export async function findGermplasm(
         upstreamTotal: firstPage.totalCount,
         scanComplete,
         scanCeiling,
+        preloadedStop: spill.preloadedStop === true,
       }),
     );
   }
@@ -613,24 +605,32 @@ export async function findGermplasm(
 }
 
 /**
- * Describe what a free-text scan examined: the full upstream set, or the first
- * N rows of it. Reports rows scanned, never the inline page size, so a miss
+ * Describe what a free-text scan examined: the full upstream set, the first N
+ * rows of it, or the distinct rows a multi-request collection gathered before
+ * it stopped. Reports rows scanned, never the inline page size, so a miss
  * reads as "not found in these rows" rather than "not found".
  */
 function textScanWarning(
   text: string,
   matched: number,
   scanned: number,
-  scan: { scanCeiling: number; scanComplete: boolean; upstreamTotal: number | undefined },
+  scan: {
+    preloadedStop: boolean;
+    scanCeiling: number;
+    scanComplete: boolean;
+    upstreamTotal: number | undefined;
+  },
 ): string {
   const { scanCeiling, upstreamTotal } = scan;
   const fullScan = scan.scanComplete;
   const parts = [
     fullScan
       ? `Free-text '${text}' matched ${matched} of ${scanned} row(s) scanned (the full upstream set).`
-      : upstreamTotal === undefined
-        ? `Free-text '${text}' matched ${matched} of the first ${scanned} row(s) scanned; the upstream reported no total, and rows past them were not scanned.`
-        : `Free-text '${text}' matched ${matched} of the first ${scanned} row(s) scanned out of ${upstreamTotal} upstream; the remaining rows were not scanned.`,
+      : scan.preloadedStop
+        ? `Free-text '${text}' matched ${matched} of the ${scanned} distinct row(s) collected before the collection stopped (see warnings); rows past them were not scanned.`
+        : upstreamTotal === undefined
+          ? `Free-text '${text}' matched ${matched} of the first ${scanned} row(s) scanned; the upstream reported no total, and rows past them were not scanned.`
+          : `Free-text '${text}' matched ${matched} of the first ${scanned} row(s) scanned out of ${upstreamTotal} upstream; the remaining rows were not scanned.`,
   ];
   if (!fullScan && (upstreamTotal === undefined || upstreamTotal > scanCeiling)) {
     parts.push(

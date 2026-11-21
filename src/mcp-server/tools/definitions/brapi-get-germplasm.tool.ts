@@ -13,6 +13,7 @@ import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
 import { DISCOVERY_NOT_FOUND_ERROR } from '@/services/capability-registry/capability-registry.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
+import { supportsMethod } from '@/services/capability-registry/supports-method.js';
 import {
   AliasInput,
   appendPassthroughLines,
@@ -268,7 +269,7 @@ export const brapiGetGermplasm = tool('brapi_get_germplasm', {
     const supportsPedigree = Boolean(profile.supported['germplasm/{germplasmDbId}/pedigree']);
     const supportsAttributes = Boolean(profile.supported['germplasm/{germplasmDbId}/attributes']);
     const supportsProgeny = Boolean(profile.supported['germplasm/{germplasmDbId}/progeny']);
-    const supportsStudies = profile.supported.studies?.methods?.includes('GET') ?? false;
+    const supportsStudies = supportsMethod(profile.supported.studies, 'GET');
 
     const dialect = supportsStudies
       ? await resolveDialect(connection, ctx, capabilityLookup)

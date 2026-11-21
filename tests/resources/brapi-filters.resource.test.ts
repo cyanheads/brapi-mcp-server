@@ -21,6 +21,7 @@ describe('brapi://filters/{endpoint} resource', () => {
     const names = result.filters.map((f) => f.name);
     expect(names).toContain('commonCropNames');
     expect(names).toContain('seasonDbIds');
+    expect(names).toContain('observationVariableDbIds');
   });
 
   it('throws when the endpoint is unknown', async () => {

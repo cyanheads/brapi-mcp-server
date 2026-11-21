@@ -7,7 +7,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { forbidden, JsonRpcErrorCode, unauthorized } from '@cyanheads/mcp-ts-core/errors';
+import { forbidden, JsonRpcErrorCode, timeout, unauthorized } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
@@ -844,5 +844,463 @@ describe('brapi_find_studies inline budget (#66)', () => {
     expect(structured.notice).toContain('24,000-byte inline budget');
     expect(text).toContain('24,000-byte inline budget');
     expect(text).toContain(`\`${(structured.dataframe as { tableName: string }).tableName}\``);
+  });
+});
+
+describe('brapi_find_studies variables (#130)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  /**
+   * BrAPI test server shape: each row lists the variables its study declares,
+   * which disagrees with the filter — that keys on recorded observations, and
+   * only `variable1` has any (in study1). study2 declares `variable2` yet the
+   * filter excludes it.
+   */
+  const testServerStudies = () => [
+    studyRow('study1', { observationVariableDbIds: ['variable1'] }),
+    studyRow('study2', { observationVariableDbIds: ['variable4', 'variable3', 'variable2'] }),
+    studyRow('study3', { observationVariableDbIds: [] }),
+  ];
+  const TEST_SERVER_RECORDED: Record<string, string[]> = { variable1: ['study1'] };
+  const TEST_SERVER_CALLS: TestCall[] = [
+    'studies',
+    { service: 'search/studies', methods: ['POST'] },
+  ];
+
+  interface StudiesRequest {
+    body?: Record<string, unknown>;
+    method: 'GET' | 'POST';
+    params: URLSearchParams;
+  }
+
+  /**
+   * Serve GET /studies and POST /search/studies over `rows`. A variable filter
+   * narrows to the studies `recorded` lists for its values — on GET only under
+   * `getKey` (the test server and SGN honor the singular), on search always
+   * (the plural body key). `ignoreVariables` answers every variable filter with
+   * the full set; `omitTotal` drops totalCount; `failControl` answers 503 to any
+   * request with no variable filter.
+   */
+  function serveVariableStudies(
+    rows: Record<string, unknown>[],
+    recorded: Record<string, string[]>,
+    options: {
+      failControl?: boolean;
+      getKey?: 'observationVariableDbId' | 'observationVariableDbIds';
+      ignoreVariables?: boolean;
+      omitTotal?: boolean;
+    } = {},
+  ): StudiesRequest[] {
+    const requests: StudiesRequest[] = [];
+    const getKey = options.getKey ?? 'observationVariableDbId';
+    fetcher.mockImplementation(
+      async (url: string, _timeoutMs: number, _ctx: unknown, init?: RequestInit) => {
+        const u = new URL(String(url));
+        const method = init?.method === 'POST' ? 'POST' : 'GET';
+        let variables: string[];
+        let page: number;
+        let pageSize: number;
+        if (method === 'POST') {
+          expect(u.pathname).toBe('/brapi/v2/search/studies');
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          requests.push({ method, params: u.searchParams, body });
+          variables = (body.observationVariableDbIds as string[] | undefined) ?? [];
+          page = Number(body.page ?? 0);
+          pageSize = Number(body.pageSize ?? 10);
+        } else {
+          expect(u.pathname).toBe('/brapi/v2/studies');
+          requests.push({ method, params: u.searchParams });
+          variables = u.searchParams.getAll(getKey);
+          page = Number(u.searchParams.get('page') ?? '0');
+          pageSize = Number(u.searchParams.get('pageSize') ?? '10');
+        }
+        if (variables.length === 0 && options.failControl) {
+          return jsonResponse({ error: 'unavailable' }, 503);
+        }
+        const keep =
+          variables.length === 0 || options.ignoreVariables
+            ? undefined
+            : new Set(variables.flatMap((v) => recorded[v] ?? []));
+        const matched = keep ? rows.filter((r) => keep.has(String(r.studyDbId))) : rows;
+        return jsonResponse({
+          metadata: {
+            pagination: { pageSize, ...(options.omitTotal ? {} : { totalCount: matched.length }) },
+          },
+          result: { data: matched.slice(page * pageSize, (page + 1) * pageSize) },
+        });
+      },
+    );
+    return requests;
+  }
+
+  const ids = (structured: Record<string, unknown>) =>
+    (structured.results as { studyDbId: string }[]).map((r) => r.studyDbId);
+
+  describe('characterization — behavior that holds before and after #130', () => {
+    it('keeps the existing study aliases routing to their filters', async () => {
+      const ctx = await connect(fetcher);
+      fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+      const { result, structured } = await callContract(ctx, {
+        seasonDbId: '2022',
+        locationDbIds: ['loc1'],
+        programDbId: 'p1',
+        trialDbIds: ['t1'],
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(structured.appliedFilters).toEqual({
+        seasonDbIds: ['2022'],
+        locationDbIds: ['loc1'],
+        programDbIds: ['p1'],
+        trialDbIds: ['t1'],
+      });
+    });
+
+    it('sends extraFilters.observationVariableDbId as given and names it unverified', async () => {
+      const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'BrAPI Community Test Server');
+      const requests = serveVariableStudies(testServerStudies(), TEST_SERVER_RECORDED);
+
+      const { structured } = await callContract(ctx, {
+        extraFilters: { observationVariableDbId: 'variable1' },
+      });
+
+      expect(ids(structured)).toEqual(['study1']);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.params.getAll('observationVariableDbId')).toEqual(['variable1']);
+      expect(structured.warnings).toEqual([
+        "Could not verify these extraFilters keys against returned rows: 'observationVariableDbId'. The server may have silently ignored them — check brapi_describe_filters for the valid filter keys on this endpoint.",
+      ]);
+    });
+  });
+
+  const variableWarning = "Could not verify whether 'variables' narrowed the study results.";
+  /** Each request's variable filter (GET key or search body) and pageSize, in send order. */
+  const sent = (requests: StudiesRequest[]) =>
+    requests.map((r) =>
+      r.method === 'POST'
+        ? {
+            method: r.method,
+            variables: r.body?.observationVariableDbIds,
+            pageSize: r.body?.pageSize,
+          }
+        : {
+            method: r.method,
+            variables: r.params.getAll('observationVariableDbId'),
+            plural: r.params.getAll('observationVariableDbIds'),
+            pageSize: r.params.get('pageSize'),
+          },
+    );
+
+  it('returns only study1 for variable1 on the test server, verified by its count control', async () => {
+    const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'BrAPI Community Test Server');
+    const requests = serveVariableStudies(testServerStudies(), TEST_SERVER_RECORDED);
+
+    const { result, structured, text } = await callContract(ctx, { variables: ['variable1'] });
+
+    expect(result.isError).not.toBe(true);
+    expect(ids(structured)).toEqual(['study1']);
+    expect(structured.totalCount).toBe(1);
+    expect(structured.warnings).toEqual([]);
+    expect(structured.appliedFilters).toEqual({ observationVariableDbId: 'variable1' });
+    expect(text).toContain('- **variables:** variable1');
+    expect(text).not.toContain(variableWarning);
+    // The finder page, then the control: the same route without the variable, one row.
+    expect(sent(requests)).toEqual([
+      { method: 'GET', variables: ['variable1'], plural: [], pageSize: expect.any(String) },
+      { method: 'GET', variables: [], plural: [], pageSize: '1' },
+    ]);
+  });
+
+  it('returns no rows for variable2 and still verifies the filter (0 against 3)', async () => {
+    const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'BrAPI Community Test Server');
+    serveVariableStudies(testServerStudies(), TEST_SERVER_RECORDED);
+
+    const { structured, text } = await callContract(ctx, { variables: ['variable2'] });
+
+    expect(structured.results).toEqual([]);
+    expect(structured.totalCount).toBe(0);
+    expect(structured.warnings).toEqual([]);
+    expect(structured.notice).toBe(
+      'No rows matched the applied filters. Try broadening crop, seasons, programs, trials, studyNames, variables, or active.',
+    );
+    expect(text).toContain('variables, or active');
+  });
+
+  it('routes two variables through POST /search/studies on the test server and verifies there', async () => {
+    const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'BrAPI Community Test Server');
+    const requests = serveVariableStudies(testServerStudies(), TEST_SERVER_RECORDED);
+
+    const { structured, text } = await callContract(ctx, {
+      variables: ['variable1', 'variable2'],
+    });
+
+    expect(ids(structured)).toEqual(['study1']);
+    expect(structured.appliedFilters).toEqual({
+      observationVariableDbIds: ['variable1', 'variable2'],
+    });
+    expect(sent(requests)).toEqual([
+      { method: 'POST', variables: ['variable1', 'variable2'], pageSize: expect.any(Number) },
+      { method: 'POST', variables: undefined, pageSize: 1 },
+    ]);
+    expect(structured.warnings).toEqual(
+      expect.arrayContaining([expect.stringContaining('Route escalated to POST /search/studies')]),
+    );
+    expect(structured.warnings).not.toContain(variableWarning);
+    expect(text).toContain('- **variables:** variable1, variable2');
+  });
+
+  it('warns and keeps every row when the server answers the same total without the filter', async () => {
+    // The spec dialect sends the plural on GET; a server that ignores it widens silently.
+    const ctx = await connect(fetcher);
+    const requests = serveVariableStudies(testServerStudies(), TEST_SERVER_RECORDED, {
+      getKey: 'observationVariableDbIds',
+      ignoreVariables: true,
+    });
+
+    const { structured, text } = await callContract(ctx, { variables: ['variable1'] });
+
+    expect(ids(structured)).toEqual(['study1', 'study2', 'study3']);
+    expect(requests[0]?.params.getAll('observationVariableDbIds')).toEqual(['variable1']);
+    expect(structured.warnings).toEqual([variableWarning]);
+    expect(text).toContain(`- ${variableWarning}`);
+  });
+
+  it('warns without sending a control when the upstream reports no total', async () => {
+    const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'BrAPI Community Test Server');
+    const requests = serveVariableStudies(testServerStudies(), TEST_SERVER_RECORDED, {
+      omitTotal: true,
+    });
+
+    const { structured } = await callContract(ctx, { variables: ['variable1'] });
+
+    expect(ids(structured)).toEqual(['study1']);
+    expect(requests).toHaveLength(1);
+    expect(structured.warnings).toEqual([variableWarning]);
+  });
+
+  it('warns and keeps the filtered rows when the count control fails', async () => {
+    const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'BrAPI Community Test Server');
+    const requests = serveVariableStudies(testServerStudies(), TEST_SERVER_RECORDED, {
+      failControl: true,
+    });
+
+    const { result, structured } = await callContract(ctx, { variables: ['variable1'] });
+
+    expect(result.isError).not.toBe(true);
+    expect(ids(structured)).toEqual(['study1']);
+    expect(requests).toHaveLength(2);
+    expect(structured.warnings).toEqual([variableWarning]);
+  });
+
+  it.each([
+    ['times out', () => timeout('Fetch timed out after 500ms', { errorSource: 'FetchTimeout' })],
+    ['answers HTTP 401', () => unauthorized('Fetch failed. Status: 401', { status: 401 })],
+    ['answers HTTP 403', () => forbidden('Fetch failed. Status: 403', { status: 403 })],
+  ])(
+    'keeps the filtered rows with the unverified warning when the count control %s',
+    async (_label, failure) => {
+      const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'BrAPI Community Test Server');
+      const requests = serveVariableStudies(testServerStudies(), TEST_SERVER_RECORDED);
+      const serve = fetcher.getMockImplementation() as
+        | ((url: string, ...rest: unknown[]) => Promise<Response>)
+        | undefined;
+      fetcher.mockImplementation(async (url: string, ...rest: unknown[]) => {
+        if (!new URL(String(url)).searchParams.has('observationVariableDbId')) throw failure();
+        return serve?.(url, ...rest);
+      });
+
+      const { result, structured } = await callContract(ctx, { variables: ['variable1'] });
+
+      expect(result.isError).not.toBe(true);
+      expect(ids(structured)).toEqual(['study1']);
+      expect(structured.totalCount).toBe(1);
+      expect(requests).toHaveLength(1);
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(structured.warnings).toEqual([variableWarning]);
+    },
+  );
+
+  it('unions several variables by GET on SGN and leaves the union unverified', async () => {
+    // Sweetpotatobase marks POST /search/studies dead, so each variable is its own GET.
+    const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'Sweetpotatobase');
+    const rows = ['a', 'b', 'c', 'd'].map((id) => studyRow(id));
+    const requests = serveVariableStudies(rows, { '76736': ['a', 'b'], '77239': ['c'] });
+
+    const { structured } = await callContract(ctx, { variables: ['76736', '77239'] });
+
+    expect(ids(structured)).toEqual(['a', 'b', 'c']);
+    expect(structured.totalCount).toBe(3);
+    expect(structured.appliedFilters).toEqual({ observationVariableDbId: ['76736', '77239'] });
+    // One GET per variable and no control request.
+    expect(requests.map((r) => r.params.getAll('observationVariableDbId')).sort()).toEqual([
+      ['76736'],
+      ['77239'],
+    ]);
+    expect(structured.warnings).toEqual([variableWarning]);
+  });
+
+  it('verifies a single variable on SGN while locations apply client-side', async () => {
+    const ctx = await connect(fetcher, ['studies'], 'Sweetpotatobase');
+    const rows = [
+      studyRow('a', { locationDbId: '23' }),
+      studyRow('b', { locationDbId: '7' }),
+      studyRow('c', { locationDbId: '23' }),
+    ];
+    const requests = serveVariableStudies(rows, { '76736': ['a', 'b'] });
+
+    const { structured } = await callContract(ctx, { variables: ['76736'], locations: ['23'] });
+
+    expect(ids(structured)).toEqual(['a']);
+    expect(structured.totalCount).toBe(1);
+    expect(structured.clientSideFilters).toEqual({ locations: ['23'] });
+    // Neither the finder page nor the control sends a location; the control drops only the variable.
+    expect(requests.map((r) => [...r.params.keys()].sort())).toEqual([
+      ['observationVariableDbId', 'pageSize'],
+      ['pageSize'],
+    ]);
+    expect(structured.warnings).not.toContain(variableWarning);
+  });
+
+  it('stages the matched studies past loadLimit and still verifies the filter', async () => {
+    const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'BrAPI Community Test Server');
+    const rows = ['s1', 's2', 's3', 's4', 's5'].map((id) => studyRow(id));
+    serveVariableStudies(rows, { variable1: ['s1', 's2', 's3'] });
+
+    const { structured } = await callContract(ctx, { variables: ['variable1'], loadLimit: 1 });
+
+    expect(ids(structured)).toEqual(['s1']);
+    expect(structured).toMatchObject({
+      totalCount: 3,
+      hasMore: true,
+      truncated: true,
+      dataframe: { rowCount: 3 },
+    });
+    expect(structured.warnings).toEqual([]);
+  });
+
+  it.each([
+    ['observationVariableDbId', 'variable1'],
+    ['observationVariableDbIds', ['variable1']],
+  ])('accepts %s as an alias of variables', async (key, value) => {
+    const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'BrAPI Community Test Server');
+    serveVariableStudies(testServerStudies(), TEST_SERVER_RECORDED);
+
+    const { result, structured } = await callContract(ctx, { [key]: value });
+
+    expect(result.isError).not.toBe(true);
+    expect(ids(structured)).toEqual(['study1']);
+    expect(structured.warnings).toEqual([]);
+  });
+
+  it('rejects a blank or empty variable ID', () => {
+    for (const variables of [['   '], ['variable1', ''], ['\t']]) {
+      expect(brapiFindStudies.input.safeParse({ variables }).success).toBe(false);
+    }
+    expect(brapiFindStudies.input.safeParse({ variables: ['variable 1'] }).success).toBe(true);
+  });
+
+  it('names variables among the honored filters in the all_filters_dropped hint', async () => {
+    const ctx = await connect(fetcher, ['studies'], 'Sweetpotatobase');
+
+    const { result, text } = await callContract(ctx, { extraFilters: { locationDbIds: ['23'] } });
+
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'all_filters_dropped',
+          recovery: { hint: expect.stringContaining('studyNames, variables, or active') },
+        },
+      },
+    });
+    expect(text).toContain('studyNames, variables, or active');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('translates extraFilters.observationVariableDbIds on the test server and names it unverified', async () => {
+    // The row field lists arrays, so no row check can speak to the filter.
+    const ctx = await connect(fetcher, TEST_SERVER_CALLS, 'BrAPI Community Test Server');
+    const requests = serveVariableStudies(testServerStudies(), TEST_SERVER_RECORDED);
+
+    const { structured } = await callContract(ctx, {
+      extraFilters: { observationVariableDbIds: ['variable1'] },
+    });
+
+    expect(requests[0]?.params.getAll('observationVariableDbId')).toEqual(['variable1']);
+    expect(requests[0]?.params.has('observationVariableDbIds')).toBe(false);
+    expect(ids(structured)).toEqual(['study1']);
+    expect(structured.warnings).toEqual([
+      "Could not verify these extraFilters keys against returned rows: 'observationVariableDbIds'. The server may have silently ignored them — check brapi_describe_filters for the valid filter keys on this endpoint.",
+    ]);
+  });
+
+  it('narrows extraFilters.germplasmDbIds on SGN through the singular germplasmDbId', async () => {
+    const ctx = await connect(fetcher, ['studies'], 'Sweetpotatobase');
+    const rows = ['s1', 's2', 's3'].map((id) => studyRow(id));
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const germplasm = u.searchParams.get('germplasmDbId');
+      const data = germplasm === '118251' ? rows.slice(0, 2) : rows;
+      return jsonResponse(envelope({ data }, { totalCount: data.length }));
+    });
+
+    const { structured } = await callContract(ctx, {
+      extraFilters: { germplasmDbIds: ['118251'] },
+    });
+
+    const url = new URL(String(fetcher.mock.calls[0]![0]));
+    expect(url.searchParams.getAll('germplasmDbId')).toEqual(['118251']);
+    expect(url.searchParams.has('germplasmDbIds')).toBe(false);
+    expect(ids(structured)).toEqual(['s1', 's2']);
+  });
+});
+
+describe('brapi_find_studies partial GET union counts (#123)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  it('counts a study two seasons matched once when the third season fails, on both surfaces', async () => {
+    const ctx = await connect(fetcher, ['studies'], 'CassavaBase');
+    fetcher.mockImplementation(async (url: string) => {
+      const season = new URL(url).searchParams.get('seasonDbId');
+      if (season === '2024') return jsonResponse({ error: 'unavailable' }, 503);
+      return jsonResponse(
+        envelope({ data: [studyRow('S1', { seasons: ['2022', '2023'] })] }, { totalCount: 1 }),
+      );
+    });
+
+    const { result, structured, text } = await callContract(ctx, {
+      seasons: ['2022', '2023', '2024'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({
+      results: [{ studyDbId: 'S1' }],
+      hasMore: true,
+      totalCount: 1,
+    });
+    const stop = (structured.warnings as string[]).find((w) => w.startsWith('Collection'));
+    expect(stop).toBe(
+      'Collection incomplete at 1 distinct row(s): GET combination collection stopped early (see warnings). results[] holds every row fetched; narrow the filters or retry the call.',
+    );
+    expect(text).toContain(
+      'Collection incomplete at 1 distinct row(s): GET combination collection stopped early',
+    );
+    expect(text).not.toContain('the upstream reported no total');
   });
 });

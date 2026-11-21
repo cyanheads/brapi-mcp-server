@@ -1,6 +1,6 @@
 /**
  * @fileoverview `brapi_find_genotype_calls` — pull allele calls across a
- * germplasm × variant set. Uses BrAPI's async-search pattern
+ * call set × variant set. Uses BrAPI's async-search pattern
  * (`POST /search/calls` → `GET /search/calls/{id}` with 202-retry) under
  * the hood. The upstream pull is bounded by `BRAPI_GENOTYPE_CALLS_MAX_PULL`
  * (operator policy, default 100k, max 500k) so a single query can't trigger
@@ -109,7 +109,7 @@ type Output = z.infer<typeof OutputSchema>;
 
 export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
   description:
-    'Pull genotype calls for a germplasm × variant set. Filter to bound cost — at minimum, set `variantSetDbId` or `germplasmDbIds`. The upstream pull is capped by deployment policy; when the pull is truncated, narrow the filters. results[] holds the leading calls up to `loadLimit` and a 24,000-byte budget; when it holds fewer than were collected, every collected call is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL) instead of paging row-by-row.',
+    'Pull genotype calls for a call set × variant set. Filter to bound cost — at minimum, set one of `variantSetDbId`, `variantSetDbIds`, `germplasmDbIds`, `callSetDbIds`, or `variantDbIds`. The upstream pull is capped by deployment policy; when the pull is truncated, narrow the filters. results[] holds the leading calls up to `loadLimit` and a 24,000-byte budget; when it holds fewer than were collected, every collected call is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL) instead of paging row-by-row.',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -202,7 +202,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'No variant set, germplasm, call set, or variant filter was provided',
       recovery:
-        'Provide variantSetDbId or germplasmDbIds before retrying — unfiltered pulls are too expensive.',
+        'Provide variantSetDbId, variantSetDbIds, germplasmDbIds, callSetDbIds, or variantDbIds before retrying — unfiltered pulls are too expensive.',
     },
     {
       reason: 'search_endpoint_disabled',

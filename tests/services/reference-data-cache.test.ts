@@ -1,21 +1,25 @@
 /**
  * @fileoverview Unit tests for ReferenceDataCache. Exercises batch caching,
- * cache-hit/miss partitioning, dedup, and per-noun endpoint routing.
+ * cache-hit/miss partitioning, dedup, the detail-route vs list-filter choice
+ * per noun, and miss warnings.
  *
  * @module tests/services/reference-data-cache.test
  */
 
-import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ServerConfig } from '@/config/server-config.js';
 import {
-  type BrapiClient,
-  type BrapiEnvelope,
-  DIALECT_ALL_DROPPED_REASON,
-} from '@/services/brapi-client/index.js';
-import { cassavabaseDialect } from '@/services/brapi-dialect/index.js';
+  JsonRpcErrorCode,
+  McpError,
+  serviceUnavailable,
+  timeout,
+} from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ServerConfig } from '@/config/server-config.js';
+import { BrapiClient, type BrapiEnvelope, type Fetcher } from '@/services/brapi-client/index.js';
+import { breedbaseDialect, cassavabaseDialect } from '@/services/brapi-dialect/index.js';
 import type { BrapiDialect } from '@/services/brapi-dialect/types.js';
+import type { CallDescriptor, CapabilityProfile } from '@/services/capability-registry/types.js';
 import { ReferenceDataCache } from '@/services/reference-data-cache/reference-data-cache.js';
 import type { Location, Program, Trial } from '@/services/reference-data-cache/types.js';
 
@@ -239,38 +243,6 @@ describe('ReferenceDataCache', () => {
       expect(opts.dialect?.id).toBe('cassavabase');
     });
 
-    it('returns empty Map and warns when dialect drops every supported ID filter', async () => {
-      // Stub a dialect that drops every plural ID filter on /trials.
-      const dropAllDialect: BrapiDialect = {
-        id: 'drop-all',
-        adaptGetFilters: () => ({
-          filters: {},
-          dropped: ['trialDbIds'],
-          warnings: ["drop-all dialect: dropped 'trialDbIds'"],
-        }),
-      };
-      // Have the client.get stub mimic BrapiClient.get's actual behavior —
-      // throw the structured all-dropped error.
-      client.get.mockImplementation(async () => {
-        throw validationError('all dropped', {
-          reason: DIALECT_ALL_DROPPED_REASON,
-          dialect: 'drop-all',
-          path: '/trials',
-          dropped: ['trialDbIds'],
-        });
-      });
-      const ctx = createMockContext({ tenantId: 'test-tenant' });
-      const warnings: string[] = [];
-
-      const result = await cache.getTrials(BASE_URL, ['t1'], ctx, {
-        dialect: dropAllDialect,
-        warnings,
-      });
-
-      expect(result.size).toBe(0);
-      expect(warnings.some((w) => /Reference lookup \/trials skipped/.test(w))).toBe(true);
-    });
-
     it('rethrows non-dialect errors so transient upstream failures are visible', async () => {
       client.get.mockRejectedValue({ code: JsonRpcErrorCode.ServiceUnavailable });
       const ctx = createMockContext({ tenantId: 'test-tenant' });
@@ -280,21 +252,420 @@ describe('ReferenceDataCache', () => {
       ).rejects.toEqual({ code: JsonRpcErrorCode.ServiceUnavailable });
     });
   });
+});
 
-  describe('invalidate', () => {
-    it('evicts all cached entries for a base url so subsequent calls refetch', async () => {
-      client.get.mockResolvedValue(
-        envelope<{ data: Program[] }>({
-          data: [{ programDbId: 'p1', programName: 'Cached' }],
-        }),
-      );
-      const ctx = createMockContext({ tenantId: 'test-tenant' });
+/**
+ * Route choice and miss handling through the real BrapiClient, so the
+ * singleton 5xx → NotFound reclassification and the companion request options
+ * run as they do in production; only the network fetch is faked.
+ */
+describe('ReferenceDataCache foreign-key routes (#125)', () => {
+  function profileWith(calls: CallDescriptor[]): CapabilityProfile {
+    const supported: Record<string, CallDescriptor> = {};
+    for (const call of calls) supported[call.service] = call;
+    return {
+      baseUrl: BASE_URL,
+      crops: [],
+      fetchedAt: '2026-01-01T00:00:00Z',
+      server: {},
+      supported,
+    };
+  }
 
-      await cache.getPrograms(BASE_URL, ['p1'], ctx);
-      await cache.invalidate(BASE_URL, ctx);
-      await cache.getPrograms(BASE_URL, ['p1'], ctx);
+  /** SGN-shaped discovery: every collection and detail route listed with GET. */
+  const DETAIL_PROFILE = profileWith(
+    [
+      'programs',
+      'trials',
+      'locations',
+      'programs/{programDbId}',
+      'trials/{trialDbId}',
+      'locations/{locationDbId}',
+    ].map((service) => ({ service, methods: ['GET'] })),
+  );
 
-      expect(client.get).toHaveBeenCalledTimes(2);
-    });
+  let fetcher: ReturnType<typeof vi.fn>;
+  let cache: ReferenceDataCache;
+
+  beforeEach(() => {
+    fetcher = vi.fn();
+    const client = new BrapiClient(baseConfig, fetcher as unknown as Fetcher);
+    cache = new ReferenceDataCache(baseConfig, () => client);
   });
+
+  const json = (body: unknown) =>
+    new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' } });
+  const requested = () => fetcher.mock.calls.map((c) => new URL(String(c[0])));
+  const lastSegment = (url: unknown) => decodeURIComponent(String(url).split('/').pop() ?? '');
+  const notFound404 = () =>
+    new McpError(JsonRpcErrorCode.NotFound, 'Fetch failed. Status: 404', { status: 404 });
+
+  it('resolves each ID through GET /{noun}/{id} on the companion budget and caches the record', async () => {
+    fetcher.mockImplementation(async (url: string) =>
+      json(envelope({ programDbId: lastSegment(url), programName: 'NCSU' })),
+    );
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const warnings: string[] = [];
+
+    const first = await cache.getPrograms(BASE_URL, ['132'], ctx, {
+      profile: DETAIL_PROFILE,
+      warnings,
+    });
+
+    expect(first.get('132')).toEqual({ programDbId: '132', programName: 'NCSU' });
+    expect(warnings).toEqual([]);
+    expect(requested().map((u) => u.pathname)).toEqual(['/brapi/v2/programs/132']);
+    expect(fetcher.mock.calls[0]![1]).toBe(baseConfig.companionTimeoutMs);
+
+    const second = await cache.getPrograms(BASE_URL, ['132'], ctx, { profile: DETAIL_PROFILE });
+    expect(second.get('132')?.programName).toBe('NCSU');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      'HTTP 404',
+      async () => {
+        throw notFound404();
+      },
+    ],
+    [
+      'the HTTP 500 SGN serves for an unknown ID',
+      async () => {
+        throw serviceUnavailable('Fetch failed. Status: 500', { status: 500, body: '<html>' });
+      },
+    ],
+    [
+      'HTTP 200 with result: null',
+      async () =>
+        json({
+          metadata: {
+            status: [{ message: 'The given trialDbId not found.', messageType: 'ERROR' }],
+          },
+          result: null,
+        }),
+    ],
+    ['HTTP 200 carrying another record', async () => json(envelope({ trialDbId: 't-other' }))],
+  ])(
+    'treats %s as a final miss: warns, sends no list request, caches nothing',
+    async (_label, answer) => {
+      fetcher.mockImplementation(answer);
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+      const warnings: string[] = [];
+
+      const result = await cache.getTrials(BASE_URL, ['t1'], ctx, {
+        profile: DETAIL_PROFILE,
+        warnings,
+      });
+
+      expect(result.size).toBe(0);
+      expect(warnings).toEqual([
+        "trial 't1' not found: GET /trials/t1 returned no matching record.",
+      ]);
+      expect(requested().map((u) => u.pathname)).toEqual(['/brapi/v2/trials/t1']);
+
+      await cache.getTrials(BASE_URL, ['t1'], ctx, { profile: DETAIL_PROFILE });
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('resolves a mix of hits and misses per ID, warning for each miss', async () => {
+    fetcher.mockImplementation(async (url: string) => {
+      const id = lastSegment(url);
+      if (id === 'l2') throw notFound404();
+      return json(envelope({ locationDbId: id }));
+    });
+    const warnings: string[] = [];
+
+    const result = await cache.getLocations(
+      BASE_URL,
+      ['l1', 'l2', 'l3'],
+      createMockContext({ tenantId: 'test-tenant' }),
+      { profile: DETAIL_PROFILE, warnings },
+    );
+
+    expect([...result.keys()].sort()).toEqual(['l1', 'l3']);
+    expect(warnings).toEqual([
+      "location 'l2' not found: GET /locations/l2 returned no matching record.",
+    ]);
+    expect(requested().map((u) => u.pathname)).toEqual([
+      '/brapi/v2/locations/l1',
+      '/brapi/v2/locations/l2',
+      '/brapi/v2/locations/l3',
+    ]);
+  });
+
+  it('bounds concurrent detail requests by maxConcurrentRequests', async () => {
+    const limit = baseConfig.maxConcurrentRequests;
+    let inflight = 0;
+    let peak = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fetcher.mockImplementation(async (url: string) => {
+      inflight++;
+      peak = Math.max(peak, inflight);
+      if (inflight === limit) release();
+      await gate;
+      inflight--;
+      return json(envelope({ programDbId: lastSegment(url) }));
+    });
+    const ids = Array.from({ length: limit + 2 }, (_, i) => `p${i}`);
+
+    const result = await cache.getPrograms(
+      BASE_URL,
+      ids,
+      createMockContext({ tenantId: 'test-tenant' }),
+      { profile: DETAIL_PROFILE },
+    );
+
+    expect(result.size).toBe(ids.length);
+    expect(peak).toBe(limit);
+  });
+
+  it('hands out no further IDs once a detail request fails', async () => {
+    const client = new BrapiClient(baseConfig, fetcher as unknown as Fetcher);
+    const twoWorkers = new ReferenceDataCache(
+      { ...baseConfig, maxConcurrentRequests: 2 },
+      () => client,
+    );
+    fetcher.mockImplementation(async (url: string, timeoutMs: number) => {
+      const id = lastSegment(url);
+      if (id === 'p1') {
+        throw timeout(`Fetch timed out after ${timeoutMs}ms`, { errorSource: 'FetchTimeout' });
+      }
+      // The other worker's request answers after p1's failure has settled.
+      await new Promise((resolve) => setImmediate(resolve));
+      return json(envelope({ programDbId: id }));
+    });
+
+    await expect(
+      twoWorkers.getPrograms(
+        BASE_URL,
+        ['p1', 'p2', 'p3', 'p4'],
+        createMockContext({ tenantId: 'test-tenant' }),
+        { profile: DETAIL_PROFILE },
+      ),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.Timeout });
+    expect(requested().map((u) => u.pathname)).toEqual([
+      '/brapi/v2/programs/p1',
+      '/brapi/v2/programs/p2',
+    ]);
+  });
+
+  it('encodes the ID into the detail path', async () => {
+    fetcher.mockImplementation(async () => json(envelope({ programDbId: 'odd/id' })));
+
+    const result = await cache.getPrograms(
+      BASE_URL,
+      ['odd/id'],
+      createMockContext({ tenantId: 'test-tenant' }),
+      { profile: DETAIL_PROFILE },
+    );
+
+    expect(result.has('odd/id')).toBe(true);
+    expect(String(fetcher.mock.calls[0]![0])).toContain('/programs/odd%2Fid');
+  });
+
+  it('propagates a detail timeout without a list follow-up', async () => {
+    fetcher.mockImplementation(async (_url: string, timeoutMs: number) => {
+      throw timeout(`Fetch timed out after ${timeoutMs}ms`, { errorSource: 'FetchTimeout' });
+    });
+    const warnings: string[] = [];
+
+    await expect(
+      cache.getPrograms(BASE_URL, ['132'], createMockContext({ tenantId: 'test-tenant' }), {
+        profile: DETAIL_PROFILE,
+        warnings,
+      }),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.Timeout });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(warnings).toEqual([]);
+  });
+
+  it('propagates caller cancellation without a miss warning', async () => {
+    const controller = new AbortController();
+    fetcher.mockImplementation(
+      (_url: string, _timeoutMs: number, _ctx: unknown, init?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+          queueMicrotask(() => controller.abort());
+        }),
+    );
+    const ctx = createMockContext({ tenantId: 'test-tenant', signal: controller.signal });
+    const warnings: string[] = [];
+
+    await expect(
+      cache.getPrograms(BASE_URL, ['132'], ctx, { profile: DETAIL_PROFILE, warnings }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(warnings).toEqual([]);
+  });
+
+  it.each([
+    ['listed with no methods', { service: 'programs/{programDbId}' }, '/brapi/v2/programs/132'],
+    [
+      'listed without GET',
+      { service: 'programs/{programDbId}', methods: ['PUT'] },
+      '/brapi/v2/programs',
+    ],
+    ['not listed', undefined, '/brapi/v2/programs'],
+  ] as const)(
+    'takes the detail route only when it is advertised for GET (%s)',
+    async (_label, detail, path) => {
+      fetcher.mockImplementation(async (url: string) =>
+        new URL(url).pathname.endsWith('/programs')
+          ? json(envelope({ data: [{ programDbId: '132' }] }))
+          : json(envelope({ programDbId: '132' })),
+      );
+      const profile = profileWith([
+        { service: 'programs', methods: ['GET'] },
+        ...(detail ? [detail as CallDescriptor] : []),
+      ]);
+
+      const result = await cache.getPrograms(
+        BASE_URL,
+        ['132'],
+        createMockContext({ tenantId: 'test-tenant' }),
+        { profile },
+      );
+
+      expect(result.has('132')).toBe(true);
+      expect(requested().map((u) => u.pathname)).toEqual([path]);
+    },
+  );
+
+  it('warns and returns nothing for an ID the list response omits (ignored filter)', async () => {
+    // SGN /programs ignores the ID filter and answers its first page.
+    fetcher.mockImplementation(async () =>
+      json(envelope({ data: [{ programDbId: '1288', programName: 'First' }] }, { totalCount: 31 })),
+    );
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const warnings: string[] = [];
+
+    const result = await cache.getPrograms(BASE_URL, ['132'], ctx, {
+      dialect: breedbaseDialect,
+      warnings,
+    });
+
+    expect([...result.keys()]).toEqual([]);
+    expect(warnings).toEqual([
+      "program '132' not found: GET /programs filtered by ID did not return it.",
+    ]);
+    expect(requested()[0]!.searchParams.get('programDbId')).toBe('132');
+
+    await cache.getPrograms(BASE_URL, ['132'], ctx, { dialect: breedbaseDialect });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Detail-route outcomes per upstream status, through the framework's real
+ * `fetchWithTimeout` status mapping and the client's reclassification — only
+ * the global `fetch` is faked. A miss (the section omitted with the noun and ID
+ * named) is final and uncached; every other failure rejects, which
+ * `brapi_get_study` records as `<noun> FK lookup failed` and returns the study.
+ */
+describe('ReferenceDataCache detail route — upstream status map (#125)', () => {
+  const config: ServerConfig = { ...baseConfig, allowPrivateIps: true };
+  const profile: CapabilityProfile = {
+    baseUrl: BASE_URL,
+    crops: [],
+    fetchedAt: '2026-01-01T00:00:00Z',
+    server: {},
+    supported: {
+      programs: { service: 'programs', methods: ['GET'] },
+      'programs/{programDbId}': { service: 'programs/{programDbId}', methods: ['GET'] },
+    },
+  };
+  const miss = "program '132' not found: GET /programs/132 returned no matching record.";
+  const record = () =>
+    new Response(JSON.stringify({ metadata: {}, result: { programDbId: '132' } }), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  const status = (code: number) => () =>
+    new Response(JSON.stringify({ metadata: {}, result: null }), {
+      status: code,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  let upstream: ReturnType<typeof vi.fn>;
+  let cache: ReferenceDataCache;
+
+  beforeEach(() => {
+    upstream = vi.fn();
+    vi.stubGlobal('fetch', upstream);
+    const client = new BrapiClient(config, (url, timeoutMs, ctx, options) =>
+      fetchWithTimeout(url, timeoutMs, ctx, options),
+    );
+    cache = new ReferenceDataCache(config, () => client);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([404, 500, 502, 503])(
+    'reads HTTP %i as a miss: warns with the noun and ID, caches nothing, and a later hit resolves',
+    async (code) => {
+      upstream.mockImplementationOnce(status(code)).mockImplementationOnce(record);
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+      const warnings: string[] = [];
+
+      const missed = await cache.getPrograms(BASE_URL, ['132'], ctx, { profile, warnings });
+      expect(missed.size).toBe(0);
+      expect(warnings).toEqual([miss]);
+
+      const later: string[] = [];
+      const hit = await cache.getPrograms(BASE_URL, ['132'], ctx, { profile, warnings: later });
+      expect(hit.get('132')).toEqual({ programDbId: '132' });
+      expect(later).toEqual([]);
+      expect(upstream).toHaveBeenCalledTimes(2);
+      expect(upstream.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+        '/brapi/v2/programs/132',
+        '/brapi/v2/programs/132',
+      ]);
+    },
+  );
+
+  it('reads HTTP 200 with result: null as a miss, and a later hit resolves', async () => {
+    upstream.mockImplementationOnce(status(200)).mockImplementationOnce(record);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    const warnings: string[] = [];
+
+    expect((await cache.getPrograms(BASE_URL, ['132'], ctx, { profile, warnings })).size).toBe(0);
+    expect(warnings).toEqual([miss]);
+    expect((await cache.getPrograms(BASE_URL, ['132'], ctx, { profile })).has('132')).toBe(true);
+  });
+
+  it.each([
+    [400, JsonRpcErrorCode.ValidationError, 'upstream_bad_request'],
+    [401, JsonRpcErrorCode.Unauthorized, 'upstream_unauthorized'],
+    [403, JsonRpcErrorCode.Forbidden, 'upstream_forbidden'],
+    [429, JsonRpcErrorCode.RateLimited, 'upstream_rate_limited'],
+    [504, JsonRpcErrorCode.Timeout, undefined],
+  ])(
+    'rejects HTTP %i without a miss warning, a list follow-up, or a cache entry',
+    async (code, errorCode, reason) => {
+      upstream.mockImplementationOnce(status(code)).mockImplementationOnce(record);
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+      const warnings: string[] = [];
+
+      const failure = await cache.getPrograms(BASE_URL, ['132'], ctx, { profile, warnings }).then(
+        () => undefined,
+        (err: unknown) => err as McpError,
+      );
+      expect(failure).toBeInstanceOf(McpError);
+      expect(failure?.code).toBe(errorCode);
+      if (reason) expect(failure?.data).toMatchObject({ reason });
+      expect(warnings).toEqual([]);
+      expect(upstream).toHaveBeenCalledTimes(1);
+
+      const hit = await cache.getPrograms(BASE_URL, ['132'], ctx, { profile });
+      expect(hit.has('132')).toBe(true);
+    },
+  );
 });

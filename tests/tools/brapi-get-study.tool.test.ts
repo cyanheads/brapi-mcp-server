@@ -5,7 +5,13 @@
  * @module tests/tools/brapi-get-study.tool.test
  */
 
-import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  forbidden,
+  JsonRpcErrorCode,
+  serviceUnavailable,
+  timeout,
+  unauthorized,
+} from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { brapiConnect } from '@/mcp-server/tools/definitions/brapi-connect.tool.js';
@@ -22,24 +28,34 @@ import {
   withCallRemaining,
 } from './_tool-test-helpers.js';
 
-async function connect(fetcher: MockFetcher, serverName = 'Test') {
+/** The detail routes SGN servers and the BrAPI test server advertise for the FK nouns. */
+const DETAIL_CALLS = [
+  { service: 'programs/{programDbId}', methods: ['GET', 'PUT'], versions: ['2.1'] },
+  { service: 'trials/{trialDbId}', methods: ['GET', 'PUT'], versions: ['2.1'] },
+  { service: 'locations/{locationDbId}', methods: ['GET', 'PUT'], versions: ['2.1'] },
+];
+
+/** The collections brapi_get_study reads, each advertised for GET. */
+const STUDY_CALLS: object[] = [
+  { service: 'studies', methods: ['GET'], versions: ['2.1'] },
+  { service: 'observations', methods: ['GET'], versions: ['2.1'] },
+  { service: 'observationunits', methods: ['GET'], versions: ['2.1'] },
+  { service: 'variables', methods: ['GET'], versions: ['2.1'] },
+  { service: 'programs', methods: ['GET'], versions: ['2.1'] },
+  { service: 'trials', methods: ['GET'], versions: ['2.1'] },
+  { service: 'locations', methods: ['GET'], versions: ['2.1'] },
+];
+
+async function connect(
+  fetcher: MockFetcher,
+  serverName = 'Test',
+  extraCalls: object[] = [],
+  baseCalls: object[] = STUDY_CALLS,
+) {
   fetcher.mockImplementation(async (url: string) => {
     const path = pathnameOf(url);
     if (path.endsWith('/serverinfo')) {
-      return jsonResponse(
-        envelope({
-          serverName,
-          calls: [
-            { service: 'studies', methods: ['GET'], versions: ['2.1'] },
-            { service: 'observations', methods: ['GET'], versions: ['2.1'] },
-            { service: 'observationunits', methods: ['GET'], versions: ['2.1'] },
-            { service: 'variables', methods: ['GET'], versions: ['2.1'] },
-            { service: 'programs', methods: ['GET'], versions: ['2.1'] },
-            { service: 'trials', methods: ['GET'], versions: ['2.1'] },
-            { service: 'locations', methods: ['GET'], versions: ['2.1'] },
-          ],
-        }),
-      );
+      return jsonResponse(envelope({ serverName, calls: [...baseCalls, ...extraCalls] }));
     }
     if (path.endsWith('/commoncropnames')) return jsonResponse(envelope({ data: [] }));
     if (path.endsWith('/studies')) {
@@ -202,6 +218,43 @@ describe('brapi_get_study tool', () => {
     expect(result.program?.programName).toBe('Cassava Breeding');
     expect(result.trial?.trialName).toBe('Advanced Yield');
     expect(result.location?.locationName).toBe('Ibadan');
+    expect(result.observationCount).toBe(412);
+    expect(result.observationUnitCount).toBe(120);
+    expect(result.variableCount).toBe(18);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('reports companion counts for collections listed without methods', async () => {
+    // A call listed without methods serves every method.
+    const ctx = await connect(
+      fetcher,
+      'Test',
+      [],
+      [
+        { service: 'studies', methods: ['GET'], versions: ['2.1'] },
+        { service: 'observations', versions: ['2.1'] },
+        { service: 'observationunits', versions: ['2.1'] },
+        { service: 'variables', versions: ['2.1'] },
+      ],
+    );
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      const scoped = u.searchParams.has('studyDbIds') || u.searchParams.has('studyDbId');
+      if (u.pathname.endsWith('/studies/s1')) return jsonResponse(envelope({ studyDbId: 's1' }));
+      if (u.pathname.endsWith('/observations')) {
+        return jsonResponse(envelope({ data: [] }, { totalCount: scoped ? 412 : 9000 }));
+      }
+      if (u.pathname.endsWith('/observationunits')) {
+        return jsonResponse(envelope({ data: [] }, { totalCount: 120 }));
+      }
+      if (u.pathname.endsWith('/variables')) {
+        return jsonResponse(envelope({ data: [] }, { totalCount: scoped ? 18 : 9000 }));
+      }
+      throw new Error(`Unexpected path: ${u.pathname}`);
+    });
+
+    const result = await brapiGetStudy.handler(brapiGetStudy.input.parse({ studyDbId: 's1' }), ctx);
+
     expect(result.observationCount).toBe(412);
     expect(result.observationUnitCount).toBe(120);
     expect(result.variableCount).toBe(18);
@@ -513,5 +566,233 @@ describe('brapi_get_study tool', () => {
     expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).toMatch(
       /cancel/i,
     );
+  });
+});
+
+describe('brapi_get_study FK detail routes (#125)', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  type Answer = (timeoutMs: number, signal?: AbortSignal) => Promise<Response>;
+
+  /**
+   * SGN-shaped upstream: the collection routes ignore the ID filter and answer
+   * their first page; each detail route answers the requested record unless
+   * `overrides` maps its path suffix to another answer. Trials name program p1.
+   */
+  function serveSgn(study: Record<string, unknown>, overrides: Record<string, Answer> = {}) {
+    fetcher.mockImplementation(
+      async (url: string, timeoutMs: number, _ctx: unknown, init?: { signal?: AbortSignal }) => {
+        const path = pathnameOf(url);
+        const override = Object.entries(overrides).find(([suffix]) => path.endsWith(suffix));
+        if (override) return override[1](timeoutMs, init?.signal);
+        if (path.endsWith(`/studies/${String(study.studyDbId)}`))
+          return jsonResponse(envelope(study));
+        if (path.endsWith('/programs'))
+          return jsonResponse(
+            envelope({ data: [{ programDbId: '1288', programName: 'First' }] }, { totalCount: 31 }),
+          );
+        if (path.endsWith('/trials'))
+          return jsonResponse(envelope({ data: [{ trialDbId: '1790' }] }, { totalCount: 135 }));
+        if (path.endsWith('/locations'))
+          return jsonResponse(envelope({ data: [{ locationDbId: '1' }] }, { totalCount: 136 }));
+        const detail = /\/(programs|trials|locations)\/([^/]+)$/.exec(path);
+        if (detail) {
+          const id = decodeURIComponent(detail[2]!);
+          if (detail[1] === 'programs')
+            return jsonResponse(envelope({ programDbId: id, programName: `Program ${id}` }));
+          if (detail[1] === 'trials')
+            return jsonResponse(
+              envelope({ trialDbId: id, trialName: `Trial ${id}`, programDbId: 'p1' }),
+            );
+          return jsonResponse(envelope({ locationDbId: id, locationName: `Location ${id}` }));
+        }
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      },
+    );
+  }
+
+  /** Runs the tool through the contract harness on `ctx`'s state; returns both surfaces. */
+  async function run(ctx: Awaited<ReturnType<typeof connect>>, signal?: AbortSignal) {
+    const definition = {
+      ...brapiGetStudy,
+      handler: (input, contractCtx) =>
+        brapiGetStudy.handler(input, { ...contractCtx, state: ctx.state }),
+    } satisfies typeof brapiGetStudy;
+    const result = await runToolContract(
+      definition,
+      { studyDbId: 's1' },
+      { context: { tenantId: 't1', ...(signal && { signal }) } },
+    );
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    return { result, text };
+  }
+
+  const fkPaths = () =>
+    fetcher.mock.calls
+      .map(([url]) => pathnameOf(url))
+      .filter((path) => /\/(programs|trials|locations)(\/|$)/.test(path))
+      .sort();
+
+  const FULL_STUDY = { studyDbId: 's1', programDbId: 'p1', trialDbId: 't1', locationDbId: 'l1' };
+
+  it.each(['Breedbase', 'CassavaBase'])(
+    'resolves program, trial, and location through their detail routes, never the list filter (%s)',
+    async (serverName) => {
+      const ctx = await connect(fetcher, serverName, DETAIL_CALLS);
+      serveSgn(FULL_STUDY);
+
+      const { result, text } = await run(ctx);
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        program: { programDbId: 'p1', programName: 'Program p1' },
+        trial: { trialDbId: 't1', trialName: 'Trial t1' },
+        location: { locationDbId: 'l1', locationName: 'Location l1' },
+        warnings: [],
+      });
+      expect(text).toContain('Program p1');
+      expect(text).toContain('Trial t1');
+      expect(text).toContain('Location l1');
+      expect(fkPaths()).toEqual([
+        '/brapi/v2/locations/l1',
+        '/brapi/v2/programs/p1',
+        '/brapi/v2/trials/t1',
+      ]);
+    },
+  );
+
+  it('omits a record its detail route does not return, warning with the noun and ID on both surfaces', async () => {
+    const ctx = await connect(fetcher, 'Breedbase', DETAIL_CALLS);
+    serveSgn(FULL_STUDY, {
+      '/programs/p1': async () => {
+        throw serviceUnavailable('Fetch failed. Status: 500', { status: 500, body: '<html>' });
+      },
+    });
+
+    const { result, text } = await run(ctx);
+
+    const warning = "program 'p1' not found: GET /programs/p1 returned no matching record.";
+    expect(result.structuredContent).toMatchObject({
+      trial: { trialDbId: 't1' },
+      warnings: [warning],
+    });
+    expect(result.structuredContent).not.toHaveProperty('program');
+    expect(text).toContain(`## Warnings\n- ${warning}`);
+    expect(text).not.toContain('## Program');
+    expect(fkPaths()).not.toContain('/brapi/v2/programs');
+  });
+
+  it('keeps the FK lookup failed warning when a detail lookup times out', async () => {
+    const ctx = await connect(fetcher, 'Breedbase', DETAIL_CALLS);
+    serveSgn(FULL_STUDY, {
+      '/trials/t1': async (timeoutMs) => {
+        throw timeout(`Fetch timed out after ${timeoutMs}ms`, { errorSource: 'FetchTimeout' });
+      },
+    });
+
+    const { result } = await run(ctx);
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      study: { studyDbId: 's1' },
+      program: { programDbId: 'p1' },
+      warnings: [expect.stringMatching(/^trial FK lookup failed: .*timed out/)],
+    });
+    expect(result.structuredContent).not.toHaveProperty('trial');
+    expect(fkPaths()).not.toContain('/brapi/v2/trials');
+  });
+
+  it.each([
+    ['401', () => unauthorized('Fetch failed. Status: 401', { status: 401 })],
+    ['403', () => forbidden('Fetch failed. Status: 403', { status: 403 })],
+  ])(
+    'returns the study with an FK lookup failed warning when a detail route answers HTTP %s',
+    async (_label, failure) => {
+      const ctx = await connect(fetcher, 'Breedbase', DETAIL_CALLS);
+      serveSgn(FULL_STUDY, {
+        '/locations/l1': async () => {
+          throw failure();
+        },
+      });
+
+      const { result, text } = await run(ctx);
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        study: { studyDbId: 's1' },
+        program: { programDbId: 'p1' },
+        trial: { trialDbId: 't1' },
+        warnings: [expect.stringMatching(/^location FK lookup failed: /)],
+      });
+      expect(result.structuredContent).not.toHaveProperty('location');
+      expect(text).toContain('location FK lookup failed');
+      expect(fkPaths()).not.toContain('/brapi/v2/locations');
+    },
+  );
+
+  it('does not cache a detail miss: the next call for the same study resolves the record', async () => {
+    const ctx = await connect(fetcher, 'Breedbase', DETAIL_CALLS);
+    serveSgn(FULL_STUDY, {
+      '/programs/p1': async () => {
+        throw serviceUnavailable('Fetch failed. Status: 500', { status: 500, body: '<html>' });
+      },
+    });
+    const first = await run(ctx);
+    expect(first.result.structuredContent).not.toHaveProperty('program');
+    expect(first.result.structuredContent).toMatchObject({
+      warnings: ["program 'p1' not found: GET /programs/p1 returned no matching record."],
+    });
+
+    fetcher.mockReset();
+    serveSgn(FULL_STUDY);
+    const second = await run(ctx);
+
+    expect(second.result.structuredContent).toMatchObject({
+      program: { programDbId: 'p1', programName: 'Program p1' },
+      warnings: [],
+    });
+    // The trial and location were cached by the first call; only the missed program is refetched.
+    expect(fkPaths()).toEqual(['/brapi/v2/programs/p1']);
+  });
+
+  it('resolves the trial-derived program through /programs/{programDbId}', async () => {
+    const ctx = await connect(fetcher, 'Breedbase', DETAIL_CALLS);
+    serveSgn({ studyDbId: 's1', trialDbId: 't1' });
+
+    const { result } = await run(ctx);
+
+    expect(result.structuredContent).toMatchObject({
+      trial: { trialDbId: 't1', programDbId: 'p1' },
+      program: { programDbId: 'p1', programName: 'Program p1' },
+      warnings: [],
+    });
+    expect(fkPaths()).toEqual(['/brapi/v2/programs/p1', '/brapi/v2/trials/t1']);
+  });
+
+  it('propagates caller cancellation during a detail lookup', async () => {
+    const ctx = await connect(fetcher, 'Breedbase', DETAIL_CALLS);
+    const controller = new AbortController();
+    serveSgn(FULL_STUDY, {
+      '/programs/p1': (timeoutMs, signal) => {
+        queueMicrotask(() => controller.abort());
+        return stalledResponse(timeoutMs, signal);
+      },
+    });
+
+    const { result, text } = await run(ctx, controller.signal);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.RequestCancelled },
+    });
+    expect(text).toMatch(/cancel/i);
   });
 });

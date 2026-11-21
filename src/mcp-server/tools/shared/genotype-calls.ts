@@ -24,7 +24,7 @@ import { buildRequestOptions } from './find-helpers.js';
 const PAGE_SIZE = 10_000;
 
 export const NO_MATCHING_CALLS_NOTICE =
-  'No calls matched the requested filters. The variant set or filter combination may not match any data on this server — broaden the scope (variantSetDbId, germplasmDbIds) or verify the IDs.';
+  'No calls matched the requested filters. The variant set or filter combination may not match any data on this server — broaden the scope (variantSetDbId, variantDbIds, germplasmDbIds) or verify the IDs.';
 
 const GenotypeSchema = z
   .object({
@@ -42,7 +42,7 @@ export const CallRowSchema = z
     callSetDbId: z
       .string()
       .nullish()
-      .describe('FK to the call set (one germplasm × one variant set = one call set).'),
+      .describe("FK to the call set — one sample's calls in a variant set."),
     callSetName: z.string().nullish().describe('Display name of the call set.'),
     variantDbId: z.string().nullish().describe('FK to the variant being called.'),
     variantName: z.string().nullish().describe('Display name / alias of the variant.'),

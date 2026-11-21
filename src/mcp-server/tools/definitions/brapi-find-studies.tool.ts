@@ -1,6 +1,6 @@
 /**
  * @fileoverview `brapi_find_studies` — locate studies matching crop / trial
- * type / season / location / program filters. Pulls an initial page and, when
+ * type / season / location / program / recorded-variable filters. Pulls an initial page and, when
  * results[] holds fewer rows than matched (more upstream pages, loadLimit, or
  * the inline byte budget), materializes the match as a dataframe and returns a
  * handle. Companion response: per-field
@@ -40,6 +40,7 @@ import {
   maybeSpill,
   mergeFilters,
   NonBlankString,
+  probeScopeNarrowed,
   renderAdvisoryTrailer,
   renderAppliedFiltersTrailer,
   renderDataframeHandle,
@@ -134,6 +135,7 @@ const SERVER_TO_USER: Record<string, string> = {
   programDbIds: 'programs',
   trialDbIds: 'trials',
   studyNames: 'studyNames',
+  observationVariableDbIds: 'variables',
   // Singulars — emitted by SGN-family dialects (cassavabase, etc.).
   commonCropName: 'crop',
   studyType: 'trialTypes',
@@ -142,9 +144,13 @@ const SERVER_TO_USER: Record<string, string> = {
   programDbId: 'programs',
   trialDbId: 'trials',
   studyName: 'studyNames',
+  observationVariableDbId: 'variables',
   // Scalars — same on the wire either way.
   active: 'active',
 };
+
+/** Wire keys `variables` travels under: the v2.1 plural, or the singular a dialect maps it to. */
+const VARIABLE_KEYS = ['observationVariableDbIds', 'observationVariableDbId'] as const;
 
 const InputSchema = z.object({
   alias: AliasInput,
@@ -160,6 +166,12 @@ const InputSchema = z.object({
   programs: z.array(NonBlankString).optional().describe('Filter by programDbIds.'),
   trials: z.array(NonBlankString).optional().describe('Filter by trialDbIds.'),
   studyNames: z.array(NonBlankString).optional().describe('Filter by study display name.'),
+  variables: z
+    .array(NonBlankString)
+    .optional()
+    .describe(
+      'Filter by observationVariableDbIds — studies that recorded these variables. Get IDs from brapi_find_variables.',
+    ),
   active: z.boolean().optional().describe('Restrict to active / inactive studies.'),
   loadLimit: LoadLimitInput,
   extraFilters: ExtraFiltersInput,
@@ -167,7 +179,7 @@ const InputSchema = z.object({
 
 export const brapiFindStudies = tool('brapi_find_studies', {
   description:
-    'Locate studies matching crop, trial type, season, location, or program. Enriches results with program/trial/location context in one call. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
+    'Locate studies matching crop, trial type, season, location, program, or recorded observation variable. Enriches results with program/trial/location context in one call. results[] holds the leading matches up to loadLimit and a 24,000-byte budget; when it holds fewer rows than matched, the matched set is materialized as a dataframe — read it with brapi_dataframe_describe and brapi_dataframe_query (SQL).',
   annotations: { readOnlyHint: true, openWorldHint: true },
   errors: [
     {
@@ -274,7 +286,7 @@ export const brapiFindStudies = tool('brapi_find_studies', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The active dialect dropped every filter the agent supplied — the upstream server does not honor any of the requested scope filters on this endpoint, so the call would silently widen to the unfiltered baseline.',
       recovery:
-        'Drop the unsupported filters and rescope by crop, trialTypes, seasons, locations, programs, trials, studyNames, or active — these filter paths are honored on the active dialect.',
+        'Drop the unsupported filters and rescope by crop, trialTypes, seasons, locations, programs, trials, studyNames, variables, or active — these filter paths are honored on the active dialect.',
       thrownBy: 'service',
     },
   ] as const,
@@ -288,6 +300,8 @@ export const brapiFindStudies = tool('brapi_find_studies', {
     programDbIds: 'programs',
     trialDbId: 'trials',
     trialDbIds: 'trials',
+    observationVariableDbId: 'variables',
+    observationVariableDbIds: 'variables',
   },
   output: OutputSchema,
 
@@ -405,6 +419,7 @@ export async function findStudies(
       programDbIds: input.programs,
       trialDbIds: input.trials,
       studyNames: input.studyNames,
+      observationVariableDbIds: input.variables,
       active: input.active,
     },
     input.extraFilters,
@@ -474,6 +489,18 @@ export async function findStudies(
   });
   const { fullRows, dataframe, rowsScanned, scanComplete, results, hasMore } = spill;
 
+  // Study rows can't speak to `variables` — SGN rows carry no variable field,
+  // and the test server's lists declared variables, not the recorded
+  // observations the filter keys on — so it is verified by count instead: the
+  // same route without it must report a larger total. A GET union has no
+  // single total to compare against.
+  if (
+    input.variables?.length &&
+    !(await probeScopeNarrowed(client, connection, route, VARIABLE_KEYS, firstPage.totalCount, ctx))
+  ) {
+    warnings.push("Could not verify whether 'variables' narrowed the study results.");
+  }
+
   const distributions = {
     programName: computeDistribution(fullRows, (r) => asString(r.programName)),
     studyType: computeDistribution(fullRows, (r) => asString(r.studyType)),
@@ -529,6 +556,7 @@ export async function findStudies(
       'programs',
       'trials',
       'studyNames',
+      'variables',
       'active',
     ],
   });
@@ -555,7 +583,7 @@ export async function findStudies(
     ctx.enrich.notice(
       warnings.length > 0
         ? 'No rows returned. Check the warnings above for filter issues, or broaden your filters.'
-        : 'No rows matched the applied filters. Try broadening crop, seasons, programs, trials, studyNames, or active.',
+        : 'No rows matched the applied filters. Try broadening crop, seasons, programs, trials, studyNames, variables, or active.',
     );
   discloseInlineTrim(ctx, spill, loadLimit);
 

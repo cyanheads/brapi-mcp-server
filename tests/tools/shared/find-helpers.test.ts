@@ -34,6 +34,7 @@ import {
 } from '@/mcp-server/tools/definitions/index.js';
 import {
   appendPassthroughLines,
+  buildExtraFilterChecks,
   buildRefinementHint,
   collectFindRoutes,
   collectPassthroughParts,
@@ -60,7 +61,7 @@ import {
   toDataframeHandle,
 } from '@/mcp-server/tools/shared/find-helpers.js';
 import { CALL_DEADLINE_MS, getBrapiClient } from '@/services/brapi-client/index.js';
-import type { BrapiDialect } from '@/services/brapi-dialect/index.js';
+import { type BrapiDialect, brapiTestDialect } from '@/services/brapi-dialect/index.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
 import type { CallDescriptor, CapabilityProfile } from '@/services/capability-registry/types.js';
@@ -2017,6 +2018,65 @@ describe('renderMoreRowsLine', () => {
   });
 });
 
+describe('buildExtraFilterChecks — columns with nothing to compare', () => {
+  const unverifiedWarning = (keys: string) =>
+    `Could not verify these extraFilters keys against returned rows: ${keys}. The server may have silently ignored them — check brapi_describe_filters for the valid filter keys on this endpoint.`;
+
+  it.each<[string, Record<string, unknown>[]]>([
+    [
+      'an array of IDs',
+      [
+        { studyDbId: 's2', observationVariableDbIds: ['variable4', 'variable2'] },
+        { studyDbId: 's3', observationVariableDbIds: [] },
+      ],
+    ],
+    ['an object', [{ studyDbId: 's1', observationVariableDbIds: { id: 'variable1' } }]],
+    [
+      'null on every row',
+      [
+        { studyDbId: 's1', observationVariableDbIds: null },
+        { studyDbId: 's2', observationVariableDbIds: null },
+      ],
+    ],
+  ])('names a key whose column holds %s as unverified, with no check', (_shape, rows) => {
+    const warnings: string[] = [];
+
+    const checks = buildExtraFilterChecks(
+      { observationVariableDbIds: ['variable1'] },
+      rows,
+      warnings,
+    );
+
+    expect(checks).toEqual([]);
+    expect(warnings).toEqual([unverifiedWarning("'observationVariableDbIds'")]);
+  });
+
+  it('still checks a string column beside an unverifiable one and lists only the latter', () => {
+    const warnings: string[] = [];
+    const rows = [
+      { studyDbId: 's1', locationDbId: 'L1', observationVariableDbIds: ['variable1'] },
+      { studyDbId: 's2', locationDbId: 'L2', observationVariableDbIds: ['variable2'] },
+    ];
+
+    const checks = buildExtraFilterChecks(
+      { locationDbIds: ['L1'], observationVariableDbIds: ['variable1'], madeUpFilter: 'x' },
+      rows,
+      warnings,
+    );
+
+    expect(checks).toEqual([
+      {
+        paramName: 'extraFilters.locationDbIds',
+        requestedValues: ['L1'],
+        distribution: { L1: 1, L2: 1 },
+        caseInsensitive: true,
+        requireEveryRowMatch: true,
+      },
+    ]);
+    expect(warnings).toEqual([unverifiedWarning("'observationVariableDbIds', 'madeUpFilter'")]);
+  });
+});
+
 describe('enrichment surface across tool definitions', () => {
   it.each(ALL_TOOLS.map((def) => [def.name, def] as const))(
     '%s sets no enrichmentTrailer entry with both label and render',
@@ -2219,5 +2279,262 @@ describe('blank ID and filter inputs across tool definitions', () => {
   )('%s rejects an empty %s', (tool, path, list) => {
     const parsed = schemaOf(tool).safeParse(withField(tool, path, list ? [''] : ''));
     expect(parsed.success).toBe(false);
+  });
+});
+
+describe('preloaded collections — distinct counts and stop warnings (#123)', () => {
+  const connection: RegisteredServer = {
+    alias: 'default',
+    authMode: 'none',
+    baseUrl: BASE_URL,
+    registeredAt: '2026-11-21T00:00:00.000Z',
+  };
+  type Row = Record<string, unknown>;
+  const S1 = { studyDbId: 'S1', seasons: ['2022', '2023'] };
+  const S2 = { studyDbId: 'S2', seasons: ['2023'] };
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetTestServices();
+  });
+
+  /**
+   * GET /studies fanned out over three seasons: 2022 serves S1, 2023 serves S1
+   * and S2, 2024 serves nothing, or answers 503 when `fail2024` is set.
+   */
+  async function collectSeasons(loadLimit: number, fail2024: boolean) {
+    fetcher.mockImplementation(async (url: string) => {
+      const season = new URL(url).searchParams.get('seasonDbId');
+      if (season === '2024' && fail2024) return jsonResponse({ error: 'unavailable' }, 503);
+      const data = season === '2022' ? [S1] : season === '2023' ? [S1, S2] : [];
+      return jsonResponse(envelope({ data }, { totalCount: data.length }));
+    });
+    const route = {
+      kind: 'get',
+      path: '/studies',
+      service: 'studies',
+      filters: {},
+      fanout: { dimensions: [['seasonDbId', ['2022', '2023', '2024']]], warnings: [] },
+    } satisfies FindRoute;
+    const ctx = createMockContext({ tenantId: 't1' });
+    const client = getBrapiClient();
+    const firstPage = await loadInitialFindPage<Row>(client, connection, route, loadLimit, ctx);
+    const warnings: string[] = [];
+    const spill = await maybeSpill<Row>({
+      firstPage,
+      client,
+      connection,
+      bridge: getCanvasBridge(),
+      ctx,
+      filters: {},
+      path: '/studies',
+      route,
+      source: 'find_studies',
+      loadLimit,
+      warnings,
+    });
+    return { firstPage, spill, warnings, combinationWarnings: route.fanout.warnings };
+  }
+
+  it('counts a row several combinations matched once when a combination fails', async () => {
+    const { firstPage, spill, warnings, combinationWarnings } = await collectSeasons(1, true);
+    expect(spill.fullRows.map((row) => row.studyDbId)).toEqual(['S1', 'S2']);
+    expect(firstPage.totalCount).toBeUndefined();
+    expect(spill).toMatchObject({
+      rowsScanned: 2,
+      scanComplete: false,
+      hasMore: true,
+      preloadedStop: true,
+    });
+    expect(spill.dataframe).toMatchObject({ rowCount: 2, truncated: true });
+    expect(spill.dataframe?.totalCount).toBeUndefined();
+    expect(combinationWarnings).toEqual([
+      'Incomplete GET combinations: {"seasonDbId":"2024"} (upstream_failure).',
+    ]);
+    expect(warnings).toEqual([
+      'Collection incomplete at 2 distinct row(s): GET combination collection stopped early (see warnings). The dataframe holds the rows fetched so far and is marked truncated; narrow the filters or retry the call.',
+    ]);
+  });
+
+  it('reports a complete union by its distinct rows, with no stop warning', async () => {
+    const { firstPage, spill, warnings } = await collectSeasons(10, false);
+    expect(firstPage.totalCount).toBe(2);
+    expect(spill).toMatchObject({ rowsScanned: 2, scanComplete: true, hasMore: false });
+    expect(spill).not.toHaveProperty('preloadedStop');
+    expect(spill.dataframe).toBeUndefined();
+    expect(warnings).toEqual([]);
+  });
+
+  it.each([
+    ['multi-study coverage incomplete; see studyCoverage', false],
+    ['embedded observation scan stopped early (see warnings)', true],
+  ])('words a preloaded stop: %s, collectOnly %s', async (reason, collectOnly) => {
+    const warnings: string[] = [];
+    const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    const spill = await maybeSpill<Row>({
+      firstPage: { rows, hasMore: false, pagesFetched: 3 },
+      client: getBrapiClient(),
+      connection,
+      bridge: getCanvasBridge(),
+      ctx: createMockContext({ tenantId: 't1' }),
+      filters: {},
+      path: '/things',
+      source: 'find_things',
+      loadLimit: 10,
+      warnings,
+      preloadedStopReason: reason,
+      collectOnly,
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(spill).toMatchObject({
+      rowsScanned: 3,
+      scanComplete: false,
+      hasMore: true,
+      preloadedStop: true,
+    });
+    expect(warnings).toEqual([
+      `Collection incomplete at 3 distinct row(s): ${reason}. results[] holds every row fetched; narrow the filters or retry the call.`,
+    ]);
+  });
+});
+
+describe('maybeSpill annotateRows — full-set annotation before staging (#127)', () => {
+  const connection: RegisteredServer = {
+    alias: 'default',
+    authMode: 'none',
+    baseUrl: BASE_URL,
+    registeredAt: '2026-11-21T00:00:00.000Z',
+  };
+  type Row = Record<string, unknown>;
+  const route: FindRoute = { kind: 'get', path: '/things', service: 'things', filters: {} };
+  const things = Array.from({ length: 25 }, (_, i) => ({ id: `t${i + 1}` }));
+  /** Mark rows t5, t15 and t25 — a mark that needs the whole set, not one page. */
+  const annotate = (rows: Row[]) =>
+    rows.map((row, i) => (i % 10 === 4 ? { ...row, mark: rows.length - i } : row));
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(url);
+      const page = Number(u.searchParams.get('page') ?? 0);
+      const pageSize = Number(u.searchParams.get('pageSize') ?? 10);
+      return jsonResponse(
+        envelope(
+          { data: things.slice(page * pageSize, (page + 1) * pageSize) },
+          { totalCount: things.length },
+        ),
+      );
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetTestServices();
+  });
+
+  async function spill(extra: Partial<MaybeSpillInput<Row>>) {
+    const ctx = createMockContext({ tenantId: 't1' });
+    const client = getBrapiClient();
+    const firstPage = await loadInitialFindPage<Row>(client, connection, route, 5, ctx);
+    return await maybeSpill<Row>({
+      firstPage,
+      client,
+      connection,
+      bridge: getCanvasBridge(),
+      ctx,
+      filters: {},
+      path: '/things',
+      route,
+      source: 'find_things',
+      loadLimit: 5,
+      ...extra,
+    });
+  }
+
+  it('annotates the walked set once, then views, stages and returns the annotated rows', async () => {
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    const annotateRows = vi.fn(annotate);
+    const inlineView = vi.fn((rows: Row[]) => rows.toReversed());
+
+    const result = await spill({ annotateRows, inlineView });
+
+    expect(annotateRows).toHaveBeenCalledTimes(1);
+    expect(annotateRows.mock.calls[0]?.[0]).toHaveLength(25);
+    const marked = [
+      { id: 't5', mark: 21 },
+      { id: 't15', mark: 11 },
+      { id: 't25', mark: 1 },
+    ];
+    expect(inlineView.mock.calls[0]?.[0].filter((row) => 'mark' in row)).toEqual(marked);
+    expect(register.mock.calls[0]?.[1].rows.filter((row) => 'mark' in row)).toEqual(marked);
+    expect(result.fullRows.filter((row) => 'mark' in row)).toEqual(marked);
+    expect(result.results[0]).toEqual({ id: 't25', mark: 1 });
+  });
+
+  it('hands a collect-only caller the annotated rows', async () => {
+    const result = await spill({ annotateRows: annotate, collectOnly: true });
+    expect(result.fullRows).toHaveLength(25);
+    expect(result.fullRows.filter((row) => 'mark' in row).map((row) => row.id)).toEqual([
+      't5',
+      't15',
+      't25',
+    ]);
+  });
+});
+
+describe('resolveFindRoute — escalation keeps every value, so no downcast warning', () => {
+  const ESCALATION = 'Route escalated to POST /search/variables';
+
+  /** Adapt `values` through the brapi-test GET dialect, then resolve with `calls` advertised. */
+  function resolveVariables(calls: CallDescriptor[], values: string[]) {
+    const unrelated = 'Server does not expose /ontologies.';
+    const warnings = [unrelated];
+    const searchBody = { observationVariableDbIds: values };
+    const adapted = brapiTestDialect.adaptGetFilters('variables', searchBody);
+    warnings.push(...adapted.warnings);
+    const route = resolveFindRoute({
+      profile: profileOf(calls),
+      dialect: brapiTestDialect,
+      endpoint: 'variables',
+      filters: adapted.filters,
+      searchBody,
+      warnings,
+      ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
+    });
+    return { route, warnings, unrelated, adapted };
+  }
+
+  it('drops the "only the first value" warning when the route escalates to POST /search', () => {
+    const { route, warnings, unrelated, adapted } = resolveVariables(
+      [
+        { service: 'variables', methods: ['GET'] },
+        { service: 'search/variables', methods: ['POST'] },
+      ],
+      ['variable1', 'variable2'],
+    );
+    expect(adapted.warnings.join('\n')).toContain('only the first value');
+    expect(route).toMatchObject({
+      kind: 'search',
+      searchBody: { observationVariableDbIds: ['variable1', 'variable2'] },
+    });
+    expect(warnings).toEqual([unrelated, expect.stringContaining(ESCALATION)]);
+  });
+
+  it('adds nothing for a single value, which GET carries whole', () => {
+    const { route, warnings, unrelated } = resolveVariables(
+      [
+        { service: 'variables', methods: ['GET'] },
+        { service: 'search/variables', methods: ['POST'] },
+      ],
+      ['variable1'],
+    );
+    expect(route.kind).toBe('get');
+    expect(warnings).toEqual([unrelated]);
   });
 });

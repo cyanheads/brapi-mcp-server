@@ -227,7 +227,7 @@ describe('brapi_find_locations tool', () => {
       {
         locationDbIds: ['3', '4'],
         locationNames: ['Namulonge'],
-        countryCodes: ['UGA', 'UG', '800'],
+        countryCodes: ['UGA', 'UG', '800', '256'],
         locationTypes: ['Farm'],
         abbreviations: ['NM', 'UB'],
       },
@@ -242,7 +242,7 @@ describe('brapi_find_locations tool', () => {
       {
         locationDbIds: ['29'],
         locationNames: ['Ica'],
-        countryCodes: ['PER'],
+        countryCodes: ['PER', 'PE', '604', '51'],
         abbreviations: ['BIO'],
       },
       [],
@@ -441,7 +441,7 @@ describe('brapi_find_locations tool', () => {
       countryCodes: ['ug', '260', '8'],
       countryNames: ['Uganda', 'Albania'],
     });
-    const codes = ['UG', '260', '8', 'UGA', '800', 'ALB', 'AL', '008'];
+    const codes = ['UG', '260', '8', 'UGA', '800', '256', 'ALB', 'AL', '008', '355'];
     expect(new URL(String(fetcher.mock.calls[0]![0])).searchParams.getAll('countryCodes')).toEqual(
       codes,
     );
@@ -450,7 +450,7 @@ describe('brapi_find_locations tool', () => {
       results: rows,
       distributions: { countryCode: { UG: 1, UGA: 1, '008': 1 } },
     });
-    expect(text).toContain('Albania" → ALB, AL, 008');
+    expect(text).toContain('"Albania" → ALB, AL, 008 (ISO numeric), 355 (calling code)');
     expect(text).not.toContain('may not honor');
   });
 
@@ -673,6 +673,306 @@ describe('brapi_find_locations tool', () => {
     expect(url.searchParams.getAll('countryCodes').sort()).toEqual(codes);
     const warnings = getEnrichment(ctx).warnings.join('\n');
     for (const fragment of fragments) expect(warnings).toContain(fragment);
+  });
+});
+
+describe('brapi_find_locations country names on SGN servers', () => {
+  let fetcher: MockFetcher;
+
+  beforeEach(() => {
+    fetcher = initTestServices();
+  });
+
+  afterEach(() => {
+    resetTestServices();
+  });
+
+  /** An SGN /locations stand-in: repeated `countryCodes` select a union, paged as asked. */
+  function serveUnion(rows: Record<string, unknown>[]): void {
+    fetcher.mockImplementation(async (url: string) => {
+      const u = new URL(String(url));
+      if (u.pathname !== '/brapi/v2/locations') throw new Error(`unmocked fetch: ${u.href}`);
+      const codes = u.searchParams.getAll('countryCodes');
+      const matched = codes.length
+        ? rows.filter((row) => codes.includes(String(row.countryCode)))
+        : rows;
+      const page = Number.parseInt(u.searchParams.get('page') ?? '0', 10);
+      const pageSize = Number.parseInt(u.searchParams.get('pageSize') ?? '10', 10);
+      return jsonResponse(
+        envelope(
+          { data: matched.slice(page * pageSize, page * pageSize + pageSize) },
+          { totalCount: matched.length },
+        ),
+      );
+    });
+  }
+
+  const site = (
+    locationDbId: string,
+    countryCode: string,
+    countryName?: string,
+    extra: Record<string, unknown> = {},
+  ): Record<string, unknown> => ({
+    locationDbId,
+    locationName: locationDbId,
+    countryCode,
+    ...(countryName !== undefined && { countryName }),
+    locationType: 'Field',
+    ...extra,
+  });
+  const sentCodes = () =>
+    new URL(String(fetcher.mock.calls[0]![0])).searchParams.getAll('countryCodes');
+  const ids = (s: Record<string, unknown>) =>
+    (s.results as { locationDbId: string }[]).map((r) => r.locationDbId);
+  const warningsOf = (s: Record<string, unknown>) => (s.warnings as string[]).join('\n');
+
+  /** CassavaBase sites stored under E.164 calling codes, beside alphabetic and unrelated rows. */
+  const CASSAVABASE_SITES = [
+    site('Namulonge-Sendusu', '256', 'Uganda'),
+    site('Rwebitaba', '256', 'Uganda'),
+    site('Bulegeni', '256', 'Uganda'),
+    site('Buginyanya', '256', 'Uganda'),
+    site('NaCRRI', 'UG', 'Uganda'),
+    site('Kampala', 'UGA', 'Uganda'),
+    site('Mansa', '260', 'Zambia'),
+    site('Mutanda', '260', 'Zambia'),
+    site('Lusaka', 'ZMB', 'Zambia'),
+    site('Gandajika', '243', 'DR Congo'),
+    site('Ibadan', 'NGA', 'Nigeria'),
+  ];
+
+  it.each([
+    [
+      'Uganda',
+      ['UGA', 'UG', '800', '256'],
+      ['Namulonge-Sendusu', 'Rwebitaba', 'Bulegeni', 'Buginyanya', 'NaCRRI', 'Kampala'],
+      '"Uganda" → UGA, UG, 800 (ISO numeric), 256 (calling code)',
+    ],
+    [
+      'Zambia',
+      ['ZMB', 'ZM', '894', '260'],
+      ['Mansa', 'Mutanda', 'Lusaka'],
+      '"Zambia" → ZMB, ZM, 894 (ISO numeric), 260 (calling code)',
+    ],
+    [
+      'DR Congo',
+      ['COD', 'CD', '180', '243'],
+      ['Gandajika'],
+      '"DR Congo" → COD, CD, 180 (ISO numeric), 243 (calling code)',
+    ],
+  ])('CassavaBase: %s sends all four code forms', async (name, codes, expected, label) => {
+    const ctx = await connect(fetcher, ['locations'], 'CassavaBase');
+    serveUnion(CASSAVABASE_SITES);
+
+    const { structured, text } = await callContract(ctx, { countryNames: [name] });
+
+    expect(sentCodes()).toEqual(codes);
+    expect(structured.appliedFilters).toEqual({ countryCodes: codes });
+    expect(ids(structured)).toEqual(expected);
+    expect(structured.totalCount).toBe(expected.length);
+    expect(warningsOf(structured)).toContain(label);
+    expect(text).toContain(label);
+    expect(warningsOf(structured)).not.toMatch(/Dropped|unverified/);
+  });
+
+  it('Sweetpotatobase: Mozambique sends MOZ, MZ, 508, 258 and returns Alto Molocue', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'Sweetpotatobase');
+    const mozambique = [
+      ['13', 'Gurue', 'Mozambique'],
+      ['100', 'Angonia', 'Mozambique'],
+      ['105', 'Chilembene', 'Mozambique'],
+      ['106', 'Chokwe', 'Mozambique'],
+      ['108', 'Maniquenique', 'Mozambique'],
+      ['114', 'Nwalate', 'Mozambique'],
+      ['118', 'Umbeluzi', 'Mozambique'],
+      ['127', 'Nhacoongo', 'Mozambique'],
+      ['144', 'Manica Farm', 'MOZ'],
+      ['145', 'Massinga Farm', 'MOZ'],
+      ['146', 'Nhamatanda Farm Sofala', 'Mozambique'],
+      ['147', 'Sussundenga Research Station', 'MOZ'],
+      ['148', 'Vanduzi Farm', 'MOZ'],
+      ['169', 'Lichinga', 'Mozambique'],
+      ['171', 'Sanga', 'Mozambique'],
+    ].map(([id, locationName, countryName]) => site(id!, 'MOZ', countryName, { locationName }));
+    const altoMolocue = site('126', '508', 'MZ', { locationName: 'Alto Molocue' });
+    serveUnion([...mozambique, altoMolocue, site('29', 'PER', 'Peru'), site('1', '', '')]);
+
+    const { structured, text } = await callContract(ctx, { countryNames: ['Mozambique'] });
+
+    expect(sentCodes()).toEqual(['MOZ', 'MZ', '508', '258']);
+    expect(structured).toMatchObject({
+      appliedFilters: { countryCodes: ['MOZ', 'MZ', '508', '258'] },
+      totalCount: 16,
+      returnedCount: 16,
+      distributions: { countryCode: { MOZ: 15, '508': 1 } },
+    });
+    expect(ids(structured)).toContain('126');
+    expect(text).toContain('Alto Molocue');
+    expect(warningsOf(structured)).not.toMatch(/Dropped|unverified/);
+  });
+
+  it('a shared calling code keeps the requested country and drops another, on both surfaces', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'CassavaBase');
+    serveUnion([
+      site('us-1', '1', 'United States'),
+      site('jm-1', '1', 'Jamaica'),
+      site('us-alpha', 'USA', 'United States'),
+    ]);
+
+    const { structured, text } = await callContract(ctx, { countryNames: ['United States'] });
+
+    expect(sentCodes()).toEqual(['USA', 'US', '840', '1']);
+    expect(ids(structured)).toEqual(['us-1', 'us-alpha']);
+    expect(structured).toMatchObject({
+      totalCount: 2,
+      distributions: { countryCode: { '1': 1, USA: 1 } },
+    });
+    const dropped =
+      'Dropped 1 location(s) matched only by a numeric code expanded from countryNames whose countryName names another country: 1 → Jamaica (1).';
+    expect(structured.warnings).toContain(dropped);
+    expect(text).toContain(dropped);
+    expect(text).not.toContain('jm-1');
+  });
+
+  it('an ISO numeric code that is another country’s calling code returns nothing', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'CassavaBase');
+    serveUnion([site('Mansa', '260', 'Zambia'), site('Lusaka', 'ZMB', 'Zambia')]);
+
+    const { structured, text } = await callContract(ctx, {
+      countryNames: ['French Southern Territories'],
+    });
+
+    expect(sentCodes()).toEqual(['ATF', 'TF', '260']);
+    expect(structured).toMatchObject({ results: [], totalCount: 0, returnedCount: 0 });
+    expect(warningsOf(structured)).toContain(
+      '"French Southern Territories" → ATF, TF, 260 (ISO numeric)',
+    );
+    expect(warningsOf(structured)).toContain(': 260 → Zambia (1).');
+    expect(text).toContain('_No rows returned._');
+  });
+
+  it('keeps a numeric-code row whose countryName is empty or unrecognized, naming the code', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'CassavaBase');
+    serveUnion([
+      site('blank', '256', ''),
+      site('missing', '256'),
+      site('typo', '256', 'Ugandaa'),
+      site('iso-numeric', '800', 'Uganda'),
+    ]);
+
+    const { structured, text } = await callContract(ctx, { countryNames: ['Uganda'] });
+
+    expect(ids(structured)).toEqual(['blank', 'missing', 'typo', 'iso-numeric']);
+    expect(structured.totalCount).toBe(4);
+    const unverified =
+      'Kept 3 location(s) matched only by a numeric code expanded from countryNames whose countryName is empty or unrecognized, so their country is unverified: 256 (3).';
+    expect(structured.warnings).toContain(unverified);
+    expect(text).toContain(unverified);
+    expect(warningsOf(structured)).not.toContain('Dropped');
+  });
+
+  it.each([
+    ['countryCodes', { countryCodes: ['1'] }, ['1', 'USA', 'US', '840']],
+    ['extraFilters.countryCode', { extraFilters: { countryCode: '1' } }, ['USA', 'US', '840', '1']],
+    // The named countryCodes expanded from countryNames take precedence on the wire.
+    [
+      'extraFilters.countryCodes',
+      { extraFilters: { countryCodes: ['1'] } },
+      ['USA', 'US', '840', '1'],
+    ],
+  ])('never re-checks an explicit code passed via %s', async (_via, explicit, codes) => {
+    const ctx = await connect(fetcher, ['locations'], 'CassavaBase');
+    serveUnion([site('jm-1', '1', 'Jamaica'), site('us-alpha', 'USA', 'United States')]);
+
+    const { structured } = await callContract(ctx, {
+      countryNames: ['United States'],
+      ...explicit,
+    });
+
+    expect(sentCodes()).toEqual(codes);
+    expect(ids(structured)).toEqual(['jm-1', 'us-alpha']);
+    expect(warningsOf(structured)).not.toMatch(/Dropped|unverified/);
+  });
+
+  it('composes the country check with bbox; totals, distributions, and the dataframe follow both', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'CassavaBase');
+    const nc = { latitude: 35, longitude: -78 };
+    serveUnion([
+      site('us-in-1', '1', 'United States', nc),
+      site('jm-in', '1', 'Jamaica', nc),
+      site('us-out', '1', 'United States', { latitude: 50, longitude: 10 }),
+      site('us-in-2', 'USA', 'United States', nc),
+    ]);
+
+    const { structured } = await callContract(ctx, {
+      countryNames: ['United States'],
+      bbox: { minLat: 30, maxLat: 40, minLon: -90, maxLon: -70 },
+      loadLimit: 1,
+    });
+
+    expect(ids(structured)).toEqual(['us-in-1']);
+    expect(structured).toMatchObject({
+      totalCount: 2,
+      truncated: true,
+      dataframe: { rowCount: 2 },
+      distributions: { countryCode: { '1': 1, USA: 1 } },
+    });
+    expect(structured.warnings).toEqual(
+      expect.arrayContaining([
+        'bbox excluded 1 of 3 upstream location(s).',
+        expect.stringContaining(': 1 → Jamaica (1).'),
+      ]),
+    );
+  });
+
+  it.each([
+    ['spec', 'Test'],
+    ['brapi-test', 'BrAPI Community Test Server'],
+    ['bms', 'BMS'],
+  ])('the %s dialect still sends alpha-3 only', async (_dialect, serverName) => {
+    const ctx = await connect(fetcher, ['locations'], serverName);
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    const { structured } = await callContract(ctx, { countryNames: ['Uganda'] });
+
+    const params = new URL(String(fetcher.mock.calls[0]![0])).searchParams;
+    expect([...params.getAll('countryCodes'), ...params.getAll('countryCode')]).toEqual(['UGA']);
+    expect(warningsOf(structured)).toContain('ISO 3166-1 alpha-3: "Uganda" → UGA.');
+  });
+
+  it('an unresolved name names every code form to pass, since explicit codes are not expanded', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'Sweetpotatobase');
+    serveUnion([site('126', '508', 'MZ'), site('13', 'MOZ', 'Mozambique')]);
+
+    const { structured, text } = await callContract(ctx, {
+      countryNames: ['Mozambique', 'Mocambique'],
+    });
+
+    const warning = (structured.warnings as string[]).find((w) => w.includes('"Mocambique"'));
+    expect(warning).toContain("the country's alpha-3, alpha-2, ISO numeric, and calling code");
+    expect(warning).not.toContain('Pass the alpha-3 code directly');
+    expect(text).toContain("the country's alpha-3, alpha-2, ISO numeric, and calling code");
+  });
+
+  it('an SGN call left with no country restriction fails pointing to every code form', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'Sweetpotatobase');
+
+    const { result, text } = await callContract(ctx, { countryNames: ['Mocambique'] });
+
+    expect(result.isError).toBe(true);
+    expect(text).toContain("the country's alpha-3, alpha-2, ISO numeric, and calling code");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('a non-expanding dialect keeps pointing to the alpha-3 code', async () => {
+    const ctx = await connect(fetcher, ['locations'], 'Test');
+    fetcher.mockResolvedValue(jsonResponse(envelope({ data: [] }, { totalCount: 0 })));
+
+    const { structured } = await callContract(ctx, { countryNames: ['Uganda', 'Mocambique'] });
+
+    expect(warningsOf(structured)).toContain(
+      'Could not resolve country name(s) to an ISO 3166-1 alpha-3 code: "Mocambique". Pass the alpha-3 code directly via countryCodes, or check the spelling.',
+    );
   });
 });
 

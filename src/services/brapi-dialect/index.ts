@@ -12,6 +12,7 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { ResolvedAuth } from '@/services/brapi-client/index.js';
 import { getCapabilityRegistry } from '@/services/capability-registry/index.js';
+import { supportsMethod } from '@/services/capability-registry/supports-method.js';
 import type { RegisteredServer } from '@/services/server-registry/index.js';
 import { detectDialectId } from './detect.js';
 import { getDialectById } from './registry.js';
@@ -43,11 +44,9 @@ export function prefersEmbeddedObservations(
   dialect: BrapiDialect,
   supported: Record<string, { methods?: readonly string[] }>,
 ): boolean {
-  const units = supported.observationunits;
   return (
     (dialect.id === 'breedbase' || dialect.id === 'cassavabase') &&
-    units !== undefined &&
-    (!units.methods?.length || units.methods.includes('GET'))
+    supportsMethod(supported.observationunits, 'GET')
   );
 }
 

@@ -116,15 +116,16 @@ export async function reviewStudyRows(
       );
       return { records, complete, notes };
     }
+    // GET /variables defines only the singular study filter and no dialect maps
+    // the plural there; the other two reads send the plural through the dialect.
+    const scope =
+      endpoint === 'variables' ? { studyDbId: input.studyDbId } : { studyDbIds: [input.studyDbId] };
     try {
       const env = await client.get<unknown>(
         connection.baseUrl,
         `/${endpoint}`,
         ctx,
-        companionRequestOptions(connection, dialect, config, notes, {
-          studyDbIds: [input.studyDbId],
-          pageSize: 1000,
-        }),
+        companionRequestOptions(connection, dialect, config, notes, { ...scope, pageSize: 1000 }),
       );
       const page = Page.safeParse(env.result);
       if (page.success) {

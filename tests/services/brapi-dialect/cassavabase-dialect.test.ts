@@ -431,3 +431,94 @@ describe('cassavabaseDialect', () => {
     });
   });
 });
+
+describe('SGN /studies variable and germplasm filters', () => {
+  // Sweetpotatobase GET /studies: observationVariableDbId=76736 → 26 of 2,056 and
+  // germplasmDbId=118251 → 2; both plurals return all 2,056.
+  it.each([
+    ['cassavabase', cassavabaseDialect],
+    ['breedbase', breedbaseDialect],
+  ])('%s sends the singular observationVariableDbId and germplasmDbId', (_id, dialect) => {
+    const result = dialect.adaptGetFilters('studies', {
+      observationVariableDbIds: ['76736'],
+      germplasmDbIds: ['118251'],
+    });
+    expect(result).toEqual({
+      filters: { observationVariableDbId: '76736', germplasmDbId: '118251' },
+      dropped: [],
+      warnings: [],
+    });
+  });
+
+  it.each([
+    ['cassavabase', cassavabaseDialect],
+    ['breedbase', breedbaseDialect],
+  ])('%s downcasts several values as verified mappings, flagging escalation', (_id, dialect) => {
+    const result = dialect.adaptGetFilters('studies', {
+      observationVariableDbIds: ['76736', '77239'],
+      germplasmDbIds: ['118251', '103412'],
+    });
+    expect(result).toMatchObject({
+      filters: { observationVariableDbId: '76736', germplasmDbId: '118251' },
+      requiresEscalation: true,
+    });
+    expect(result.warnings).toHaveLength(2);
+    for (const warning of result.warnings) expect(warning).not.toMatch(/mapping inferred/);
+  });
+});
+
+describe('SGN call-set germplasm lift', () => {
+  it.each([
+    ['cassavabase', cassavabaseDialect],
+    ['breedbase', breedbaseDialect],
+  ])('%s lifts additionalInfo.germplasmDbId onto a callsets row that lacks one', (_id, dialect) => {
+    const row = {
+      callSetDbId: '902',
+      callSetName: 'TMEB419_plant_1',
+      sampleDbId: '902',
+      additionalInfo: { germplasmDbId: '41' },
+      studyDbId: null,
+    };
+    expect(dialect.normalizeRow?.('callsets', row)).toEqual({
+      callSetDbId: '902',
+      callSetName: 'TMEB419_plant_1',
+      sampleDbId: '902',
+      germplasmDbId: '41',
+      additionalInfo: { germplasmDbId: '41' },
+    });
+  });
+
+  it('keeps a top-level germplasmDbId and lifts nothing blank, non-string, or off callsets', () => {
+    const normalize = breedbaseDialect.normalizeRow;
+    expect(
+      normalize?.('callsets', { germplasmDbId: 'top', additionalInfo: { germplasmDbId: '41' } }),
+    ).toMatchObject({ germplasmDbId: 'top' });
+    for (const additionalInfo of [
+      undefined,
+      null,
+      [],
+      'bad',
+      { germplasmDbId: '' },
+      { germplasmDbId: '  ' },
+      { germplasmDbId: 41 },
+    ]) {
+      expect(normalize?.('callsets', { callSetDbId: 'c', additionalInfo })).not.toHaveProperty(
+        'germplasmDbId',
+      );
+    }
+    for (const endpoint of ['samples', 'calls', 'studies']) {
+      expect(normalize?.(endpoint, { additionalInfo: { germplasmDbId: '41' } })).not.toHaveProperty(
+        'germplasmDbId',
+      );
+    }
+  });
+});
+
+describe('SGN location country-code expansion', () => {
+  it.each([
+    ['cassavabase', cassavabaseDialect],
+    ['breedbase', breedbaseDialect],
+  ])('%s expands resolved country names beyond alpha-3', (_id, dialect) => {
+    expect(dialect.expandLocationCountryCodes).toBe(true);
+  });
+});
