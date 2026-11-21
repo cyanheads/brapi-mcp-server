@@ -4,7 +4,7 @@ description: Use brapi_* tools to compare plant-breeding phenotypes across studi
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -18,10 +18,10 @@ Keep every BrAPI ID with the upstream connection that produced it. If comparing 
 | ID | Where to get it |
 | --- | --- |
 | `germplasmDbId` | `brapi_find_germplasm` rows after resolving a name or accession. |
-| `observationVariableDbId` | `brapi_find_variables` rows or ranked `ontologyCandidates` that carry a variable ID. Use a trait label or ontology PUI to find candidates. |
-| `studyDbId` | `brapi_find_studies` for candidate studies, matching `brapi_find_observations` rows or contributing `brapi_germplasm_performance` studies for evidence of measurement. |
+| `observationVariableDbId` | `brapi_find_variables` rows, where every free-text match carries `textMatchRank`, or the top 10 in `ontologyCandidates`. Use a trait label or ontology PUI to find candidates. |
+| `studyDbId` | `brapi_find_studies` for candidate studies (pass `variables` to find studies that recorded a variable directly), matching `brapi_find_observations` rows or contributing `brapi_germplasm_performance` studies for evidence of measurement. |
 | `variantSetDbId` | Rows from `brapi_raw_get` on `/variantsets`. Follow upstream pages when searching for a set. |
-| `variantDbId`, `callSetDbId` | Variant IDs from `brapi_find_variants` or genotype-call rows. Call-set IDs come from genotype-call rows. |
+| `variantDbId`, `callSetDbId` | Variant IDs from `brapi_find_variants` or genotype-call rows. Call-set IDs come from genotype-call rows; a call set is one sample's calls, and each matrix row from `brapi_export_genotype_matrix` is a call set. |
 
 ## Gates
 
@@ -33,7 +33,7 @@ Keep every BrAPI ID with the upstream connection that produced it. If comparing 
 
 ### Compare phenotypes across studies
 
-On SGN/Breedbase, scope `brapi_find_observations` to a study or germplasm to use embedded observations when the upstream advertises that route. If an observation search skips collection, get contributing study IDs from `brapi_germplasm_performance`, then retry against those studies or other known study IDs. A germplasm filter on study discovery can be ignored upstream. Verify study membership from matching observations, and use `brapi_get_study` for trial, location, and season context.
+Start with `brapi_find_studies { variables }` to find candidate studies that recorded the variable, and read its warnings: the filter is checked by count, and a warning means narrowing is unverified. On SGN/Breedbase, scope `brapi_find_observations` to a study or germplasm to use embedded observations when the upstream advertises that route. If an observation search skips collection, get contributing study IDs from `brapi_germplasm_performance`, then retry against those studies or other known study IDs. A germplasm filter on study discovery can be ignored upstream. Verify study membership from matching observations, and use `brapi_get_study` for trial, location, and season context.
 
 Read `coverage` in the performance or matrix result. Contributing studies have collected measurements. Empty, failed, partial, and unprocessed studies have distinct outcomes. An incomplete scoped-unit scan can leave additional studies unseen.
 
@@ -41,7 +41,7 @@ Use `brapi_build_phenotype_matrix` with long form and `aggregate: "all"` to pres
 
 ### Find germplasm and select variables
 
-Use `studies`, `trials`, or `programs` to scope `brapi_find_germplasm`. Check the warnings before treating results as verified membership. If a scalar-only route expands filters into several requests, skipped combinations mean coverage is partial. For variable text matches, use the ranked `ontologyCandidates` to find likely IDs, then read their scales and methods before choosing one.
+Use `studies`, `trials`, or `programs` to scope `brapi_find_germplasm`. Check the warnings before treating results as verified membership. If a scalar-only route expands filters into several requests, skipped combinations mean coverage is partial. For variable text matches, use the matches ranked by `textMatchRank` to find likely IDs, then read their scales and methods before choosing one. `ontologyCandidates` holds only the top 10 of `textMatchCount`; when more match, read every method variant from the ranked `results[]` rows or the staged dataframe (`WHERE textMatchRank IS NOT NULL ORDER BY textMatchRank`).
 
 ### Continue image and pedigree reads
 
@@ -53,7 +53,7 @@ Use `brapi_federated_find` with `aliases` and `query: { entity, filters }` for s
 
 ### Inspect calls or export a variant set
 
-Scope `brapi_find_genotype_calls` to the relevant variant set or other known IDs when inspecting calls. Use `brapi_export_genotype_matrix` when you need the wide pivot or VCF-lite or PLINK text. Check whether the pull stopped early and whether the matrix reached its separate column limit. Use `variantColumnLegend` to map matrix columns back to variant IDs.
+Scope `brapi_find_genotype_calls` to the relevant variant set or other known IDs when inspecting calls. Use `brapi_export_genotype_matrix` when you need the wide pivot or VCF-lite or PLINK text. Check whether the pull stopped early and whether the matrix reached its separate column limit. Use `variantColumnLegend` to map matrix columns back to variant IDs. Rows are call sets, not germplasm: join phenotypes on `germplasmDbId`, where a germplasm with several call sets joins once per call set and null means the germplasm was unresolved. When the variant-column cap trims the matrix, pass the variants missing from `variantColumnLegend` as `variantDbIds` in further calls; `variantDbIds` also scopes an export to a region or batch.
 
 A bare numeric value can be dosage or a single allele index. When text export marks such a call missing, recover the original value from the staged matrix and leave the allele interpretation unresolved. Check coordinate and allele metadata before using the exported text for downstream analysis.
 

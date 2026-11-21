@@ -266,15 +266,16 @@ src/
   config/
     server-config.ts                      # BRAPI_* env vars (Zod schema, lazy-parsed)
     alias-credentials.ts                  # Per-alias env-var resolution (BRAPI_<ALIAS>_*) for brapi_connect
+    builtin-aliases.ts                    # Built-in public server aliases (e.g. bti-cassava) with attribution metadata
   services/
     brapi-client/                         # HTTP client — retry, concurrency cap, async-search poll, private-IP guard, binary fetch, POST/PUT
-    brapi-dialect/                        # Per-server filter / payload adapters (spec, cassavabase) — translates plural→singular, drops searchText, declares known-dead POST /search routes; envelope surfaces id + source + disabled-search nouns
+    brapi-dialect/                        # Per-server filter / payload adapters (spec, brapi-test, bms, cassavabase / breedbase) — translates plural→singular, drops searchText, declares known-dead POST /search routes; envelope surfaces id + source + disabled-search nouns
     brapi-filters/                        # Static v2.1 filter catalog
     canvas-bridge/                        # Default-canvas resolver (per-session when BRAPI_SESSION_ISOLATION=true; per-tenant otherwise), df_<uuid> table generator, provenance store
-    capability-registry/                  # Per-connection /serverinfo cache + call guard
-    iso-country/                          # ISO 3166-1 resolver — names and aliases → alpha-3, alpha-2, numeric codes
+    capability-registry/                  # Per-connection /serverinfo cache + call guard; supportsMethod (does a listed call serve a method)
+    iso-country/                          # ISO 3166-1 resolver — names and aliases → alpha-3, alpha-2, numeric codes, E.164 calling codes (e164-calling-codes.ts)
     ontology-resolver/                    # Free-text → ontology-term matcher for variables
-    reference-data-cache/                 # Programs / trials / locations / crops lookup cache
+    reference-data-cache/                 # Program / trial / location FK lookups — detail route when advertised, else list filter; misses warned, not cached
     server-registry/                      # Alias → live connection map with auth resolution; session-scoped under BRAPI_SESSION_ISOLATION=true
   mcp-server/
     tools/
@@ -301,7 +302,7 @@ src/
         brapi-dataframe-export.tool.ts    # Write CSV/Parquet/JSON to BRAPI_EXPORT_DIR (opt-in, stdio-only)
         brapi-build-phenotype-matrix.tool.ts  # Germplasm × trait matrix from studies; materialized as canvas dataframe
         brapi-germplasm-performance.tool.ts   # Per-variable aggregates (n, mean, median, sd) for a single germplasm
-        brapi-export-genotype-matrix.tool.ts  # Genotype calls → germplasm × variant dataframe + VCF-lite / PLINK serialization
+        brapi-export-genotype-matrix.tool.ts  # Genotype calls → call set × variant dataframe + VCF-lite / PLINK serialization
         brapi-submit-observations.tool.ts # Two-phase observation write — preview / apply (POST + PUT) behind a confirmation round trip
         brapi-raw-get.tool.ts             # Last-resort GET passthrough with routing nudge
         brapi-raw-search.tool.ts          # Last-resort POST /search passthrough with async polling
@@ -314,7 +315,14 @@ src/
         observations.ts                   # Study-anchored observation pull shared by phenotype-matrix and germplasm-performance
         observation-review.ts             # Advisory scale and study membership checks for observation submission
         genotype-calls.ts                 # Async genotype-call collector shared by find-genotype-calls and export-genotype-matrix
+        genotype-matrix.ts                # Call set × variant pivot for export-genotype-matrix — identity columns, variantDbIds filter, pull-end notes
+        genotype-text-formats.ts          # VCF-lite and PLINK (.ped / .map) encoders for export-genotype-matrix
+        variant-metadata.ts               # /variants coordinate and allele pull behind the VCF-lite / PLINK text
+        callset-germplasm.ts              # Call set → sample → germplasm batch lookups for export-genotype-matrix
         pedigree-diagram.ts               # Pure Mermaid / DOT renderer for walk_pedigree results (label escaping, Mermaid limits)
+        markdown-literals.ts              # Literal upstream values at Markdown render boundaries (escaping, fences)
+        inline-preview.ts                 # Byte-bounded row previews for raw and SQL results
+        raw-preview.ts                    # Raw list preview sizing and page-aware canvas staging
     resources/
       definitions/
         brapi-server-info.resource.ts     # brapi://server/info — orientation envelope (default connection)

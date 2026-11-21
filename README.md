@@ -38,7 +38,7 @@ Plant-breeding data from any BrAPI (Breeding API) v2 server — Breedbase instan
 | `brapi_connect` | Authenticate to a BrAPI v2 server, register it under an alias, and return the orientation envelope |
 | `brapi_server_info` | Return the orientation envelope for an alias, optionally refreshing capabilities |
 | `brapi_describe_filters` | List valid filter names for an endpoint, for use in any finder's `extraFilters` |
-| `brapi_find_studies` | Find studies by crop, trial type, season, location, or program |
+| `brapi_find_studies` | Find studies by crop, trial type, season, location, program, or recorded observation variable |
 | `brapi_get_study` | Fetch a study with program, trial, and location resolved, plus companion counts |
 | `brapi_find_germplasm` | Find germplasm by name, synonym, accession, PUI, crop, or free text |
 | `brapi_get_germplasm` | Fetch a germplasm with attributes, direct parents, and companion counts |
@@ -57,7 +57,7 @@ Plant-breeding data from any BrAPI (Breeding API) v2 server — Breedbase instan
 | `brapi_dataframe_export` | _Opt-in, stdio-only._ Export a dataframe to disk as CSV, Parquet, or JSON |
 | `brapi_build_phenotype_matrix` | Build a germplasm × trait matrix from one or more studies as a dataframe |
 | `brapi_germplasm_performance` | Per-variable aggregates (n, mean, median, sd, min, max) for one germplasm across its studies |
-| `brapi_export_genotype_matrix` | Pivot a variant set's calls into a germplasm × variant matrix, with VCF-lite or PLINK text |
+| `brapi_export_genotype_matrix` | Pivot a variant set's calls into a call set × variant matrix, with VCF-lite or PLINK text |
 | `brapi_submit_observations` | _Opt-in._ Two-phase observation write: `preview` validates, `apply` confirms and writes |
 | `brapi_raw_get` | Passthrough to any `GET /{path}` endpoint no curated tool covers |
 | `brapi_raw_search` | Passthrough to any `POST /search/{noun}` endpoint, with async polling handled |
@@ -112,15 +112,16 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 ### `brapi_find_studies` <sub>tool</sub>
 
-- Filters: `crop`, `trialTypes`, `seasons`, `locations`, `programs`, `trials`, `studyNames`, `active`; on SGN servers (CassavaBase, Breedbase, Sweetpotatobase), which ignore the location filter on `/studies`, `locations` is applied client-side over the scanned studies, and `totalCount` is the matched count
+- Filters: `crop`, `trialTypes`, `seasons`, `locations`, `programs`, `trials`, `studyNames`, `variables` (studies that recorded those variable IDs), `active`; on SGN servers (CassavaBase, Breedbase, Sweetpotatobase), which ignore the location filter on `/studies`, `locations` is applied client-side over the scanned studies, and `totalCount` is the matched count
 - `distributions` over `programName`, `studyType`, `seasons`, `locationName`, `commonCropName`
+- `variables` has no per-row check, so it is verified by count: the same request without it must report a larger total, otherwise a warning says "Could not verify whether 'variables' narrowed the study results." (also when the total can't be compared, as with a multi-request GET union)
 - SGN/Breedbase studies lift missing program IDs and names from `additionalInfo`, preserving the raw metadata.
 
 ---
 
 ### `brapi_get_study` <sub>tool</sub>
 
-- `studyDbId` required; resolves `program`, `trial`, and `location` inline; `study_not_found` when the upstream has no such study
+- `studyDbId` required; resolves `program`, `trial`, and `location` inline through `GET /{noun}/{id}` when the server advertises it (a list filter by ID otherwise); a record the server doesn't return is omitted with a warning naming the noun and ID; `study_not_found` when the upstream has no such study
 - On SGN/Breedbase servers, missing program fields come from `additionalInfo`; when the study has no program ID, the fetched parent trial can supply it for program resolution.
 - Companion counts `observationCount`, `observationUnitCount`, `variableCount`; a count the server can't scope to the study is omitted with a warning, never reported as the server-wide total
 
@@ -158,7 +159,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 ### `brapi_find_variables` <sub>tool</sub>
 
 - Filters: `variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`, `studies`, `methods`, `scales`, `crop`. Multiple distinct studies are unioned by variable ID with `studyDbIds` provenance under one shared page, row and time budget. `studyCoverage` reports complete, partial, failed and unprocessed studies; successful studies remain available when another fails.
-- `text` ranks every fetched row and moves matches to the top without dropping the rest; `ontologyCandidates` lists the ranked matches, each with `source` (`puiMatch`, `nameMatch`, `synonymMatch`, `traitClassMatch`)
+- `text` ranks every fetched row and moves matches to the top without dropping the rest; every match leads `results[]` in rank order and carries `textMatchRank` (in `results` and the staged dataframe), and `textMatchCount` counts the matches among fetched rows. `ontologyCandidates` lists the top 10 (ranks 1–10), each with `source` (`puiMatch`, `nameMatch`, `synonymMatch`, `traitClassMatch`)
 - Exact PUI matches lead, then exact normalized names. Equally scored name matches favor the shorter normalized name. Matching ignores a trailing pipe-delimited PUI when it matches the record's PUI. Returned names retain the original text.
 - `distributions` over `ontologyDbId`, `traitClass`, `scaleName`
 
@@ -169,7 +170,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - Filters: `studies`, `germplasm`, `variables`, `observationUnits`, `observations`, `seasons`, `programs`, `trials`, `observationLevels`, `timestampFrom` / `timestampTo`
 - Study- or germplasm-scoped SGN/Breedbase queries use advertised `/observationunits?includeObservations=true`, preserving zero-valued measurements. Unit totals drive paging; child fields take precedence over inherited unit metadata, and repeated observation IDs are counted once. Observation-level filters are checked after flattening; `appliedFilters` separates upstream requests from client-side criteria on both output surfaces
 - Outside that embedded-unit route, a GET query with no `studies`, `trials`, `observationUnits`, or `observations` anchor runs a one-row count probe first and skips the bulk pull when the probe fails or reports more than 5,000 matches; `warnings` says so. Germplasm predicates are checked before staging, and counts describe confirmed matches. When collection cannot proceed, `brapi_germplasm_performance` can supply contributing study IDs for a study-scoped retry
-- `distributions` over `observationVariableName`, `studyName`, `germplasmName`, `observationLevel`, `season`
+- `distributions` over `observationVariableName`, `studyName`, `germplasmName`, `observationLevel`, `season` (labeled by `seasonDbId`, else name plus year, else name, else year)
 
 ---
 
@@ -200,7 +201,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 ### `brapi_find_locations` <sub>tool</sub>
 
-- Filters: `locations`, `locationNames`, `countryCodes` (alphabetic codes uppercased; numeric upstream codes preserved), `countryNames` (English names resolved to alpha-3, plus alpha-2 and three-digit ISO numeric codes on CassavaBase), `locationTypes`, `abbreviations`; unresolved names fail unless an effective country-code restriction remains. Optional `bbox` applies before staging; a nonempty box requires all four ordered bounds (`minLat`, `maxLat`, `minLon`, `maxLon`) or fails before location retrieval. An empty box is omitted.
+- Filters: `locations`, `locationNames`, `countryCodes` (alphabetic codes uppercased; numeric upstream codes preserved), `countryNames` (English names resolved to alpha-3; on SGN-family servers (CassavaBase, Sweetpotatobase, Breedbase) a name also sends alpha-2, ISO numeric, and the E.164 calling code, and a row matched only by a numeric code is kept when its `countryName` names the requested country, dropped when it names another, and kept with a warning when it doesn't resolve; explicit `countryCodes` are never re-checked, and `totalCount`, distributions, and staging reflect the check), `locationTypes`, `abbreviations`; unresolved names fail unless an effective country-code restriction remains. Optional `bbox` applies before staging; a nonempty box requires all four ordered bounds (`minLat`, `maxLat`, `minLon`, `maxLon`) or fails before location retrieval. An empty box is omitted.
 - `distributions` over `countryCode`, `locationType`; GeoJSON uses `[longitude, latitude]` by default. The BrAPI test-server dialect declares swapped Point coordinates, reported as `coordinateAxisOrder: "swapped"` with or without a bbox. Axis order never depends on the requested box or preview size
 
 ---
@@ -262,7 +263,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - Pages each study's observations against the upstream total, preferring embedded observation units on SGN/Breedbase when advertised so zeros are retained; unit totals count raw units, while `loadLimit` counts matching observations. Other servers retain the `/observations` and fallback paths. Study / variable / germplasm subsets are checked on returned rows
 - `extraFilters` are forwarded, then checked against the rows the matrix is built from, as on `brapi_find_observations`: `warnings` names a key the rows contradict and the keys no row can speak to
 - Returns the matrix as a dataframe plus `observationCount`, `germplasmCount`, `variableCount`, and `variableLegend` mapping SQL-safe column names to variable names; `truncated` / `cap` flag a study whose scan stopped before its total (at `loadLimit`, the page cap, a failed, empty, or repeated page, or the call deadline) and the notice names it with the rows examined
-- Long rows retain observation and unit IDs, germplasm name, season, and available field design from embedded units. Use `designLegend` to map relationship columns to their original design levels. `replicateIndex` is encounter order.
+- Long rows retain observation and unit IDs, germplasm name, season, and available field design from embedded units. A season is labeled by its `seasonDbId`, else name plus year, else name, else year. Use `designLegend` to map relationship columns to their original design levels. `replicateIndex` is encounter order.
 - Wide cells pool observations across studies. `countLegend` maps each value column to its count column, which counts numeric values used by `mean` or `median`, one value when `first` has a row, and zero when no value contributes.
 - `studies` retains the requested IDs; `coverage.studies` distinguishes `contributed`, `empty`, `failed`, `partial`, and `unprocessed` outcomes with collected counts. `coverage.partial` and `truncated` disclose failed or incomplete pulls on both output surfaces. A failed study does not prevent the others from building the matrix; the call fails only when every study failed. `no_observation_path` when the server exposes neither observation route
 
@@ -271,7 +272,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 ### `brapi_germplasm_performance` <sub>tool</sub>
 
 - `germplasmDbId` required; SGN/Breedbase uses advertised germplasm-scoped embedded units, walking their raw total without the study-discovery cap. Other servers discover up to 200 studies. Explicit `studyDbIds` skips discovery and restricts collection to those studies; optional `variables` subset; `germplasm_not_found` when the upstream has no such germplasm
-- `perVariable` rows carry `n`, `mean`, `median`, `sd` (omitted when n < 2 or non-numeric), `min`, `max`, `studyCount`, `studyDbIds`, and `seasons`
+- `perVariable` rows carry `n`, `mean`, `median`, `sd` (omitted when n < 2 or non-numeric), `min`, `max`, `studyCount`, `studyDbIds`, and `seasons` (labeled by `seasonDbId`, else name plus year, else name, else year)
 - `studyCount` / `studyDbIds` remain contributors only. Additive `coverage` distinguishes contributed, empty, failed, partial, and unprocessed studies; scoped-unit scans report raw units, pages, total when known, and completion. An incomplete unit walk cannot establish the unseen study count. Repeated observation IDs are counted once; distinct-ID replicates and zero values remain. Optional `loadLimit` caps matching observations per study, defaulting to 50,000 on explicit and discovered study paths; page, observation, and deadline limits are disclosed, and deadline-skipped studies receive one count warning
 - `truncated: true` identifies incomplete observation scans; `coverage.partial` also covers failed studies
 
@@ -279,11 +280,12 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 ### `brapi_export_genotype_matrix` <sub>tool</sub>
 
-- `variantSetDbId` required (`no_filters` otherwise; list sets with `brapi_raw_get({ path: "/variantsets" })`), optional `germplasmDbIds`; `format` is `matrix-json`, `vcf-lite` (adds `vcf` text), or `plink` (adds `ped` / `map` text), and every format registers the germplasm × variant dataframe
-- `variantColumnLegend` maps SQL-safe column names back to variant IDs; `search_endpoint_disabled` when the active dialect marks `POST /search/calls` as dead
+- `variantSetDbId` required (`no_filters` otherwise; list sets with `brapi_raw_get({ path: "/variantsets" })`), optional `germplasmDbIds` and `variantDbIds` (alias `variantDbId`; calls the server returns for other variants are left out); `format` is `matrix-json`, `vcf-lite` (adds `vcf` text), or `plink` (adds `ped` / `map` text), and every format registers the call set × variant dataframe
+- Rows are call sets (one sample's calls), led by `callSetDbId`, `callSetName`, and `germplasmDbId`. The germplasm is resolved through the call set's sample by batch lookups; it is null when unresolved, with a warning saying so. Join to `brapi_build_phenotype_matrix` on `germplasmDbId`; a germplasm with several call sets joins once per call set.
+- `variantColumnLegend` maps SQL-safe column names back to variant IDs. When the set has more variants than `maxColumns`, the matrix keeps that many columns (listed in `variantColumnLegend`), sets `truncated`, and the warning says to pass the remaining variants as `variantDbIds` (from `brapi_find_variants`) in further calls; `search_endpoint_disabled` when the active dialect marks `POST /search/calls` as dead
 - VCF POS and PLINK base-pair positions are one-based: valid zero-based BrAPI `start` values 0 and 500 export as 1 and 501. Missing or invalid positions retain `.` (VCF) / `0` (PLINK) placeholders.
 - PLINK allele indices use available REF/ALT labels, or positive numeric labels when metadata cannot resolve the marker. Missing calls use `0 0`. Ambiguous numeric scalar calls remain verbatim in the raw dataframe but export as missing in VCF-lite and PLINK, with a warning; dosage is not inferred into an allele genotype
-- An empty call search returns a queryable zero-row dataframe with its `germplasmDbId` column and no-match guidance
+- An empty call search returns a queryable zero-row dataframe with its `callSetDbId`, `callSetName`, and `germplasmDbId` columns and no-match guidance
 - `maxCalls` / `maxColumns` can lower the configured `BRAPI_GENOTYPE_CALLS_MAX_PULL` / `BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS` ceilings. `truncated` means a ceiling or the shared upstream deadline ended the pull early, and `warnings` names the cause.
 
 ---
@@ -291,8 +293,8 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 ### `brapi_submit_observations` <sub>tool</sub>
 
 - `studyDbId` plus 1–5,000 `observations`; a row with `observationDbId` updates via `PUT`, one without creates via `POST`, and nothing is deleted
-- `mode: "preview"` (default) returns `valid`, `invalid`, `routing` counts, and `perRowWarnings` without writing; `mode: "apply"` asks the caller to confirm (`force: true` skips it) and writes only on the round that redeems the server's record of that prompt, for the same caller, server, study, and rows — a pre-supplied or replayed answer is asked again — and returns `posted`, `updated`, and `studyObservationCount`; failures are `observations_unsupported`, `study_not_found`, `post_unsupported`, `put_unsupported`, and `user_declined`
-- Review `perRowWarnings` for values that conflict with a declared scale and units or update targets outside the study. `flagged` counts each warned row once and appears in the apply confirmation. Review scan-level warnings for incomplete checks. Advisory findings leave the existing validity and write routing intact.
+- `mode: "preview"` (default) returns `valid`, `invalid`, `routing` counts, and `perRowWarnings` without writing; `mode: "apply"` asks the caller to confirm (`force: true` skips it) and writes only on the round that redeems the server's record of that prompt, for the same caller, server, study, and rows — a pre-supplied or replayed answer is asked again — and returns `posted`, `updated`, and `studyObservationCount` (omitted with a warning when the server can't scope `/observations` to the study); failures are `observations_unsupported`, `study_not_found`, `post_unsupported`, `put_unsupported`, and `user_declined`
+- Review `perRowWarnings` for values that conflict with a declared scale and units, or for variables, units, or update targets outside the study. `flagged` counts each warned row once and appears in the apply confirmation. Review scan-level warnings for incomplete checks. Advisory findings leave the existing validity and write routing intact.
 - Registered only when `BRAPI_ENABLE_WRITES=true`; requires the `brapi:write:observations` scope
 
 ---
@@ -534,7 +536,7 @@ Every variable is optional.
 | `BRAPI_COMPANION_TIMEOUT_MS` | Timeout for non-critical enrichment calls (FK lookups, count probes), which also skip retries. | `8000` |
 | `BRAPI_SEARCH_POLL_TIMEOUT_MS` / `BRAPI_SEARCH_POLL_INTERVAL_MS` | Async `/search` polling budget and interval. Polling also stops at the shared upstream deadline. | `60000` / `1000` |
 | `BRAPI_DATASET_TTL_SECONDS` | Lifetime of dataframe provenance (the handle's `expiresAt`). | `86400` |
-| `BRAPI_REFERENCE_CACHE_TTL_SECONDS` | TTL for cached capability profiles and reference data (programs, trials, locations, crops). | `3600` |
+| `BRAPI_REFERENCE_CACHE_TTL_SECONDS` | TTL for cached capability profiles and reference data (programs, trials, locations). | `3600` |
 | `BRAPI_ALLOW_PRIVATE_IPS` | Allow RFC 1918 / loopback targets. Dev only. | `false` |
 | `BRAPI_SESSION_ISOLATION` | Scope connections and the default canvas to the MCP session when one exists; `false` shares them across the tenant. See [Deployment shapes](#deployment-shapes). | `true` |
 | `BRAPI_ENABLE_WRITES` | **Feature flag.** Registers `brapi_submit_observations`. | `false` |

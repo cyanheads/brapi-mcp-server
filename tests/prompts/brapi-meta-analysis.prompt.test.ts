@@ -47,6 +47,30 @@ describe('brapi_meta_analysis prompt', () => {
     expect(text).toContain('germplasm');
   });
 
+  it('reads past the top-10 ontologyCandidates through textMatchRank', () => {
+    const args = brapiMetaAnalysis.args.parse({
+      germplasmDbIds: 'g-1',
+      traitName: 'Dry matter content',
+    });
+    const text = (brapiMetaAnalysis.generate(args)[0]!.content as { text: string }).text;
+    expect(text).toContain('the top 10 text matches by `textMatchRank`');
+    expect(text).toContain('When `textMatchCount` is above 10');
+    expect(text).toContain('WHERE textMatchRank IS NOT NULL ORDER BY textMatchRank');
+  });
+
+  it('discovers candidate studies through brapi_find_studies variables before anchoring observations', () => {
+    const args = brapiMetaAnalysis.args.parse({
+      germplasmDbIds: 'g-1',
+      traitName: 'Dry matter content',
+    });
+    const text = (brapiMetaAnalysis.generate(args)[0]!.content as { text: string }).text;
+    const studiesCall = text.indexOf('`brapi_find_studies` with `variables:');
+    const observationsCall = text.indexOf('`brapi_find_observations` with `germplasm:');
+    expect(studiesCall).toBeGreaterThan(-1);
+    expect(observationsCall).toBeGreaterThan(studiesCall);
+    expect(text).toContain('`studies: ["<studyDbId>"]` for each candidate study');
+  });
+
   it('threads the alias arg through every tool call snippet', () => {
     const args = brapiMetaAnalysis.args.parse({
       germplasmDbIds: 'g-1',
