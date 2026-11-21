@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.1](changelog/0.12.x/0.12.1.md) — 2026-11-21
+
+Fixes SGN-server gaps in study variable review, study lookups, location countries, season labels, and genotype export germplasm; ranks every free-text variable match; adds brapi_find_studies variables and brapi_export_genotype_matrix variantDbIds filters.
+
 ## [0.12.0](changelog/0.12.x/0.12.0.md) — 2026-11-20
 
 Search across BrAPI connections with source coverage and retain study context in phenotype matrices and observation review.

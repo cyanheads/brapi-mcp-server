@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-11-20 22:55:27
+Generated on: 2026-11-21 18:57:16
 
 ```text
 brapi-mcp-server/
@@ -198,10 +198,13 @@ brapi-mcp-server/
 │   │       │   ├── brapi-walk-pedigree.tool.ts
 │   │       │   └── index.ts
 │   │       └── shared/
+│   │           ├── callset-germplasm.ts
 │   │           ├── canvas-columns.ts
 │   │           ├── connect-auth-schema.ts
 │   │           ├── find-helpers.ts
 │   │           ├── genotype-calls.ts
+│   │           ├── genotype-matrix.ts
+│   │           ├── genotype-text-formats.ts
 │   │           ├── inline-preview.ts
 │   │           ├── markdown-literals.ts
 │   │           ├── observation-review.ts
@@ -209,7 +212,8 @@ brapi-mcp-server/
 │   │           ├── orientation-envelope.ts
 │   │           ├── pedigree-diagram.ts
 │   │           ├── raw-preview.ts
-│   │           └── raw-routing-hints.ts
+│   │           ├── raw-routing-hints.ts
+│   │           └── variant-metadata.ts
 │   ├── services/
 │   │   ├── brapi-client/
 │   │   │   ├── brapi-client.ts
@@ -237,8 +241,10 @@ brapi-mcp-server/
 │   │   ├── capability-registry/
 │   │   │   ├── capability-registry.ts
 │   │   │   ├── index.ts
+│   │   │   ├── supports-method.ts
 │   │   │   └── types.ts
 │   │   ├── iso-country/
+│   │   │   ├── e164-calling-codes.ts
 │   │   │   ├── index.ts
 │   │   │   ├── iso-3166-data.ts
 │   │   │   ├── resolve-country.ts
@@ -293,6 +299,7 @@ brapi-mcp-server/
 │   │   └── server-registry.test.ts
 │   ├── tools/
 │   │   ├── shared/
+│   │   │   ├── callset-germplasm.test.ts
 │   │   │   ├── coordinates.test.ts
 │   │   │   ├── embedded-observations.test.ts
 │   │   │   ├── find-helpers.test.ts
