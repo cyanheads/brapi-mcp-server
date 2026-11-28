@@ -8,17 +8,17 @@
  *      validation (a measured real-world bundle dropped 61 MB → 12.9 MB).
  *   2. Exact-name strip of three entry classes nested under `node_modules/`,
  *      which root-anchored `.mcpbignore` patterns cannot reach by design
- *      (issues #146/#207):
+ *      (cyanheads/mcp-ts-core#146, cyanheads/mcp-ts-core#207):
  *        a. Dependency-shipped agent docs at an installed package's root —
  *           `framework-skills/`, `skills/`, `.claude/`, `.agents/` trees and
  *           `AGENTS.md`/`CLAUDE.md` — plus `SKILL.md` files anywhere (issues
- *           #230/#794/#820). A `skills/` below a package root is runtime code.
+ *           cyanheads/mcp-ts-core#230, cyanheads/mcp-ts-core#794, cyanheads/mcp-ts-core#820). A `skills/` below a package root is runtime code.
  *        b. node-gyp build output beside a `binding.gyp` — generator files,
  *           intermediate trees, and link inputs, which record the packing
- *           host's paths; compiled `*.node` addons stay (issue #783).
+ *           host's paths; compiled `*.node` addons stay (cyanheads/mcp-ts-core#783).
  *        c. Build-only package files — mcp-ts-core's `changelog/`, `config/`,
  *           `scripts/`, `templates/`, `biome.json`, and `vitest.config.base.mjs`,
- *           and better-sqlite3's `deps/` and `src/` C sources (issue #791).
+ *           and better-sqlite3's `deps/` and `src/` C sources (cyanheads/mcp-ts-core#791).
  *   3. Replace the build host's DuckDB bindings with every platform package
  *      declared by the installed DuckDB loader. The canvas requires DuckDB.
  *   4. Verify the pruned entries are gone and the DuckDB inventory is complete.

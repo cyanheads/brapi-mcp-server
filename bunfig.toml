@@ -12,3 +12,6 @@ frozenLockfile = false
 # Socket scans every package before install (malware, typosquats, CVEs).
 # Note: configuring a scanner disables Bun's auto-install.
 scanner = "@socketsecurity/bun-security-scanner"
+
+[run]
+bun = true

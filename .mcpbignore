@@ -9,6 +9,8 @@
 /docs/
 /changelog/
 /coverage/
+/.vitest/
+/node_modules/.vitest-cache/
 /logs/
 /.cache/
 /.github/
