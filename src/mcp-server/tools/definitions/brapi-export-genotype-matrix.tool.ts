@@ -5,7 +5,7 @@
  *
  * A call set is one sample's calls, so rows are call sets, not germplasm. Each
  * row leads with `callSetDbId`, `callSetName`, and `germplasmDbId`; the
- * germplasm is resolved after the pull by batch lookups (paged `/callsets` for
+ * germplasm is resolved before a filtered pull, or after an unfiltered pull by batch lookups (paged `/callsets` for
  * the variant set, then `/search/samples` by sample ID) and stays null when a
  * lookup is unavailable or fails, so the matrix joins to
  * `brapi_build_phenotype_matrix` on `germplasmDbId`.
@@ -66,6 +66,10 @@ import {
   collectCalls,
   NO_MATCHING_CALLS_NOTICE,
 } from '../shared/genotype-calls.js';
+import {
+  GERMPLASM_SCOPE_UNAVAILABLE,
+  resolveGenotypeGermplasmScope,
+} from '../shared/genotype-germplasm-scope.js';
 import {
   buildMatrix,
   IDENTITY_COLUMNS,
@@ -238,6 +242,12 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
         'Provide variantSetDbId before retrying — unfiltered genotype-call pulls are too expensive.',
     },
     {
+      reason: 'germplasm_scope_unavailable',
+      ...GERMPLASM_SCOPE_UNAVAILABLE,
+      recovery:
+        'Use a BrAPI server that can resolve germplasm membership, or use explicit callSetDbIds with brapi_find_genotype_calls for scoped rows.',
+    },
+    {
       reason: 'search_endpoint_disabled',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The active dialect declares POST /search/calls as known-dead on this server',
@@ -251,7 +261,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       .array(NonBlankString)
       .optional()
       .describe(
-        'Restrict to these germplasm. Omit to pull all germplasm in the variant set (use with caution on large sets).',
+        'Resolve these germplasm IDs to call sets before pulling calls. Omit to include all call sets in the variant set.',
       ),
     variantSetDbId: NonBlankString.describe(
       'Variant set to pull calls for. Required. List variant sets with brapi_raw_get({ path: "/variantsets" }) — add params.studyDbId to narrow to one study or genotyping project — and read variantSetDbId from the rows.',
@@ -353,12 +363,10 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       );
     }
 
-    const searchOpts: Parameters<typeof buildCallsSearchBody>[0] = {
+    const searchBody = buildCallsSearchBody({
       variantSetDbId: input.variantSetDbId,
-    };
-    if (input.germplasmDbIds !== undefined) searchOpts.germplasmDbIds = input.germplasmDbIds;
-    if (input.variantDbIds !== undefined) searchOpts.variantDbIds = input.variantDbIds;
-    const searchBody = buildCallsSearchBody(searchOpts);
+      variantDbIds: input.variantDbIds,
+    });
 
     if (!searchBody.variantSetDbIds) {
       throw ctx.fail(
@@ -367,11 +375,27 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
       );
     }
 
+    const germplasmDbIds = input.germplasmDbIds ?? [];
+    const germplasmScope =
+      germplasmDbIds.length > 0
+        ? await resolveGenotypeGermplasmScope({
+            client,
+            connection,
+            ctx,
+            dialect,
+            supported,
+            germplasmDbIds,
+            unavailable: (message, details) =>
+              ctx.fail('germplasm_scope_unavailable', message, details),
+            variantSetDbIds: searchBody.variantSetDbIds,
+          })
+        : undefined;
     const collected = await collectCalls({
       client,
       connection,
       ctx,
       body: searchBody,
+      germplasmScope,
       maxCalls,
       warnings,
     });
@@ -398,15 +422,17 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     const textFormat = input.format === 'vcf-lite' || input.format === 'plink';
     const metadataWarnings: string[] = [];
     const [germplasm, variantMeta] = await Promise.all([
-      resolveCallSetGermplasm({
-        client,
-        connection,
-        ctx,
-        dialect,
-        callSets: matrix.matrixRows,
-        supported,
-        variantSetDbId: input.variantSetDbId,
-      }),
+      germplasmScope
+        ? { germplasmByCallSet: germplasmScope, warnings: [] }
+        : resolveCallSetGermplasm({
+            client,
+            connection,
+            ctx,
+            dialect,
+            callSets: matrix.matrixRows,
+            supported,
+            variantSetDbId: input.variantSetDbId,
+          }),
       textFormat && matrix.columnCount > 0
         ? collectVariantMetadata({
             client,
@@ -449,7 +475,7 @@ export const brapiExportGenotypeMatrix = tool('brapi_export_genotype_matrix', {
     const registerInput: RegisterDataframeInput = {
       source: 'export_genotype_matrix',
       baseUrl: connection.baseUrl,
-      query: searchBody,
+      query: germplasmScope ? { ...searchBody, germplasmDbIds } : searchBody,
       rows: matrix.matrixRows,
     };
     if (matrix.matrixRows.length === 0) {

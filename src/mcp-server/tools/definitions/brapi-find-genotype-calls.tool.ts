@@ -48,6 +48,10 @@ import {
   NO_MATCHING_CALLS_NOTICE,
   toFinderCallRow,
 } from '../shared/genotype-calls.js';
+import {
+  GERMPLASM_SCOPE_UNAVAILABLE,
+  resolveGenotypeGermplasmScope,
+} from '../shared/genotype-germplasm-scope.js';
 import { literal } from '../shared/markdown-literals.js';
 
 const OutputSchema = z.object({
@@ -205,6 +209,12 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         'Provide variantSetDbId, variantSetDbIds, germplasmDbIds, callSetDbIds, or variantDbIds before retrying — unfiltered pulls are too expensive.',
     },
     {
+      reason: 'germplasm_scope_unavailable',
+      ...GERMPLASM_SCOPE_UNAVAILABLE,
+      recovery:
+        'Retry with explicit callSetDbIds in place of germplasmDbIds, or use a BrAPI server that can resolve the germplasm membership.',
+    },
+    {
       reason: 'search_endpoint_disabled',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The active dialect declares POST /search/calls as known-dead on this server',
@@ -224,7 +234,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     germplasmDbIds: z
       .array(NonBlankString)
       .optional()
-      .describe('Restrict to these germplasm (call sets).'),
+      .describe('Resolve these germplasm IDs to call sets before pulling calls.'),
     callSetDbIds: z
       .array(NonBlankString)
       .optional()
@@ -251,7 +261,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
   output: OutputSchema,
 
   // Agent-facing success-path context: total collected count, in-context count,
-  // the exact body sent to /search/calls, empty-result guidance, and advisory
+  // the caller's effective scope, empty-result guidance, and advisory
   // warnings. Populated via ctx.enrich() so it reaches both structuredContent
   // and the content[] trailer without living in the domain return.
   enrichment: {
@@ -266,7 +276,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     appliedFilters: z
       .record(z.string(), z.unknown())
       .describe(
-        'The body sent to POST /search/calls (variant/germplasm/call-set scope plus pageSize).',
+        'Applied caller filters and the upstream pageSize. Germplasm is reported after its call sets are resolved.',
       ),
     notice: z
       .string()
@@ -299,11 +309,11 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     appliedFilters: {
       render: (filters) => {
         const entries = Object.entries(filters);
-        if (entries.length === 0) return '**Search body:** none';
+        if (entries.length === 0) return '**Applied filters:** none';
         const lines = entries.map(
           ([k, v]) => literal`- **${k}:** ${Array.isArray(v) ? v.join(', ') : String(v)}`,
         );
-        return `**Search body:**\n${lines.join('\n')}`;
+        return `**Applied filters:**\n${lines.join('\n')}`;
       },
     },
     warnings: { render: renderWarningsTrailer },
@@ -338,10 +348,11 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     const maxCalls = config.genotypeCallsMaxPull;
     const loadLimit = input.loadLimit ?? config.loadLimit;
 
-    const searchBody = buildSearchBody(input);
+    const searchBody = buildCallsSearchBody(input);
+    const germplasmDbIds = input.germplasmDbIds ?? [];
     if (
       !searchBody.variantSetDbIds &&
-      !searchBody.germplasmDbIds &&
+      germplasmDbIds.length === 0 &&
       !searchBody.callSetDbIds &&
       !searchBody.variantDbIds
     ) {
@@ -353,11 +364,29 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     }
 
     const warnings: string[] = [];
+    const germplasmScope =
+      germplasmDbIds.length > 0
+        ? await resolveGenotypeGermplasmScope({
+            client,
+            connection,
+            ctx,
+            dialect,
+            supported: (await capabilities.profile(connection.baseUrl, ctx, capabilityLookup))
+              .supported,
+            germplasmDbIds,
+            unavailable: (message, details) =>
+              ctx.fail('germplasm_scope_unavailable', message, details),
+            ...(searchBody.variantSetDbIds && { variantSetDbIds: searchBody.variantSetDbIds }),
+            ...(searchBody.callSetDbIds && { callSetDbIds: searchBody.callSetDbIds }),
+          })
+        : undefined;
+    const appliedFilters = germplasmScope ? { ...searchBody, germplasmDbIds } : searchBody;
     const collected = await collectCalls({
       client: client,
       connection,
       ctx,
       body: searchBody,
+      germplasmScope,
       maxCalls,
       warnings,
     });
@@ -377,7 +406,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
         bridge,
         ctx,
         connection,
-        body: searchBody,
+        body: appliedFilters,
         rows: callRows,
         pullCapped: collected.truncated,
         stoppedEarly,
@@ -391,7 +420,7 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     ctx.enrich({
       totalCount: collected.rows.length,
       returnedCount: inline.rows.length,
-      appliedFilters: searchBody,
+      appliedFilters,
       warnings,
     });
     if (collected.rows.length === 0) ctx.enrich.notice(NO_MATCHING_CALLS_NOTICE);
@@ -451,19 +480,6 @@ export const brapiFindGenotypeCalls = tool('brapi_find_genotype_calls', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
-
-function buildSearchBody(
-  input: Parameters<typeof brapiFindGenotypeCalls.handler>[0],
-): Record<string, unknown> {
-  const opts: Parameters<typeof buildCallsSearchBody>[0] = {};
-  if (input.variantSetDbId !== undefined) opts.variantSetDbId = input.variantSetDbId;
-  if (input.variantSetDbIds !== undefined) opts.variantSetDbIds = input.variantSetDbIds;
-  if (input.germplasmDbIds !== undefined) opts.germplasmDbIds = input.germplasmDbIds;
-  if (input.callSetDbIds !== undefined) opts.callSetDbIds = input.callSetDbIds;
-  if (input.variantDbIds !== undefined) opts.variantDbIds = input.variantDbIds;
-  if (input.callFormat !== undefined) opts.callFormat = input.callFormat;
-  return buildCallsSearchBody(opts);
-}
 
 interface SpillCallsInput {
   body: Record<string, unknown>;

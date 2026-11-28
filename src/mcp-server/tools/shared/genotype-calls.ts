@@ -96,6 +96,7 @@ export interface CollectCallsInput {
   client: BrapiClient;
   connection: RegisteredServer;
   ctx: Context;
+  germplasmScope?: ReadonlyMap<string, string> | undefined;
   maxCalls: number;
   warnings: string[];
 }
@@ -120,24 +121,27 @@ export interface CollectCallsResult {
 export function buildCallsSearchBody(input: {
   variantSetDbId?: string | undefined;
   variantSetDbIds?: string[] | undefined;
-  germplasmDbIds?: string[] | undefined;
   callSetDbIds?: string[] | undefined;
   variantDbIds?: string[] | undefined;
   callFormat?: string | undefined;
-}): Record<string, unknown> {
-  const body: Record<string, unknown> = {};
+}): {
+  variantSetDbIds?: string[];
+  callSetDbIds?: string[];
+  variantDbIds?: string[];
+  callFormat?: string;
+  pageSize: number;
+} {
+  const body: Omit<ReturnType<typeof buildCallsSearchBody>, 'pageSize'> = {};
   if (input.variantSetDbId) body.variantSetDbIds = [input.variantSetDbId];
   if (input.variantSetDbIds?.length) {
     body.variantSetDbIds = Array.from(
-      new Set([...((body.variantSetDbIds as string[]) ?? []), ...input.variantSetDbIds]),
+      new Set([...(body.variantSetDbIds ?? []), ...input.variantSetDbIds]),
     );
   }
-  if (input.germplasmDbIds?.length) body.germplasmDbIds = input.germplasmDbIds;
   if (input.callSetDbIds?.length) body.callSetDbIds = input.callSetDbIds;
   if (input.variantDbIds?.length) body.variantDbIds = input.variantDbIds;
   if (input.callFormat) body.callFormat = input.callFormat;
-  body.pageSize = PAGE_SIZE;
-  return body;
+  return { ...body, pageSize: PAGE_SIZE };
 }
 
 /**
@@ -150,13 +154,16 @@ export function buildCallsSearchBody(input: {
  * cancellation rejects.
  */
 export async function collectCalls(input: CollectCallsInput): Promise<CollectCallsResult> {
+  const scope = input.germplasmScope;
+  if (scope?.size === 0) return { rows: [], callFormatting: {}, truncated: false };
   const rows: WireCallRow[] = [];
   let truncated = false;
   let stopReason: string | undefined;
   const { callDeadlineMs } = getServerConfig();
   const deadlineLabel = `this call's ${callDeadlineMs / 1000} s deadline for upstream requests`;
 
-  const firstBody = { ...input.body, page: 0 };
+  const body = scope ? { ...input.body, callSetDbIds: [...scope.keys()] } : input.body;
+  const firstBody = { ...body, page: 0 };
   const first = await input.client.postSearch<Record<string, unknown>>(
     input.connection.baseUrl,
     'calls',
@@ -193,7 +200,7 @@ export async function collectCalls(input: CollectCallsInput): Promise<CollectCal
     const nextSearch = await input.client.postSearch<Record<string, unknown>>(
       input.connection.baseUrl,
       'calls',
-      { ...input.body, page },
+      { ...body, page },
       input.ctx,
       buildRequestOptions(input.connection),
     );
@@ -245,7 +252,17 @@ export async function collectCalls(input: CollectCallsInput): Promise<CollectCal
     );
   }
 
-  const result: CollectCallsResult = { rows, callFormatting, truncated };
+  // Count all upstream rows against the pull limit, then reject rows whose
+  // membership could not be verified before any tool or dataframe sees them.
+  const scopedRows = scope
+    ? rows.filter((row) => typeof row.callSetDbId === 'string' && scope.has(row.callSetDbId))
+    : rows;
+  if (scopedRows.length < rows.length) {
+    input.warnings.push(
+      `The upstream did not apply the call-set filter to ${rows.length - scopedRows.length} call(s). Calls with missing or out-of-scope call-set IDs were omitted.`,
+    );
+  }
+  const result: CollectCallsResult = { rows: scopedRows, callFormatting, truncated };
   if (stopReason) result.stopReason = stopReason;
   return result;
 }

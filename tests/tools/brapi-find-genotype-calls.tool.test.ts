@@ -98,7 +98,6 @@ describe('brapi_find_genotype_calls tool', () => {
     const result = await brapiFindGenotypeCalls.handler(
       brapiFindGenotypeCalls.input.parse({
         variantSetDbId: 'vset-1',
-        germplasmDbIds: ['g-1', 'g-2'],
       }),
       ctx,
     );
@@ -110,7 +109,7 @@ describe('brapi_find_genotype_calls tool', () => {
     expect(result.callFormatting.unknownString).toBe('.');
     expect(result.callFormatting.sepPhased).toBe('|');
     expect(getEnrichment(ctx).appliedFilters.variantSetDbIds).toEqual(['vset-1']);
-    expect(getEnrichment(ctx).appliedFilters.germplasmDbIds).toEqual(['g-1', 'g-2']);
+    expect(getEnrichment(ctx).appliedFilters).not.toHaveProperty('germplasmDbIds');
   });
 
   it('throws ValidationError when the active dialect disables /search/calls', async () => {
