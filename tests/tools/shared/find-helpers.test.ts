@@ -41,6 +41,7 @@ import {
   type DataframeHandle,
   discloseInlineTrim,
   type FindRoute,
+  fetchValidatedScopedCount,
   hasFindRoute,
   INLINE_RESULTS_BUDGET_BYTES,
   loadInitialFindPage,
@@ -536,6 +537,41 @@ describe('discloseInlineTrim', () => {
     discloseInlineTrim(ctx, { results: new Array(3) }, 10);
     expect(getEnrichment(ctx)).toEqual({});
   });
+});
+
+it('keeps the baseline when the verified count filter was downcast', async () => {
+  const fetcher = initTestServices();
+  try {
+    fetcher.mockImplementation(async () => jsonResponse(envelope({ data: [] }, { totalCount: 3 })));
+    const warnings: string[] = [];
+    const total = await fetchValidatedScopedCount({
+      client: getBrapiClient(),
+      connection: {
+        alias: 'default',
+        authMode: 'none',
+        baseUrl: BASE_URL,
+        registeredAt: '2026-10-18T00:00:00.000Z',
+      },
+      ctx: createMockContext(),
+      dialect: brapiTestDialect,
+      label: 'studyCount',
+      path: '/studies',
+      scopeDescription: 'germplasm filter',
+      scopeFilter: { germplasmDbIds: ['g1', 'g2'] },
+      service: 'studies',
+      warnings,
+    });
+    expect(
+      fetcher.mock.calls.map(([url]) => Object.fromEntries(new URL(String(url)).searchParams)),
+    ).toEqual([{ germplasmDbId: 'g1', pageSize: '1' }, { pageSize: '1' }]);
+    expect(total).toBeUndefined();
+    expect(warnings).toEqual([
+      expect.stringContaining('downcast'),
+      expect.stringContaining('returned the same total (3)'),
+    ]);
+  } finally {
+    resetTestServices();
+  }
 });
 
 describe('collectFindRoutes — shared operation bounds', () => {

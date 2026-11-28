@@ -104,9 +104,7 @@ describe('brapi://study/{studyDbId} resource', () => {
       if (path.endsWith('/observationunits')) {
         return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
       }
-      // /variables returns the same total filtered or not (server ignores the
-      // filter); /observations is dropped by the dialect and never probed.
-      return jsonResponse(envelope({ data: [] }, { totalCount: 4 }));
+      throw new Error(`Unexpected path: ${path}`);
     });
 
     const result = (await brapiStudyResource.handler({ studyDbId: 'study3' }, ctx)) as {
@@ -119,6 +117,8 @@ describe('brapi://study/{studyDbId} resource', () => {
     expect(result.variableCount).toBeUndefined();
     expect(result.observationUnitCount).toBe(0);
     expect(result.warnings.join('\n')).toMatch(/variableCount omitted/);
+    const paths = fetcher.mock.calls.map((call) => pathnameOf(String(call[0])));
+    expect(paths.filter((path) => /\/(observations|variables)$/.test(path))).toEqual([]);
   });
 
   it('resolves foreign keys through detail routes and warns on a miss, exactly as the tool does (#125)', async () => {

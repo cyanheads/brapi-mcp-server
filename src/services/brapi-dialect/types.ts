@@ -82,6 +82,8 @@ export interface BrapiDialect {
    */
   readonly expandLocationCountryCodes?: true;
   readonly id: string;
+  /** Whether the mapping for this GET endpoint and original filter key was verified upstream. */
+  readonly isGetFilterMappingVerified?: (endpoint: string, key: string) => boolean;
   /** Verified compatibility for locations with Points stored as latitude then longitude. */
   readonly locationPointAxisOrder?: 'swapped';
   /**

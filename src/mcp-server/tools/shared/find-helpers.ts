@@ -759,19 +759,21 @@ export interface ValidatedScopedCountInput {
 /**
  * Fetch a study/germplasm-scoped total count, omitting it when the upstream
  * can't actually scope the query — so a per-entity count is never silently
- * reported as the server-wide total. Two guards, in order:
+ * reported as the server-wide total. The dialect determines which probe to run:
  *
  *   1. **Dropped filter** — if the dialect drops the scope filter entirely
  *      (the server doesn't honor it), the count would be the global total;
  *      skip the probe and warn.
- *   2. **Unconfirmed filter** — run the scoped probe and an unfiltered baseline
+ *   2. **Verified filter** — when a single known mapping applies in full,
+ *      run only its scoped probe.
+ *   3. **Unconfirmed filter** — run the scoped probe and an unfiltered baseline
  *      in parallel; if the totals match, the scoped count can't be told apart
  *      from the global total: the upstream may have ignored the filter
  *      (accepted it on the wire but returned the unfiltered set), or the
  *      entity holds every record. Drop it and warn.
  *
- * Returns the trustworthy scoped total, or `undefined` (with a warning pushed
- * onto `warnings`) when neither guard can vouch for it. Both probes run at
+ * Returns the scoped total when upstream reports it, unless a guard omits
+ * the count and pushes an explanation onto `warnings`. Probes run at
  * `pageSize: 1` under the companion budget (tight timeout, no retries) — these
  * counts decorate a response, never gate it, so a slow or non-conforming
  * upstream surfaces as one missing count rather than a wrong one or a stall.
@@ -822,6 +824,17 @@ export async function fetchValidatedScopedCount(
     pageSize: 1,
   };
 
+  const [scopeKey, ...otherScopeKeys] = Object.keys(scopeFilter);
+  if (
+    scopeKey !== undefined &&
+    otherScopeKeys.length === 0 &&
+    adapted.dropped.length === 0 &&
+    !adapted.requiresEscalation &&
+    dialect.isGetFilterMappingVerified?.(service, scopeKey)
+  ) {
+    return fetchTotalCount(client, connection.baseUrl, path, ctx, companion(filteredParams));
+  }
+
   const [filtered, baseline] = await Promise.all([
     fetchTotalCount(client, connection.baseUrl, path, ctx, companion(filteredParams)),
     fetchTotalCount(client, connection.baseUrl, path, ctx, companion({ pageSize: 1 })).catch(
@@ -831,7 +844,7 @@ export async function fetchValidatedScopedCount(
 
   if (typeof filtered !== 'number') return;
 
-  // Guard 2: the scoped probe and the unfiltered baseline returned the same
+  // The scoped probe and the unfiltered baseline returned the same
   // total — an ignored filter and an entity holding every record look alike,
   // so the count can't be vouched for as scoped.
   if (typeof baseline === 'number' && baseline > 0 && filtered === baseline) {
@@ -1023,6 +1036,7 @@ export function dialectRowMapper<T extends Record<string, unknown>>(
  * Optionally applies a per-row normalizer (typically built via
  * `dialectRowMapper`) to each row before returning so the caller sees the
  * canonical shape that matches what the dataframe materialization will hold.
+ * A scalar GET union can reject rows before deduplicating on their IDs.
  */
 export async function loadInitialFindPage<T>(
   client: BrapiClient,
@@ -1030,10 +1044,14 @@ export async function loadInitialFindPage<T>(
   route: FindRoute,
   loadLimit: number,
   ctx: Context,
-  options: { normalizeRow?: (row: T) => T; pageSize?: number } = {},
+  options: {
+    normalizeRow?: (row: T) => T;
+    pageSize?: number;
+    unionRowFilter?: (row: T) => boolean;
+  } = {},
 ): Promise<LoadedRows<T>> {
   if (route.kind === 'get' && route.fanout) {
-    return collectGetUnion(client, connection, route, route.fanout, ctx, options.normalizeRow);
+    return collectGetUnion(client, connection, route, route.fanout, ctx, options);
   }
   const pageSize = options.pageSize ?? loadLimit;
   const envelope = await fetchFindRoutePage<T>(client, connection, route, pageSize, 0, ctx);
@@ -1115,7 +1133,7 @@ async function collectGetUnion<T>(
   route: GetRoute,
   fanout: NonNullable<GetRoute['fanout']>,
   ctx: Context,
-  normalizeRow?: (row: T) => T,
+  options: { normalizeRow?: (row: T) => T; unionRowFilter?: (row: T) => boolean },
 ): Promise<LoadedRows<T>> {
   const branches = findRouteBranches(route);
   const branchFilters: Record<string, unknown>[] = [];
@@ -1135,7 +1153,7 @@ async function collectGetUnion<T>(
     ...(fanout.preflightMaxTotal !== undefined && {
       preflightMaxTotal: fanout.preflightMaxTotal,
     }),
-    ...(normalizeRow && { normalizeRow }),
+    ...(options.normalizeRow && { normalizeRow: options.normalizeRow }),
     consume(id, rows) {
       const branch = byRoute.get(id);
       if (branch) for (const row of rows) branch.push(row);
@@ -1147,6 +1165,7 @@ async function collectGetUnion<T>(
   const idKey = FIND_ROW_IDS.get(route.path);
   for (const { id } of coverage) {
     for (const row of byRoute.get(id) ?? []) {
+      if (options.unionRowFilter && !options.unionRowFilter(row)) continue;
       const key = idKey && (row as Record<string, unknown>)[idKey];
       if (typeof key === 'string' || typeof key === 'number') {
         if (seen.has(String(key))) continue;

@@ -356,9 +356,7 @@ describe('brapi_get_study tool', () => {
         );
       }
       if (path.endsWith('/observations')) {
-        // The scoped count now runs a filtered probe + an unfiltered baseline;
-        // distinct totals confirm the (singular) study filter was honored.
-        const scoped = u.searchParams.has('studyDbId') || u.searchParams.has('studyDbIds');
+        const scoped = u.searchParams.get('studyDbId') === 's1';
         return jsonResponse(envelope({ data: [] }, { totalCount: scoped ? 7 : 70 }));
       }
       if (path.endsWith('/observationunits')) {
@@ -377,11 +375,10 @@ describe('brapi_get_study tool', () => {
     const trialsCall = calls.find((u) => u.pathname.endsWith('/trials'))!;
     const programsCall = calls.find((u) => u.pathname.endsWith('/programs'))!;
     const locationsCall = calls.find((u) => u.pathname.endsWith('/locations'))!;
-    // Scoped-count probes now fire a filtered call + an unfiltered baseline;
-    // pick the filtered one (carries the study key) to assert the singular wire.
     const observationsCall = calls.find(
       (u) => u.pathname.endsWith('/observations') && u.searchParams.has('studyDbId'),
     )!;
+    expect(calls.filter((u) => u.pathname.endsWith('/observations'))).toHaveLength(1);
     const observationUnitsCall = calls.find((u) => u.pathname.endsWith('/observationunits'))!;
 
     // Singular keys reach the wire — the v0.4.7 fix.
@@ -435,32 +432,58 @@ describe('brapi_get_study tool', () => {
     expect(result.study.studyCode).toBeNull();
   });
 
-  // #40: the BrAPI Community Test Server drops studyDbId(s) on /observations and
-  // silently ignores it on /variables, so those counts would collapse to the
-  // server-wide total. The validated probe must omit them (with a warning)
-  // rather than report a global count as study-scoped. observationUnitCount is
-  // honored and stays correct.
+  it.each([0, undefined])(
+    'renders verified observationCount %s with one scoped read',
+    async (total) => {
+      const ctx = await connect(fetcher, 'Breedbase');
+      fetcher.mockImplementation(async (url: string) => {
+        const path = pathnameOf(url);
+        if (path.endsWith('/studies/s1')) return jsonResponse(envelope({ studyDbId: 's1' }));
+        if (path.endsWith('/observations')) {
+          return jsonResponse(
+            envelope({ data: [] }, total === undefined ? undefined : { totalCount: total }),
+          );
+        }
+        return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
+      });
+      const result = await runToolContract<typeof brapiGetStudy>(
+        {
+          ...brapiGetStudy,
+          handler: (input, contractCtx) =>
+            brapiGetStudy.handler(input, { ...contractCtx, state: ctx.state }),
+        },
+        { studyDbId: 's1' },
+        { context: { tenantId: 't1' } },
+      );
+      expect(result.isError).not.toBe(true);
+      const requests = fetcher.mock.calls
+        .map((call) => new URL(String(call[0])))
+        .filter((url) => url.pathname.endsWith('/observations'));
+      expect(requests.map((url) => Object.fromEntries(url.searchParams))).toEqual([
+        { studyDbId: 's1', pageSize: '1' },
+      ]);
+      if (total === undefined)
+        expect(result.structuredContent).not.toHaveProperty('observationCount');
+      else expect(result.structuredContent).toHaveProperty('observationCount', total);
+      const text = result.content
+        .map((block) => (block.type === 'text' ? block.text : ''))
+        .join('\n');
+      expect(text).toContain(`- observationCount: ${total ?? '—'}`);
+    },
+  );
+
+  // The test dialect drops study filters for these counts; observation units have their own path.
   it('omits observation/variable counts and warns when the dialect cannot scope them (#40)', async () => {
     const ctx = await connect(fetcher, 'BrAPI Community Test Server');
 
-    const observationsCalls: string[] = [];
     fetcher.mockImplementation(async (url: string) => {
       const u = new URL(String(url));
       const path = u.pathname;
       if (path.endsWith('/studies/study3')) {
         return jsonResponse(envelope({ studyDbId: 'study3', observationVariableDbIds: [] }));
       }
-      if (path.endsWith('/observations')) {
-        observationsCalls.push(u.search);
-        return jsonResponse(envelope({ data: [] }, { totalCount: 999 }));
-      }
       if (path.endsWith('/observationunits')) {
         return jsonResponse(envelope({ data: [] }, { totalCount: 0 }));
-      }
-      if (path.endsWith('/variables')) {
-        // Filtered probe and unfiltered baseline return the same global total —
-        // the server accepted the filter on the wire but ignored it.
-        return jsonResponse(envelope({ data: [] }, { totalCount: 4 }));
       }
       throw new Error(`Unexpected path: ${path}`);
     });
@@ -476,12 +499,11 @@ describe('brapi_get_study tool', () => {
     expect(result.warnings).toEqual(
       expect.arrayContaining([
         expect.stringMatching(/observationCount omitted.*\/observations/),
-        expect.stringMatching(/variableCount omitted.*4/),
+        expect.stringMatching(/variableCount omitted.*\/variables/),
       ]),
     );
-    // The dialect drop short-circuits the /observations count probe — it never
-    // fires a request, so no global total can leak through.
-    expect(observationsCalls).toEqual([]);
+    const paths = fetcher.mock.calls.map((call) => pathnameOf(String(call[0])));
+    expect(paths.filter((path) => /\/(observations|variables)$/.test(path))).toEqual([]);
   });
 
   it('a stalled study record ends at the call deadline with a Timeout', async () => {

@@ -59,7 +59,11 @@ async function connect(
       return jsonResponse(
         envelope({
           serverName,
-          calls: calls.map((service) => ({ service, methods: ['GET'], versions: ['2.1'] })),
+          calls: calls.map((service) => ({
+            service,
+            methods: [service.startsWith('search/') ? 'POST' : 'GET'],
+            versions: ['2.1'],
+          })),
         }),
       );
     }
@@ -220,6 +224,89 @@ describe('brapi_find_variables tool', () => {
     expect(getEnrichment(ctx).returnedCount).toBe(0);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    { studies: ['S1'] },
+    { studies: ['S1', 'S1'] },
+    { studies: ['S1', 'S2'] },
+    { extraFilters: { studyDbId: 'S1' } },
+    { extraFilters: { studyDbIds: ['S1', 'S2'] } },
+    { studies: ['S1'], text: 'height' },
+  ])('rejects unsupported variable study-only scope on brapi-test (#133): %j', async (input) => {
+    const ctx = await connect(fetcher, ['variables'], 'BrAPI Community Test Server');
+    const { result, structured, text } = await callContract(ctx, input);
+    expect(result.isError).toBe(true);
+    expect(structured).toMatchObject({
+      error: {
+        data: {
+          reason: 'all_filters_dropped',
+          dialect: 'brapi-test',
+          recovery: { hint: expect.stringContaining('text alone to rank the server catalog') },
+        },
+      },
+    });
+    expect(text).toContain('all_filters_dropped');
+    expect(text).toContain('text alone to rank the server catalog');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each(['GET', 'POST'])(
+    'drops study scope without losing remaining %s filters (#133)',
+    async (method) => {
+      const ctx = await connect(
+        fetcher,
+        ['variables', 'search/variables', 'ontologies'],
+        'BrAPI Community Test Server',
+      );
+      const rows = [
+        varRow({ observationVariableDbId: 'v1', commonCropName: 'Pawpaw' }),
+        varRow({ observationVariableDbId: 'v2', commonCropName: 'Pawpaw' }),
+      ];
+      const wire: Record<string, unknown>[] = [];
+      fetcher.mockImplementation(async (url, _timeout, _ctx, init) => {
+        const query = new URL(String(url)).searchParams;
+        const params =
+          method === 'POST' ? JSON.parse(String(init?.body)) : Object.fromEntries(query);
+        expect(pathnameOf(url)).toBe(
+          method === 'POST' ? '/brapi/v2/search/variables' : '/brapi/v2/variables',
+        );
+        const { pageSize, page, ...filters } = params;
+        wire.push(filters);
+        const start = Number(page ?? 0) * Number(pageSize);
+        return jsonResponse(
+          envelope(
+            { data: rows.slice(start, start + Number(pageSize)) },
+            { totalCount: rows.length },
+          ),
+        );
+      });
+      const variables = ['v1', 'v2'];
+      const expected =
+        method === 'POST' ? { observationVariableDbIds: variables } : { commonCropName: 'Pawpaw' };
+      const { result, structured, text } = await callContract(ctx, {
+        studies: ['S1', 'S2'],
+        extraFilters: { studyDbIds: ['S1', 'S2'] },
+        ...(method === 'POST' ? { variables } : { crop: 'Pawpaw' }),
+        loadLimit: 1,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(wire).toEqual([expected, expected]);
+      expect(structured.appliedFilters).toEqual(expected);
+      expect(structured).not.toHaveProperty('studyCoverage');
+      expect((structured.results as Record<string, unknown>[])[0]).not.toHaveProperty('studyDbIds');
+      expect(structured.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("dropped filter 'studyDbId'"),
+          expect.stringContaining("dropped filter 'studyDbIds'"),
+        ]),
+      );
+      expect(text).toContain("dropped filter 'studyDbId'");
+      expect(text).not.toContain('## Study coverage');
+      const described = await getCanvasBridge().describe(ctx);
+      expect(described).toHaveLength(1);
+      expect(described[0]?.provenance?.query).toEqual(expected);
+    },
+  );
 
   it('unions overlapping studies by actual variable ID with provenance', async () => {
     const ctx = await connect(fetcher);
@@ -902,6 +989,172 @@ describe('brapi_find_variables free-text match ranking (#127)', () => {
     });
   }
 
+  it('summarizes SGN references and data types over the fetched set (#132)', async () => {
+    const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
+    const rows = [
+      {
+        observationVariableDbId: 'v1',
+        ontologyDbId: '  ',
+        ontologyReference: { ontologyDbId: '186', ontologyName: 'CO_334' },
+        scale: { dataType: 'Numerical', scaleName: null },
+      },
+      {
+        observationVariableDbId: 'v2',
+        ontologyDbId: '291',
+        ontologyName: 'COMP',
+        ontologyReference: { ontologyDbId: '186', ontologyName: 'CO_334' },
+        scale: { dataType: 'Text' },
+      },
+    ];
+    serve(rows);
+    const { result, structured, text } = await callContract(ctx, {
+      loadLimit: 1,
+      ontologies: ['CO_334'],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(structured.distributions).toEqual({
+      ontologyDbId: { '186': 1, '291': 1 },
+      ontologyName: { CO_334: 1, COMP: 1 },
+      traitClass: {},
+      scaleName: {},
+      scaleDataType: { Numerical: 1, Text: 1 },
+    });
+    expect(structured.results).toMatchObject([
+      { ontologyDbId: '  ', ontologyReference: rows[0]?.ontologyReference },
+    ]);
+    expect(structured.warnings).toContain(
+      'Fetched variables do not publish trait.traitClass or scale.scaleName.',
+    );
+    expect(structured.warnings).toContain(
+      'Filter \'ontologies\' requested ["CO_334"] but no returned row matches — the server may not honor this filter. Observed values: 186, 291.',
+    );
+    expect(text).toContain('Fetched variables do not publish trait.traitClass or scale.scaleName.');
+    expect(text).toContain('CO_334 (1)');
+    expect(text).toContain('Numerical (1)');
+  });
+
+  it('skips unusable IDs before ranking and staging (#135)', async () => {
+    const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
+    const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
+    serve([
+      { observationVariableDbId: null, observationVariableName: 'dry matter content' },
+      ...rows60,
+      { observationVariableName: 'dry matter content', observationVariablePUI: 'CO_334:1' },
+      { observationVariableDbId: 25, observationVariableName: 'dry matter content' },
+      { observationVariableDbId: '  ', observationVariableName: 'dry matter content' },
+    ]);
+    const { result, structured, text } = await callContract(ctx, {
+      text: 'dry matter content',
+      loadLimit: 10,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({
+      totalCount: 64,
+      textMatchCount: 15,
+      dataframe: { rowCount: 60, totalCount: 60 },
+    });
+    expect(ids(structured)).toEqual(matchIds.slice(0, 10));
+    expect(structured.warnings).toContain(
+      'Skipped 4 variable row(s) without a usable observationVariableDbId.',
+    );
+    expect(text).toContain('Skipped 4 variable row(s) without a usable observationVariableDbId.');
+    const staged = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
+    expect(staged.map((row) => row.observationVariableDbId)).toEqual(
+      rows60.map((row) => row.observationVariableDbId),
+    );
+    expect(staged.flatMap((row) => row.textMatchRank ?? [])).toEqual(
+      Array.from({ length: 15 }, (_, index) => index + 1),
+    );
+  });
+
+  it('returns a complete empty result when all IDs are unusable and text is absent (#135)', async () => {
+    const ctx = await connect(fetcher);
+    serve([{ observationVariableName: 'height' }]);
+    const { result, structured, text } = await callContract(ctx, {});
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({ totalCount: 1, hasMore: false, results: [] });
+    expect(structured).not.toHaveProperty('dataframe');
+    expect(structured).not.toHaveProperty('textMatchCount');
+    expect(structured.warnings).toContain(
+      'Skipped 1 variable row(s) without a usable observationVariableDbId.',
+    );
+    expect(text).toContain('Skipped 1 variable row(s) without a usable observationVariableDbId.');
+  });
+
+  it('preserves multi-study rows and scan coverage when one study has an unusable ID (#135)', async () => {
+    const ctx = await connect(fetcher);
+    fetcher.mockImplementation(async (url: string) => {
+      const study = new URL(url).searchParams.get('studyDbId');
+      const rows =
+        study === 'S1'
+          ? [rows60[3], { observationVariableName: 'dry matter content' }]
+          : [rows60[3], rows60[7]];
+      return jsonResponse(envelope({ data: rows }, { totalCount: rows.length }));
+    });
+    const { result, structured, text } = await callContract(ctx, {
+      studies: ['S1', 'S2'],
+      text: 'dry matter content',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({
+      totalCount: 2,
+      textMatchCount: 2,
+      studyCoverage: [
+        { id: 'S1', status: 'complete', rowsScanned: 2 },
+        { id: 'S2', status: 'complete', rowsScanned: 2 },
+      ],
+      results: [
+        { observationVariableDbId: 'v03', studyDbIds: ['S1', 'S2'], textMatchRank: 1 },
+        { observationVariableDbId: 'v07', studyDbIds: ['S2'], textMatchRank: 2 },
+      ],
+    });
+    expect(text).toContain('Skipped 1 variable row(s) without a usable observationVariableDbId.');
+  });
+
+  it('discards invalid IDs before scalar GET fanout deduplicates valid IDs (#135)', async () => {
+    const ctx = await connect(fetcher, ['variables'], 'CassavaBase');
+    fetcher.mockImplementation(async (url: string) => {
+      const scale = new URL(url).searchParams.get('scaleDbId');
+      const data =
+        scale === 'S1'
+          ? [{ observationVariableDbId: 25 }, { observationVariableDbId: 25 }]
+          : [{ observationVariableDbId: '25', observationVariableName: 'Height' }];
+      return jsonResponse(envelope({ data }, { totalCount: data.length }));
+    });
+    const { result, structured, text } = await callContract(ctx, { scales: ['S1', 'S2'] });
+    expect(result.isError).toBeFalsy();
+    expect(structured).toMatchObject({
+      results: [{ observationVariableDbId: '25', observationVariableName: 'Height' }],
+      totalCount: 1,
+      hasMore: false,
+    });
+    expect(text).toContain('Skipped 2 variable row(s) without a usable observationVariableDbId.');
+  });
+
+  it('assigns each rank to the matching source row even when IDs collide (#135)', async () => {
+    const ctx = await connect(fetcher);
+    const rows = ['plant height', 'dry matter content percentage', 'dry matter content'].map(
+      (observationVariableName) => ({ observationVariableDbId: 'dup', observationVariableName }),
+    );
+    serve(rows);
+    const { structured, text } = await callContract(ctx, { text: 'dry matter content' });
+    expect(structured.textMatchCount).toBe(2);
+    expect(structured.results).toEqual([
+      { ...rows[2], textMatchRank: 1 },
+      { ...rows[1], textMatchRank: 2 },
+      rows[0],
+    ]);
+    expect(structured.ontologyCandidates).toEqual([
+      { observationVariableDbId: 'dup', name: 'dry matter content', source: 'nameMatch' },
+      {
+        observationVariableDbId: 'dup',
+        name: 'dry matter content percentage',
+        source: 'nameMatch',
+      },
+    ]);
+    expect(text).toContain('top 2 of 2 text matches');
+  });
+
   it('promotes every match in rank order, counts them, and stages each rank', async () => {
     const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
     const bridge = useDuckdb();
@@ -990,6 +1243,64 @@ describe('brapi_find_variables free-text match ranking (#127)', () => {
     expect(text).not.toContain('text matches');
   });
 
+  it.each([undefined, 'dry matter content'])(
+    'only reports finder-owned ranks inline and in the staged table (text: %s)',
+    async (query) => {
+      const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
+      const bridge = useDuckdb();
+      const unmatched = {
+        observationVariableDbId: 'a',
+        observationVariableName: 'plant height',
+        sourceLabel: 'upstream-1',
+      };
+      const matched = {
+        observationVariableDbId: 'b',
+        observationVariableName: 'dry matter content',
+        sourceLabel: 'upstream-2',
+      };
+      const stagedOnly = {
+        observationVariableDbId: 'c',
+        observationVariableName: 'canopy cover',
+        sourceLabel: 'upstream-3',
+      };
+      serve([
+        { ...unmatched, textMatchRank: 1 },
+        { ...matched, textMatchRank: 99 },
+        { ...stagedOnly, textMatchRank: 3 },
+      ]);
+      const { result, structured, text } = await callContract(ctx, {
+        text: query,
+        loadLimit: 2,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(structured.results).toEqual(
+        query ? [{ ...matched, textMatchRank: 1 }, unmatched] : [unmatched, matched],
+      );
+      expect(text).toContain('upstream-1');
+      expect(text).toContain('upstream-2');
+      expect(text.match(/textMatchRank=\d+/g) ?? []).toEqual(query ? ['textMatchRank=1'] : []);
+      if (query) expect(structured.textMatchCount).toBe(1);
+      else expect(structured).not.toHaveProperty('textMatchCount');
+
+      const tableName = (structured.dataframe as { tableName: string }).tableName;
+      const canvas = await bridge.getInstance(ctx);
+      const staged = await canvas.query(
+        `SELECT * FROM "${tableName}" ORDER BY observationVariableDbId`,
+      );
+      if (query) {
+        expect(staged.rows.map((row) => row.textMatchRank)).toEqual([null, '1', null]);
+      } else {
+        expect(staged.rows.every((row) => !Object.hasOwn(row, 'textMatchRank'))).toBe(true);
+      }
+      expect(staged.rows.map((row) => row.sourceLabel)).toEqual([
+        'upstream-1',
+        'upstream-2',
+        'upstream-3',
+      ]);
+    },
+  );
+
   it('reports zero matches with no rank on any row', async () => {
     const ctx = await connect(fetcher);
     serve(rows60.slice(0, 8));
@@ -1075,11 +1386,10 @@ describe('brapi_find_variables free-text match ranking (#127)', () => {
     expect(text).toContain('## Ontology candidates (top 10 of 15 text matches)');
   });
 
-  it('ranks a matched row without observationVariableDbId through its PUI', async () => {
+  it('skips a late description match with a PUI but without a variable ID', async () => {
     const ctx = await connect(fetcher, ['variables', 'ontologies'], 'CassavaBase');
     const register = vi.spyOn(getCanvasBridge(), 'registerDataframe');
-    // Matched only by its trait description, so it ranks after the 15 name
-    // matches and is staged without reaching results[].
+    // This would match by trait description after the 15 name matches.
     const puiOnly = {
       observationVariablePUI: 'CO_334:0000092',
       observationVariableName: 'root dry weight',
@@ -1087,18 +1397,17 @@ describe('brapi_find_variables free-text match ranking (#127)', () => {
     };
     serve([...rows60, puiOnly]);
 
-    const { result, structured } = await callContract(ctx, {
+    const { result, structured, text } = await callContract(ctx, {
       text: 'dry matter content',
       loadLimit: 10,
     });
 
     expect(result.isError).toBeFalsy();
-    expect(structured.textMatchCount).toBe(16);
+    expect(structured.textMatchCount).toBe(15);
     const staged = register.mock.calls[0]?.[1].rows as Record<string, unknown>[];
-    expect(staged.find((row) => row.observationVariablePUI === 'CO_334:0000092')).toMatchObject({
-      textMatchRank: 16,
-    });
-    expect(staged.filter((row) => row.textMatchRank !== undefined)).toHaveLength(16);
+    expect(staged.some((row) => row.observationVariablePUI === 'CO_334:0000092')).toBe(false);
+    expect(staged.filter((row) => row.textMatchRank !== undefined)).toHaveLength(15);
+    expect(text).toContain('Skipped 1 variable row(s) without a usable observationVariableDbId.');
   });
 
   it('gives a variable listed twice one rank per row, in row order', async () => {

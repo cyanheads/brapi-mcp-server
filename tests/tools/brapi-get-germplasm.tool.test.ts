@@ -179,14 +179,13 @@ describe('brapi_get_germplasm tool', () => {
       ctx,
     );
 
-    // Studies probe must have used the singular key (verified by hitting the
-    // mock branch above) — and the count survived the filtered≠baseline check.
     const studiesCalls = fetcher.mock.calls
       .map((c) => new URL(String(c[0])))
       .filter((u) => u.pathname.endsWith('/studies'));
     const filteredCalls = studiesCalls.filter((u) => u.searchParams.has('germplasmDbId'));
     const pluralCalls = studiesCalls.filter((u) => u.searchParams.has('germplasmDbIds'));
     expect(filteredCalls).toHaveLength(1);
+    expect(studiesCalls).toHaveLength(1);
     expect(pluralCalls).toHaveLength(0);
     expect(result.studyCount).toBe(1);
   });

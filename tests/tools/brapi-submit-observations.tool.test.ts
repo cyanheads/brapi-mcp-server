@@ -613,7 +613,7 @@ describe('brapi_submit_observations study variable review (#122)', () => {
    * `studyDbId`; any other query (the plural included) gets the server-wide
    * list, as SGN servers answer. Records every requested URL in `calls`.
    */
-  function serveStudyScopedVariables(calls: URL[]) {
+  function serveStudyScopedVariables(calls: URL[], honorsStudy = true) {
     fetcher.mockImplementation(async (url: string) => {
       const u = new URL(String(url));
       calls.push(u);
@@ -621,7 +621,9 @@ describe('brapi_submit_observations study variable review (#122)', () => {
         return jsonResponse(envelope({ studyDbId: 'study-1' }));
       if (u.pathname.endsWith('/variables')) {
         const ids =
-          u.searchParams.get('studyDbId') === 'study-1' ? STUDY_VARIABLES : SERVER_VARIABLES;
+          honorsStudy && u.searchParams.get('studyDbId') === 'study-1'
+            ? STUDY_VARIABLES
+            : SERVER_VARIABLES;
         const data = ids.map((observationVariableDbId) => ({ observationVariableDbId }));
         return jsonResponse(envelope({ data }, { totalCount: data.length }));
       }
@@ -664,7 +666,6 @@ describe('brapi_submit_observations study variable review (#122)', () => {
     ['cassavabase', 'Cassavabase', 'studyDbId'],
     ['breedbase', 'Breedbase', 'studyDbId'],
     ['bms', 'BMS', 'studyDbId'],
-    ['brapi-test', 'BrAPI Community Test Server', 'studyDbId'],
   ])(
     'scopes /variables by studyDbId under the %s dialect; /observationunits keeps the dialect key',
     async (_dialect, serverName, unitKey) => {
@@ -713,6 +714,37 @@ describe('brapi_submit_observations study variable review (#122)', () => {
     // One attempt per read on the companion budget: no retry stretches the preview.
     const { companionTimeoutMs } = getServerConfig();
     expect(variableTimeouts).toEqual([companionTimeoutMs, companionTimeoutMs]);
+    expect(writeMethods(fetcher)).toEqual([]);
+  });
+
+  it('skips unverified variable membership in preview and pre-apply review', async () => {
+    const ctx = await connect(fetcher, { serverName: 'BrAPI Community Test Server', units: true });
+    serveStudyScopedVariables([], false);
+    const input = previewInput(['var-other']);
+    const preview = await brapiSubmitObservations.handler(input, ctx);
+    const warnings = expect.arrayContaining([
+      expect.stringMatching(/\/variables.*[Mm]embership is unverified/),
+    ]);
+    expect(preview.result).toMatchObject({
+      mode: 'preview',
+      flagged: 1,
+      knownVariableCount: 0,
+      warnings,
+    });
+    expect(preview.result.perRowWarnings).toEqual([
+      expect.objectContaining({
+        warning: expect.stringContaining("observationUnitDbId 'ou-1' is not in study"),
+      }),
+    ]);
+    expect(renderText(preview)).toMatch(/\/variables.*[Mm]embership is unverified/);
+
+    const asked = await expectInputRequired(() =>
+      brapiSubmitObservations.handler({ ...input, mode: 'apply' }, ctx),
+    );
+    expect(JSON.stringify(asked.inputRequests)).toContain('1 flagged');
+    const paths = fetcher.mock.calls.map((call) => pathnameOf(String(call[0])));
+    expect(paths.filter((path) => path.endsWith('/variables'))).toEqual([]);
+    expect(paths.filter((path) => path.endsWith('/observationunits'))).toHaveLength(2);
     expect(writeMethods(fetcher)).toEqual([]);
   });
 });
@@ -768,6 +800,23 @@ describe('brapi_submit_observations apply studyObservationCount', () => {
         (u) => u.pathname.endsWith('/observations') && u.searchParams.get('pageSize') === '1',
       );
 
+  it.each([7, 0, undefined])('retains verified SGN count %s from one request', async (total) => {
+    const ctx = await connect(fetcher, { serverName: 'Breedbase' });
+    serveApply(async () =>
+      jsonResponse(envelope({ data: [] }, total === undefined ? undefined : { totalCount: total })),
+    );
+    const output = await brapiSubmitObservations.handler(
+      brapiSubmitObservations.input.parse(FORCED_POST),
+      ctx,
+    );
+    if (output.result.mode !== 'apply') throw new Error('expected apply');
+    expect(countRequests().map((url) => Object.fromEntries(url.searchParams))).toEqual([
+      { studyDbId: 'study-1', pageSize: '1' },
+    ]);
+    expect(output.result.studyObservationCount).toBe(total);
+    expect(renderText(output)).toContain(`- studyObservationCount: ${total ?? '—'}`);
+  });
+
   it('omits the count with a warning when the dialect drops the study filter, without probing', async () => {
     const ctx = await connect(fetcher, { serverName: 'BrAPI Community Test Server' });
     // The test server ignores the study scope on /observations: every count is the server-wide total.
@@ -794,32 +843,40 @@ describe('brapi_submit_observations apply studyObservationCount', () => {
     expect(text).toMatch(/studyObservationCount omitted: the 'brapi-test' dialect/);
   });
 
-  it('omits the count with a warning when the scoped total equals the unfiltered baseline', async () => {
-    const ctx = await connect(fetcher);
-    serveApply(async () => jsonResponse(envelope({ data: [] }, { totalCount: 4 })));
+  it.each([
+    ['Test', 'studyDbIds'],
+    ['BMS', 'studyDbId'],
+  ])(
+    'omits the count for %s when the scoped total equals the unfiltered baseline',
+    async (serverName, scopeKey) => {
+      const ctx = await connect(fetcher, { serverName });
+      serveApply(async () => jsonResponse(envelope({ data: [] }, { totalCount: 4 })));
 
-    const output = await brapiSubmitObservations.handler(
-      brapiSubmitObservations.input.parse(FORCED_POST),
-      ctx,
-    );
+      const output = await brapiSubmitObservations.handler(
+        brapiSubmitObservations.input.parse(FORCED_POST),
+        ctx,
+      );
 
-    if (output.result.mode !== 'apply') throw new Error('expected apply');
-    expect(output.result.studyObservationCount).toBeUndefined();
-    expect(output.result.warnings).toEqual(
-      expect.arrayContaining([
-        expect.stringMatching(
-          /^studyObservationCount omitted: \/observations returned the same total \(4\)/,
-        ),
-      ]),
-    );
-    // Equal totals also arise when the study holds every observation on the
-    // server, so the warning must not assert the filter was ignored.
-    const guard = output.result.warnings?.find((w) => w.includes('returned the same total'));
-    expect(guard).toContain("so the study filter can't be confirmed");
-    expect(guard).not.toContain('silently ignored');
-    const scoped = countRequests().filter((u) => u.searchParams.has('studyDbIds'));
-    expect(scoped.map((u) => u.searchParams.getAll('studyDbIds'))).toEqual([['study-1']]);
-  });
+      if (output.result.mode !== 'apply') throw new Error('expected apply');
+      expect(output.result.studyObservationCount).toBeUndefined();
+      expect(output.result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(
+            /^studyObservationCount omitted: \/observations returned the same total \(4\)/,
+          ),
+        ]),
+      );
+      // Equal totals also arise when the study holds every observation on the
+      // server, so the warning must not assert the filter was ignored.
+      const guard = output.result.warnings?.find((w) => w.includes('returned the same total'));
+      expect(guard).toContain("so the study filter can't be confirmed");
+      expect(guard).not.toContain('silently ignored');
+      expect(countRequests().map((url) => Object.fromEntries(url.searchParams))).toEqual([
+        { [scopeKey]: 'study-1', pageSize: '1' },
+        { pageSize: '1' },
+      ]);
+    },
+  );
 
   it('omits the count with a warning when the count probe fails, keeping the write result', async () => {
     const ctx = await connect(fetcher);

@@ -156,6 +156,7 @@ describe('OntologyResolver', () => {
       'trait',
       'desc',
     ]);
+    expect(candidates.map((c) => c.rowIndex)).toEqual([4, 3, 2, 1, 0]);
   });
 
   it('returns the pool unchanged (up to limit) when the query is empty', () => {

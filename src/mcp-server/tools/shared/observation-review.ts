@@ -120,6 +120,12 @@ export async function reviewStudyRows(
     // the plural there; the other two reads send the plural through the dialect.
     const scope =
       endpoint === 'variables' ? { studyDbId: input.studyDbId } : { studyDbIds: [input.studyDbId] };
+    if (endpoint === 'variables' && dialect.adaptGetFilters(endpoint, scope).dropped.length > 0) {
+      notes.push(
+        'Skipped the /variables study check because the server does not honor the study filter. Membership is unverified.',
+      );
+      return { records, complete, notes };
+    }
     try {
       const env = await client.get<unknown>(
         connection.baseUrl,

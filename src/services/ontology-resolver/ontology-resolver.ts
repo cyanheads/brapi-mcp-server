@@ -48,7 +48,7 @@ interface ScoredCandidate {
 export class OntologyResolver {
   /**
    * Rank a pool of variables against a free-text query. Returns up to
-   * `limit` candidates sorted by match quality (exact PUI > name match >
+   * `limit` matches with their input row index, sorted by match quality (exact PUI > name match >
    * synonym match). When the query is empty, returns the pool unchanged
    * (up to the limit).
    */
@@ -56,24 +56,26 @@ export class OntologyResolver {
     query: string,
     variables: readonly VariableLike[],
     options: ResolveOptions = {},
-  ): OntologyCandidate[] {
+  ): (OntologyCandidate & { rowIndex: number })[] {
     const limit = options.limit ?? 10;
     const normalized = query.trim().toLowerCase();
 
     if (!normalized) {
-      return variables.slice(0, limit).map((v) => toCandidate(v, 'nameMatch'));
+      return variables
+        .slice(0, limit)
+        .map((variable, rowIndex) => ({ ...toCandidate(variable, 'nameMatch'), rowIndex }));
     }
 
-    const scored: ScoredCandidate[] = [];
+    const scored: (ScoredCandidate & { rowIndex: number })[] = [];
 
-    for (const variable of variables) {
+    for (const [rowIndex, variable] of variables.entries()) {
       if (options.ontologyDbId && variable.ontologyDbId !== options.ontologyDbId) continue;
       const match = this.scoreOne(variable, normalized);
-      if (match) scored.push(match);
+      if (match) scored.push({ ...match, rowIndex });
     }
 
     scored.sort((a, b) => b.score - a.score || (a.nameLength ?? 0) - (b.nameLength ?? 0));
-    return scored.slice(0, limit).map((s) => s.candidate);
+    return scored.slice(0, limit).map(({ candidate, rowIndex }) => ({ ...candidate, rowIndex }));
   }
 
   private scoreOne(variable: VariableLike, query: string): ScoredCandidate | undefined {

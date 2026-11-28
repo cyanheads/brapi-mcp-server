@@ -9,7 +9,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, serializationError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getBrapiClient } from '@/services/brapi-client/index.js';
 import { resolveDialect } from '@/services/brapi-dialect/index.js';
@@ -25,7 +25,6 @@ import {
   AliasInput,
   appliedFindFilters,
   applyDialectFiltersOrFail,
-  asString,
   buildExtraFilterChecks,
   buildRefinementHint,
   checkFilterMatchRates,
@@ -70,7 +69,7 @@ const VariableRowSchema = z
       .int()
       .positive()
       .optional()
-      .describe('Free-text rank among fetched rows, from 1; absent on unmatched rows.'),
+      .describe('Free-text rank among retained variables, from 1; absent on unmatched rows.'),
     observationVariablePUI: z
       .string()
       .nullish()
@@ -168,7 +167,7 @@ const OutputSchema = z.object({
     .nonnegative()
     .optional()
     .describe(
-      'Fetched rows the free text matched (a partial scan counts fetched rows only); absent without text.',
+      'Retained variables the free text matched. A partial scan counts fetched rows only. Absent without text.',
     ),
   hasMore: z.boolean().describe('True when more rows exist beyond the returned set.'),
   distributions: z
@@ -176,12 +175,14 @@ const OutputSchema = z.object({
       ontologyDbId: z
         .record(z.string(), z.number())
         .describe('Ontology ID → count of variables in that ontology.'),
+      ontologyName: z.record(z.string(), z.number()).describe('Ontology display name → count.'),
       traitClass: z
         .record(z.string(), z.number())
         .describe('Trait class → count of variables in that class.'),
       scaleName: z
         .record(z.string(), z.number())
         .describe('Scale name → count of variables using that scale.'),
+      scaleDataType: z.record(z.string(), z.number()).describe('Scale data type → count.'),
     })
     .describe('Value frequency per field across every matched row fetched.'),
   ontologyCandidates: z
@@ -328,7 +329,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The active dialect dropped every filter the agent supplied — the upstream server does not honor any of the requested scope filters on this endpoint, so the call would silently widen to the unfiltered baseline.',
       recovery:
-        'Drop the unsupported filters and rescope by variables, traitClasses, ontologyDbIds, methodDbIds, scaleDbIds, or text — these filter paths are honored on the active dialect.',
+        'Omit the unsupported filters. Use variables to filter by ID, or text alone to rank the server catalog.',
       thrownBy: 'service',
     },
   ] as const,
@@ -439,12 +440,17 @@ export const brapiFindVariables = tool('brapi_find_variables', {
 
     const adapted = applyDialectFiltersOrFail(ctx, dialect, 'variables', merged, warnings);
     const filters = adapted.filters;
+    // Dropped keys are unsupported on both variable routes. Keep the original
+    // shapes of supported filters so POST can still honor multi-value inputs.
+    const retainedFilters = (values: Record<string, unknown>) =>
+      Object.fromEntries(Object.entries(values).filter(([key]) => !adapted.dropped.includes(key)));
+    const searchBody = retainedFilters(merged);
     const route = resolveFindRoute({
       profile,
       dialect,
       endpoint: 'variables',
       filters,
-      searchBody: merged,
+      searchBody,
       warnings,
       ...(adapted.requiresEscalation ? { requiresEscalation: true } : {}),
     });
@@ -457,9 +463,19 @@ export const brapiFindVariables = tool('brapi_find_variables', {
 
     const loadLimit = input.loadLimit ?? config.loadLimit;
     const normalizeRow = dialectRowMapper<Record<string, unknown>>(dialect, 'variables');
-    const effectiveStudies = [...new Set(input.studies ?? [])];
-    const union = new Map<string, Record<string, unknown>>();
+    const effectiveStudies = adapted.dropped.includes('studyDbId')
+      ? []
+      : [...new Set(input.studies ?? [])];
+    const union = new Map<string, Record<string, unknown> & { studyDbIds: string[] }>();
     const rowsByStudy = new Map<string, Map<string, Record<string, unknown>>>();
+    let skippedRows = 0;
+    function usableVariableId(row: Record<string, unknown>): string | undefined {
+      const id = nonblank(row.observationVariableDbId);
+      if (id === undefined) skippedRows++;
+      return id;
+    }
+    const keepVariable = (row: Record<string, unknown>) => usableVariableId(row) !== undefined;
+    const getUnion = route.kind === 'get' && route.fanout !== undefined;
     const studyCoverage =
       effectiveStudies.length > 1
         ? await collectFindRoutes<Record<string, unknown>>({
@@ -467,7 +483,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
             connection,
             ctx,
             routes: effectiveStudies.map((id) => {
-              const studyFilters = { ...merged, studyDbId: id };
+              const studyFilters = { ...searchBody, studyDbId: id };
               const studyAdapted = applyDialectFiltersOrFail(
                 ctx,
                 dialect,
@@ -493,11 +509,8 @@ export const brapiFindVariables = tool('brapi_find_variables', {
               const studyRows = rowsByStudy.get(id) ?? new Map<string, Record<string, unknown>>();
               rowsByStudy.set(id, studyRows);
               for (const row of rows) {
-                const variableId = row.observationVariableDbId;
-                if (typeof variableId !== 'string' || !variableId)
-                  throw serializationError(
-                    'Upstream variable row is missing observationVariableDbId.',
-                  );
+                const variableId = usableVariableId(row);
+                if (variableId === undefined) continue;
                 if (!studyRows.has(variableId)) studyRows.set(variableId, row);
               }
             },
@@ -506,11 +519,14 @@ export const brapiFindVariables = tool('brapi_find_variables', {
     for (const id of effectiveStudies) {
       for (const [variableId, row] of rowsByStudy.get(id) ?? []) {
         const existing = union.get(variableId);
-        if (existing) (existing.studyDbIds as string[]).push(id);
+        if (existing) existing.studyDbIds.push(id);
         else union.set(variableId, { ...row, studyDbIds: [id] });
       }
     }
     const incomplete = studyCoverage?.some((item) => item.status !== 'complete');
+    const appliedFilters = studyCoverage
+      ? { ...appliedFindFilters(route), studyDbId: effectiveStudies }
+      : appliedFindFilters(route);
     const firstPage = studyCoverage
       ? {
           rows: [...union.values()],
@@ -524,7 +540,10 @@ export const brapiFindVariables = tool('brapi_find_variables', {
           route,
           loadLimit,
           ctx,
-          normalizeRow ? { normalizeRow } : {},
+          {
+            ...(normalizeRow && { normalizeRow }),
+            ...(getUnion && { unionRowFilter: keepVariable }),
+          },
         );
 
     const text = input.text;
@@ -534,7 +553,7 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       client,
       connection,
       path: '/variables',
-      filters: studyCoverage ? { ...filters, studyDbId: effectiveStudies } : filters,
+      filters: appliedFilters,
       route,
       source: 'find_variables',
       renderInline: (rows, dataframe) =>
@@ -543,22 +562,30 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       ctx,
       bridge,
       warnings,
+      ...(!studyCoverage && !getUnion && { rowFilter: keepVariable }),
       ...(incomplete
         ? { preloadedStopReason: 'multi-study coverage incomplete; see studyCoverage' }
         : {}),
       ...(normalizeRow ? { normalizeRow } : {}),
-      /**
-       * Free text ranks every fetched row before staging, so the dataframe
-       * carries textMatchRank beside the raw upstream shape.
-       */
-      ...(text
-        ? {
-            annotateRows: (rows: Record<string, unknown>[]) => {
-              matches = resolver.match(text, rows as VariableLike[], { limit: rows.length });
-              return rankRows(rows, matches);
-            },
-          }
-        : {}),
+      // Only ranks computed for this call may reach the preview or dataframe.
+      annotateRows: (rows) => {
+        const ranks = new Map<number, number>();
+        if (text) {
+          matches = resolver
+            .match(text, rows as VariableLike[], { limit: rows.length })
+            .map(({ rowIndex, ...candidate }, index) => {
+              ranks.set(rowIndex, index + 1);
+              return candidate;
+            });
+        }
+        return rows.map((row, rowIndex) => {
+          const rank = ranks.get(rowIndex);
+          if (rank !== undefined) return { ...row, textMatchRank: rank };
+          if (!Object.hasOwn(row, 'textMatchRank')) return row;
+          const { textMatchRank: _upstreamRank, ...unranked } = row;
+          return unranked;
+        });
+      },
       /**
        * results[] carries free-text matches first, with empty nested containers
        * stripped (CassavaBase emits `method: {}` on every variable); the inline
@@ -567,20 +594,31 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       inlineView: (rows) => (text ? promoteRanked(rows) : rows).map(pruneEmptyNestedObjects),
     });
     const { fullRows, dataframe, results, hasMore, rowsScanned } = spill;
+    if (skippedRows)
+      warnings.push(
+        `Skipped ${skippedRows} variable row(s) without a usable observationVariableDbId.`,
+      );
 
     const distributions = {
-      ontologyDbId: computeDistribution(fullRows, (r) => asString(r.ontologyDbId)),
-      traitClass: computeDistribution(fullRows, (r) => {
-        const trait = r.trait;
-        if (!trait || typeof trait !== 'object') return;
-        return asString((trait as Record<string, unknown>).traitClass);
-      }),
-      scaleName: computeDistribution(fullRows, (r) => {
-        const scale = r.scale;
-        if (!scale || typeof scale !== 'object') return;
-        return asString((scale as Record<string, unknown>).scaleName);
-      }),
+      ontologyDbId: computeDistribution(
+        fullRows,
+        (row) => nonblank(row.ontologyDbId) ?? nestedString(row.ontologyReference, 'ontologyDbId'),
+      ),
+      ontologyName: computeDistribution(
+        fullRows,
+        (row) => nonblank(row.ontologyName) ?? nestedString(row.ontologyReference, 'ontologyName'),
+      ),
+      traitClass: computeDistribution(fullRows, (row) => nestedString(row.trait, 'traitClass')),
+      scaleName: computeDistribution(fullRows, (row) => nestedString(row.scale, 'scaleName')),
+      scaleDataType: computeDistribution(fullRows, (row) => nestedString(row.scale, 'dataType')),
     };
+    if (fullRows.length > 0) {
+      const missingFields = [];
+      if (!Object.keys(distributions.traitClass).length) missingFields.push('trait.traitClass');
+      if (!Object.keys(distributions.scaleName).length) missingFields.push('scale.scaleName');
+      if (missingFields.length)
+        warnings.push(`Fetched variables do not publish ${missingFields.join(' or ')}.`);
+    }
 
     checkFilterMatchRates(warnings, fullRows.length, [
       {
@@ -594,7 +632,11 @@ export const brapiFindVariables = tool('brapi_find_variables', {
         requestedValues: input.ontologies,
         distribution: distributions.ontologyDbId,
       },
-      ...buildExtraFilterChecks(input.extraFilters, fullRows, warnings),
+      ...buildExtraFilterChecks(
+        input.extraFilters && retainedFilters(input.extraFilters),
+        fullRows,
+        warnings,
+      ),
     ]);
 
     const totalCount = firstPage.totalCount ?? rowsScanned;
@@ -613,9 +655,6 @@ export const brapiFindVariables = tool('brapi_find_variables', {
       ],
     });
 
-    const appliedFilters = studyCoverage
-      ? { ...appliedFindFilters(route), studyDbId: effectiveStudies }
-      : appliedFindFilters(route);
     ctx.enrich({
       totalCount,
       returnedCount: results.length,
@@ -700,42 +739,14 @@ export const brapiFindVariables = tool('brapi_find_variables', {
   },
 });
 
-/**
- * Copy each row the resolver matched with its 1-based `textMatchRank`, the
- * position of its candidate in `matches`. A candidate maps back to its row by
- * observationVariableDbId — always present — or, for a row without one, by
- * PUI, which is sparse on real servers (CassavaBase leaves it unset); a key
- * repeated across rows hands out its ranks in row order. Runs over the full
- * fetched set, not the first page: a match routinely sits far past the inline
- * window ("dry matter content" is row ~700 of 750 in alphabetical order on
- * CassavaBase).
- */
-function rankRows(
-  rows: Record<string, unknown>[],
-  matches: readonly OntologyCandidate[],
-): Record<string, unknown>[] {
-  const byId = new Map<string, number[]>();
-  const byPui = new Map<string, number[]>();
-  for (const [index, match] of matches.entries()) {
-    const [ranks, key] = match.observationVariableDbId
-      ? [byId, match.observationVariableDbId]
-      : [byPui, match.termId];
-    if (!key) continue;
-    const queue = ranks.get(key);
-    if (queue) queue.push(index + 1);
-    else ranks.set(key, [index + 1]);
-  }
-  return rows.map((row) => {
-    const id = row.observationVariableDbId;
-    const pui = row.observationVariablePUI;
-    const rank =
-      typeof id === 'string' && id
-        ? byId.get(id)?.shift()
-        : typeof pui === 'string'
-          ? byPui.get(pui)?.shift()
-          : undefined;
-    return rank === undefined ? row : { ...row, textMatchRank: rank };
-  });
+function nonblank(value: unknown): string | undefined {
+  return typeof value === 'string' && /\S/.test(value) ? value : undefined;
+}
+
+function nestedString(value: unknown, key: string): string | undefined {
+  if (value && typeof value === 'object' && Object.hasOwn(value, key))
+    return nonblank((value as Record<string, unknown>)[key]);
+  return;
 }
 
 /** Ranked rows first in rank order, then unranked rows in upstream order. */

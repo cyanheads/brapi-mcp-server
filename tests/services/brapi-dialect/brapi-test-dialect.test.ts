@@ -175,6 +175,17 @@ describe('brapiTestDialect', () => {
   });
 
   describe('locations / variables', () => {
+    it('drops both variable study keys while preserving the variable ID filter', () => {
+      const result = brapiTestDialect.adaptGetFilters('variables', {
+        studyDbId: 'study1',
+        studyDbIds: ['study1', 'study2'],
+        observationVariableDbIds: ['variable1'],
+      });
+      expect(result.filters).toEqual({ observationVariableDbId: 'variable1' });
+      expect(result.dropped).toEqual(['studyDbId', 'studyDbIds']);
+      expect(result.warnings).toHaveLength(2);
+    });
+
     it('translates locations plurals', () => {
       const result = brapiTestDialect.adaptGetFilters('locations', {
         locationDbIds: ['location_01'],

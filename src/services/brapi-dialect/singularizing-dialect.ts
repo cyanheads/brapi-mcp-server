@@ -18,10 +18,11 @@ import type { BrapiDialect, DialectAdaptation } from './types.js';
  * empirically narrowed against a live server, `false` when it's inferred from
  * the v2.0/v2.1 naming pattern but hasn't been independently checked.
  *
- * The flag drives two things: the warning the dialect emits on downcast
+ * The flag drives the warning the dialect emits on downcast
  * (softer wording for inferred mappings, since the mapping might also be
- * wrong); and the verified-mapping summary on the orientation envelope so
+ * wrong) and the verified-mapping summary on the orientation envelope so
  * agents can see the dialect's confidence floor without inspecting source.
+ * Scoped counts can use it when the full filter was applied.
  */
 export interface DialectFilterMapping {
   target: string;
@@ -132,6 +133,8 @@ export function createSingularizingDialect(config: SingularizingDialectConfig): 
   return {
     id: config.id,
     adaptGetFilters,
+    isGetFilterMappingVerified: (endpoint, key) =>
+      normalizedMappings[endpoint]?.[key]?.verified === true,
     mappingSummary,
     ...(config.disabledSearchEndpoints !== undefined && {
       disabledSearchEndpoints: config.disabledSearchEndpoints,
