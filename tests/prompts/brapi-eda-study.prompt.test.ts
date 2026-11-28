@@ -29,6 +29,15 @@ describe('brapi_eda_study prompt', () => {
     expect(text).toContain('alias: "bti-cassava"');
   });
 
+  it('continues a study analysis when variable membership and coverage cannot be established', async () => {
+    const [message] = await brapiEdaStudy.generate({ studyDbId: 'study1' });
+    expect.assert(message?.content.type === 'text');
+    const { text } = message.content;
+    expect(text).toContain('all_filters_dropped');
+    expect(text).toContain('study membership is unverified');
+    expect(text).toContain('report coverage as unavailable');
+  });
+
   it('omits the alias arg when not provided', () => {
     const args = brapiEdaStudy.args.parse({ studyDbId: 's-1' });
     const text = (brapiEdaStudy.generate(args)[0]!.content as { text: string }).text;

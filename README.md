@@ -123,7 +123,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 - `studyDbId` required; resolves `program`, `trial`, and `location` inline through `GET /{noun}/{id}` when the server advertises it (a list filter by ID otherwise); a record the server doesn't return is omitted with a warning naming the noun and ID; `study_not_found` when the upstream has no such study
 - On SGN/Breedbase servers, missing program fields come from `additionalInfo`; when the study has no program ID, the fetched parent trial can supply it for program resolution.
-- Companion counts `observationCount`, `observationUnitCount`, `variableCount`; a count the server can't scope to the study is omitted with a warning, never reported as the server-wide total
+- Companion counts include `observationCount`, `observationUnitCount`, and `variableCount`. SGN observation counts use one study-scoped request. For mappings whose scope is unverified, the count check compares the scoped result with an unfiltered control. A warning explains counts omitted for unsupported or unconfirmed scopes.
 
 ---
 
@@ -159,9 +159,10 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 ### `brapi_find_variables` <sub>tool</sub>
 
 - Filters: `variables`, `variableNames`, `variablePUIs`, `traitClasses`, `ontologies`, `studies`, `methods`, `scales`, `crop`. Multiple distinct studies are unioned by variable ID with `studyDbIds` provenance under one shared page, row and time budget. `studyCoverage` reports complete, partial, failed and unprocessed studies; successful studies remain available when another fails.
-- `text` ranks every fetched row and moves matches to the top without dropping the rest; every match leads `results[]` in rank order and carries `textMatchRank` (in `results` and the staged dataframe), and `textMatchCount` counts the matches among fetched rows. `ontologyCandidates` lists the top 10 (ranks 1–10), each with `source` (`puiMatch`, `nameMatch`, `synonymMatch`, `traitClassMatch`)
+- The BrAPI Community Test Server ignores study scope on variables. A study-only request there returns `all_filters_dropped`. With another supported filter, the finder runs that filter and warns that study membership is unverified.
+- A warning counts skipped rows that lack a usable `observationVariableDbId`. Among the remaining rows, `text` puts matches first and preserves unmatched rows for context. Each matching row carries its own `textMatchRank` in the preview and dataframe, including when two rows share an ID. `textMatchCount` counts these rows. `ontologyCandidates` lists the top 10 with their match source.
 - Exact PUI matches lead, then exact normalized names. Equally scored name matches favor the shorter normalized name. Matching ignores a trailing pipe-delimited PUI when it matches the record's PUI. Returned names retain the original text.
-- `distributions` over `ontologyDbId`, `traitClass`, `scaleName`
+- `distributions` summarizes ontology IDs and names separately, including those published under SGN's `ontologyReference`. Trait classes, scale names, and scale data types each have their own counts. Warnings identify missing trait classes and scale names in a nonempty result.
 
 ---
 
@@ -219,6 +220,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 
 - Needs at least one of `variantSetDbId`, `variantSetDbIds`, `germplasmDbIds`, `callSetDbIds`, `variantDbIds` (`no_filters` otherwise); optional `callFormat` (`VCF`, `FLAPJACK`, `DARTSEQ`, `JSON`)
 - Variant sets are listed by `brapi_raw_get({ path: "/variantsets" })`, optionally with `params.studyDbId`; on Breedbase-family servers they belong to genotyping projects that `brapi_find_studies` does not list
+- `germplasmDbIds` resolves to call sets before the calls search. If you also supply `callSetDbIds`, only their intersection is eligible. A completed lookup with no shared call sets returns an empty result.
 - `distributions` over `callSetName`, `variantName`, `variantSetDbId`, plus the server's `callFormatting`; `search_endpoint_disabled` when the active dialect marks `POST /search/calls` as dead
 - The upstream pull stops at `BRAPI_GENOTYPE_CALLS_MAX_PULL` (default 100,000) and sets `truncated`. When the shared upstream deadline stops a pull after the first page, collected calls remain available, `hasMore` is set, and `warnings` explains the stop. `loadLimit` and the 24,000-byte inline budget bound the preview, with `shown` / `cap` reporting the cut and every collected call staged.
 - Scalar upstream `genotype.values` become single-element arrays in finder results and staged calls. They retain their values; a bare numeric scalar alone does not establish an allele call
@@ -286,6 +288,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - VCF POS and PLINK base-pair positions are one-based: valid zero-based BrAPI `start` values 0 and 500 export as 1 and 501. Missing or invalid positions retain `.` (VCF) / `0` (PLINK) placeholders.
 - PLINK allele indices use available REF/ALT labels, or positive numeric labels when metadata cannot resolve the marker. Missing calls use `0 0`. Ambiguous numeric scalar calls remain verbatim in the raw dataframe but export as missing in VCF-lite and PLINK, with a warning; dosage is not inferred into an allele genotype
 - An empty call search returns a queryable zero-row dataframe with its `callSetDbId`, `callSetName`, and `germplasmDbId` columns and no-match guidance
+- A germplasm-filtered export requires the upstream to establish call-set membership. If it cannot, the tool reports the lookup failure before fetching calls.
 - `maxCalls` / `maxColumns` can lower the configured `BRAPI_GENOTYPE_CALLS_MAX_PULL` / `BRAPI_GENOTYPE_MATRIX_MAX_COLUMNS` ceilings. `truncated` means a ceiling or the shared upstream deadline ended the pull early, and `warnings` names the cause.
 
 ---
@@ -295,6 +298,7 @@ Identifier filters also accept their BrAPI `*DbId` / `*DbIds` spellings where eq
 - `studyDbId` plus 1–5,000 `observations`; a row with `observationDbId` updates via `PUT`, one without creates via `POST`, and nothing is deleted
 - `mode: "preview"` (default) returns `valid`, `invalid`, `routing` counts, and `perRowWarnings` without writing; `mode: "apply"` asks the caller to confirm (`force: true` skips it) and writes only on the round that redeems the server's record of that prompt, for the same caller, server, study, and rows — a pre-supplied or replayed answer is asked again — and returns `posted`, `updated`, and `studyObservationCount` (omitted with a warning when the server can't scope `/observations` to the study); failures are `observations_unsupported`, `study_not_found`, `post_unsupported`, `put_unsupported`, and `user_declined`
 - Review `perRowWarnings` for values that conflict with a declared scale and units, or for variables, units, or update targets outside the study. `flagged` counts each warned row once and appears in the apply confirmation. Review scan-level warnings for incomplete checks. Advisory findings leave the existing validity and write routing intact.
+- On the BrAPI Community Test Server, the review reports variable membership as unverified and continues the independent unit and observation checks.
 - Registered only when `BRAPI_ENABLE_WRITES=true`; requires the `brapi:write:observations` scope
 
 ---

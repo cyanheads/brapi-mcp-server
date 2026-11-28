@@ -2,7 +2,7 @@
 
 **Server:** brapi-mcp-server
 **Version:** 0.12.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.24`
 **Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0 (protocol revisions 2026-07-28 and 2025-*)
 **Zod:** ^4.6.7
@@ -181,7 +181,7 @@ export function getServerConfig() {
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so validation errors name the actual variable (`BRAPI_LOAD_LIMIT`) rather than the internal path (`loadLimit`). It throws a `ConfigurationError` the framework catches and prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so validation errors name the actual variable (`BRAPI_LOAD_LIMIT`) rather than the internal path (`loadLimit`). It loads the working directory’s `.env` before reading environment variables on Node. A `ConfigurationError` thrown in `setup()` gets the framework’s startup banner. An import-time call exits with the raw error stack.
 
 **Per-alias credentials** live in `src/config/alias-credentials.ts`. `readAliasCredentials(alias)` reads `BRAPI_<ALIAS>_*` (uppercased, hyphens → underscores), `deriveAuthFromCredentials(creds)` derives the auth mode from which fields are set (USERNAME+PASSWORD → `sgn`; BEARER_TOKEN → `bearer`; API_KEY → `api_key`; OAUTH_CLIENT_ID+SECRET → `oauth2`; mixing families raises `ValidationError`), and `resolveConnectInput(alias, agentInput)` layers agent input → alias env → default env → no-auth fallback. Env credentials only travel to the URL configured alongside them: an alias's credentials pair with its own `BRAPI_<ALIAS>_BASE_URL`, else its enabled built-in URL, and a caller `baseUrl` that differs is refused (`auth_base_url_mismatch`); credentials with neither pair with nothing and the connect is refused (`alias_base_url_unset`, `ConfigurationError`), never falling back to `BRAPI_DEFAULT_BASE_URL`. `BRAPI_DEFAULT_*` credentials attach only when the resolved URL is `BRAPI_DEFAULT_BASE_URL`. `discoverConfiguredAliases` reports each alias's `authMode` by running the same resolver.
 
@@ -220,7 +220,7 @@ The first five distinct image IDs and first twenty distinct pedigree roots are p
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Every error envelope also carries `data.requestId`, the id the server's log records for that call carry, and `content[]` closes with `(reason … · request <id>)`. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata. A direct `definition.handler(...)` call in a test sees the throw site's error with no fill; assert hints through `runToolContract` (tools) or the resource factory (`tests/resources/_resource-factory.ts`). Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring. Live across the BrAPI surface today: every tool except `brapi_dataframe_drop`, plus all six `brapi://` resources.
+**Default for new tools: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)` keyed by the declared reason union. TypeScript catches `ctx.fail('typo')` at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. A declared `retryable` is filled as `data.retryable` when the throw sets none of its own. The `content[]` trailer also reports whether the error is retryable. Every error envelope also carries `data.requestId`, the id the server's log records for that call carry, and `content[]` closes with `(reason … · request <id>)`. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata. A direct `definition.handler(...)` call in a test sees the throw site's error with no fill; assert hints through `runToolContract` (tools) or the resource factory (`tests/resources/_resource-factory.ts`). Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring. Live across the BrAPI surface today: every tool except `brapi_dataframe_drop`, plus all six `brapi://` resources.
 
 ```ts
 errors: [
@@ -315,6 +315,7 @@ src/
         observations.ts                   # Study-anchored observation pull shared by phenotype-matrix and germplasm-performance
         observation-review.ts             # Advisory scale and study membership checks for observation submission
         genotype-calls.ts                 # Async genotype-call collector shared by find-genotype-calls and export-genotype-matrix
+        genotype-germplasm-scope.ts       # Resolve germplasm to verified call-set IDs before a genotype search
         genotype-matrix.ts                # Call set × variant pivot for export-genotype-matrix — identity columns, variantDbIds filter, pull-end notes
         genotype-text-formats.ts          # VCF-lite and PLINK (.ped / .map) encoders for export-genotype-matrix
         variant-metadata.ts               # /variants coordinate and allele pull behind the VCF-lite / PLINK text

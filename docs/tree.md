@@ -1,6 +1,6 @@
 # brapi-mcp-server - Directory Structure
 
-Generated on: 2026-11-21 18:57:16
+Generated on: 2026-11-28 00:47:04
 
 ```text
 brapi-mcp-server/
@@ -203,6 +203,7 @@ brapi-mcp-server/
 │   │           ├── connect-auth-schema.ts
 │   │           ├── find-helpers.ts
 │   │           ├── genotype-calls.ts
+│   │           ├── genotype-germplasm-scope.ts
 │   │           ├── genotype-matrix.ts
 │   │           ├── genotype-text-formats.ts
 │   │           ├── inline-preview.ts
@@ -338,6 +339,7 @@ brapi-mcp-server/
 │   │   ├── brapi-submit-observations.tool.test.ts
 │   │   ├── brapi-walk-pedigree.tool.test.ts
 │   │   ├── client-error-contracts.test.ts
+│   │   ├── genotype-germplasm-scope.test.ts
 │   │   ├── input-aliases.test.ts
 │   │   ├── observation-coverage.test.ts
 │   │   └── security.test.ts

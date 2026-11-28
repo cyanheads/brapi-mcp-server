@@ -4,7 +4,7 @@ description: Use brapi_* tools to compare plant-breeding phenotypes across studi
 license: Apache-2.0
 metadata:
   author: "cyanheads"
-  version: "1.1"
+  version: "1.2"
 ---
 
 ## Scope
@@ -43,6 +43,8 @@ Use `brapi_build_phenotype_matrix` with long form and `aggregate: "all"` to pres
 
 Use `studies`, `trials`, or `programs` to scope `brapi_find_germplasm`. Check the warnings before treating results as verified membership. If a scalar-only route expands filters into several requests, skipped combinations mean coverage is partial. For variable text matches, use the matches ranked by `textMatchRank` to find likely IDs, then read their scales and methods before choosing one. `ontologyCandidates` holds only the top 10 of `textMatchCount`; when more match, read every method variant from the ranked `results[]` rows or the staged dataframe (`WHERE textMatchRank IS NOT NULL ORDER BY textMatchRank`).
 
+On the BrAPI Community Test Server, the variable catalog ignores study filters. Read `study.observationVariableDbIds` from `brapi_get_study` when the study publishes it, then pass the listed IDs as `variables` to `brapi_find_variables`. To check whether a variable was measured, look for an observation carrying both the variable ID and the study ID.
+
 ### Continue image and pedigree reads
 
 Pass `deferredImageDbIds` from `brapi_get_image` or `deferredRoots` from `brapi_walk_pedigree` into a follow-up call. Pedigree `maxDepth` reports the effective depth. Read `frontier` separately for unresolved expansions among the roots the call processed.
@@ -54,6 +56,8 @@ Use `brapi_federated_find` with `aliases` and `query: { entity, filters }` for s
 ### Inspect calls or export a variant set
 
 Scope `brapi_find_genotype_calls` to the relevant variant set or other known IDs when inspecting calls. Use `brapi_export_genotype_matrix` when you need the wide pivot or VCF-lite or PLINK text. Check whether the pull stopped early and whether the matrix reached its separate column limit. Use `variantColumnLegend` to map matrix columns back to variant IDs. Rows are call sets, not germplasm: join phenotypes on `germplasmDbId`, where a germplasm with several call sets joins once per call set and null means the germplasm was unresolved. When the variant-column cap trims the matrix, pass the variants missing from `variantColumnLegend` as `variantDbIds` in further calls; `variantDbIds` also scopes an export to a region or batch.
+
+For calls from particular germplasm, pass the germplasm IDs to the finder or export. A completed lookup can establish that there are no matching call sets. A failed lookup leaves membership unknown. If you have independently verified call-set IDs, use those in the finder to continue.
 
 A bare numeric value can be dosage or a single allele index. When text export marks such a call missing, recover the original value from the staged matrix and leave the allele interpretation unresolved. Check coordinate and allele metadata before using the exported text for downstream analysis.
 
