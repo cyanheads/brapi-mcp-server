@@ -342,6 +342,34 @@ it('recovers through an independently consistent sample route after a direct ide
   ).toContain(true);
 });
 
+it('falls back to sample evidence when direct germplasm identity is blank', async () => {
+  const { ctx, fetcher } = await setup([searchCalls, ...scopeRoutes]);
+  fetcher.mockImplementation(
+    async (url: string, _timeout: number, _ctx: unknown, init: RequestInit) => {
+      if (String(url).endsWith('/search/calls'))
+        return jsonResponse(envelope({ data: [call('cs-1')] }));
+      if (String(url).endsWith('/search/samples'))
+        return jsonResponse(envelope({ data: [{ sampleDbId: 's-1', germplasmDbId: 'g-1' }] }));
+      const body = JSON.parse(String(init.body));
+      return jsonResponse(
+        envelope({
+          data: [
+            {
+              callSetDbId: 'cs-1',
+              sampleDbId: 's-1',
+              germplasmDbId: body.germplasmDbIds ? ' ' : null,
+            },
+          ],
+        }),
+      );
+    },
+  );
+  const result = await run(ctx, 'find', { germplasmDbIds: ['g-1'] });
+  expect(result.structuredContent).toMatchObject({ results: [{ callSetDbId: 'cs-1' }] });
+  expect(result.text).toContain('cs-1');
+  expect(fetcher).toHaveBeenCalledTimes(4);
+});
+
 it('completes a walk when a later page supplies a previously absent total', async () => {
   const { ctx, fetcher } = await setup([searchCalls, scopeRoutes[0]!]);
   fetcher.mockImplementation(

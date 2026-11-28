@@ -11,7 +11,7 @@ import type { BrapiDialect } from '@/services/brapi-dialect/index.js';
 import { supportsMethod } from '@/services/capability-registry/supports-method.js';
 import type { CallDescriptor } from '@/services/capability-registry/types.js';
 import type { RegisteredServer } from '@/services/server-registry/types.js';
-import { asString, buildRequestOptions, extractListRows } from './find-helpers.js';
+import { buildRequestOptions, extractListRows, NonBlankString } from './find-helpers.js';
 
 /** Error exposed by both genotype tools when a requested scope cannot be established. */
 export const GERMPLASM_SCOPE_UNAVAILABLE = {
@@ -154,7 +154,7 @@ export async function resolveGenotypeGermplasmScope(
       knownPages = totalPages ?? knownPages;
       for (const row of rows) {
         const normalized = dialect.normalizeRow?.(entity, row) ?? row;
-        const id = asString(normalized[idKey]);
+        const id = NonBlankString.safeParse(normalized[idKey]).data;
         if (!id) throw new IncompleteLookup(`${route} returned a row with no ${idKey}`);
         if (seen.has(id)) throw new IncompleteLookup(`${route} repeated a ${idKey} while paging`);
         seen.add(id);
@@ -198,8 +198,8 @@ export async function resolveGenotypeGermplasmScope(
   ) {
     for await (const { id, row } of rows) {
       if (explicit.size && !explicit.has(id)) continue;
-      const sampleId = asString(row.sampleDbId);
-      const direct = asString(row.germplasmDbId);
+      const sampleId = NonBlankString.safeParse(row.sampleDbId).data;
+      const direct = NonBlankString.safeParse(row.germplasmDbId).data;
       const throughSample = sampleId ? sampleGermplasm?.get(sampleId) : undefined;
       if (throughSample && direct && direct !== throughSample) {
         throw new IncompleteLookup('a call set disagrees with its sample on germplasm identity');
@@ -256,7 +256,7 @@ export async function resolveGenotypeGermplasmScope(
         : [...wanted].map((germplasmDbId) => ({ germplasmDbId }));
     for (const filters of filtersForMethod) {
       for await (const { id, row } of readPages('samples', method, filters, callEndsAt)) {
-        const germplasm = asString(row.germplasmDbId);
+        const germplasm = NonBlankString.safeParse(row.germplasmDbId).data;
         if (!germplasm)
           throw new IncompleteLookup('a sample lacks verifiable germplasm membership');
         recordMembership(sampleGermplasm, 'sampleDbId', id, germplasm);
